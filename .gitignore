@@ -1,0 +1,43 @@
+# deps / build
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+dist/
+build/
+.next/
+.nuxt/
+out/
+
+# caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.turbo/
+.cache/
+
+# env
+.env
+.env.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# build artifacts
+*.log
+coverage/
+*.tsbuildinfo
+
+# local data
+*.sqlite
+*.sqlite3
+*.db
