@@ -1,4 +1,6 @@
 qt_add_executable(cutpilot-app
+    CompositeInspector.cpp
+    CompositeInspector.h
     main.cpp)
 
 set_target_properties(cutpilot-app PROPERTIES

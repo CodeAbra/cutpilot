@@ -1,3 +1,5 @@
+#include "CompositeInspector.h"
+
 #include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/NodeGraph.h"
 #include "cutpilot/ipc/GenerationClient.h"
@@ -14,9 +16,6 @@
 
 #include <QApplication>
 #include <QButtonGroup>
-#include <QCheckBox>
-#include <QColorDialog>
-#include <QComboBox>
 #include <QCursor>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -47,6 +46,7 @@
 #include <memory>
 #include <vector>
 
+using cutpilot::app::CompositeInspector;
 using cutpilot::ipc::GenerationClient;
 using cutpilot::ipc::GenerationCoordinator;
 using cutpilot::ipc::SidecarHost;
@@ -693,248 +693,6 @@ private:
     QSlider *m_scrub = nullptr;
     QLabel *m_time = nullptr;
     int m_nodeId = -1;
-};
-
-// The parameter inspector for a compositing node, floated over the canvas's
-// right edge. Sliders write parameters live — the preview follows in real
-// time — and each finished gesture lands as one undoable step; discrete
-// controls (mode, invert, color) commit immediately.
-class CompositeInspector : public QWidget {
-public:
-    CompositeInspector(const ThemeTable &theme, NodeLayerItem *layer,
-                       PreviewController *previews, QWidget *parent)
-        : QWidget(parent)
-        , m_layer(layer)
-        , m_previews(previews)
-    {
-        const QColor surface = theme.bgCanvas().lighter(125);
-        setStyleSheet(QStringLiteral(
-                          "QWidget { color: %1; }"
-                          "QLabel { color: %1; background: transparent; "
-                          "border: none; }"
-                          "QPushButton, QComboBox {"
-                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
-                          "  border: 1px solid %5; border-radius: 4px;"
-                          "  padding: 2px 8px;"
-                          "}"
-                          "QCheckBox { color: %1; background: transparent; }"
-                          "QSlider { background: transparent; }")
-                          .arg(theme.textPrimary().name())
-                          .arg(surface.red())
-                          .arg(surface.green())
-                          .arg(surface.blue())
-                          .arg(theme.borderSubtle().name()));
-
-        auto *column = new QVBoxLayout(this);
-        column->setContentsMargins(8, 8, 8, 8);
-        column->setSpacing(6);
-
-        auto *header = new QHBoxLayout;
-        m_title = new QLabel(this);
-        auto *close = new QPushButton(QStringLiteral("✕"), this);
-        close->setFixedWidth(26);
-        header->addWidget(m_title, 1);
-        header->addWidget(close);
-        column->addLayout(header);
-
-        m_controls = new QWidget(this);
-        new QVBoxLayout(m_controls);
-        m_controls->layout()->setContentsMargins(0, 0, 0, 0);
-        column->addWidget(m_controls);
-
-        connect(close, &QPushButton::clicked, this, &QWidget::hide);
-        connect(layer, &NodeLayerItem::graphMutated, this, [this] {
-            // The edited node can vanish through delete or undo.
-            if (isVisible() && m_nodeId != -1
-                && !m_layer->graph().nodeById(m_nodeId))
-                hide();
-        });
-
-        if (parent)
-            parent->installEventFilter(this);
-        setFixedWidth(280);
-        hide();
-    }
-
-    void openFor(int nodeId)
-    {
-        const core::Node *node = m_layer->graph().nodeById(nodeId);
-        if (!node || !core::isCompositeKind(node->kind))
-            return;
-        m_nodeId = nodeId;
-        m_before = node->comp;
-        m_current = node->comp;
-        m_title->setText(node->title);
-        rebuildControls(node->kind);
-        show();
-        raise();
-        reanchor();
-    }
-
-protected:
-    bool eventFilter(QObject *watched, QEvent *event) override
-    {
-        if (watched == parentWidget() && event->type() == QEvent::Resize)
-            reanchor();
-        return QWidget::eventFilter(watched, event);
-    }
-
-private:
-    void reanchor()
-    {
-        if (!parentWidget())
-            return;
-        const int margin = 12;
-        move(parentWidget()->width() - width() - margin,
-             qMax(margin, parentWidget()->height() / 2 - height() / 2));
-        raise();
-    }
-
-    // Live feedback: write the values and let the preview re-render its
-    // affected passes; nothing lands on the undo stack yet.
-    void preview()
-    {
-        m_layer->previewCompositeParams(m_nodeId, m_current);
-        m_previews->refresh();
-    }
-
-    // One finished gesture becomes one undo step.
-    void commit()
-    {
-        m_layer->commitCompositeParams(m_nodeId, m_before, m_current);
-        m_before = m_current;
-    }
-
-    QSlider *addSlider(const QString &label, int min, int max, int value,
-                       const std::function<void(int)> &apply)
-    {
-        auto *box = static_cast<QVBoxLayout *>(m_controls->layout());
-        auto *row = new QHBoxLayout;
-        auto *caption = new QLabel(label, m_controls);
-        caption->setFixedWidth(70);
-        auto *slider = new QSlider(Qt::Horizontal, m_controls);
-        slider->setRange(min, max);
-        slider->setValue(value);
-        row->addWidget(caption);
-        row->addWidget(slider, 1);
-        box->addLayout(row);
-        connect(slider, &QSlider::valueChanged, this, [this, apply](int v) {
-            apply(v);
-            preview();
-        });
-        connect(slider, &QSlider::sliderReleased, this, [this] { commit(); });
-        return slider;
-    }
-
-    void rebuildControls(core::NodeKind kind)
-    {
-        // Rebuild the control set for the node being edited.
-        qDeleteAll(m_controls->findChildren<QWidget *>(
-            Qt::FindDirectChildrenOnly));
-        QLayout *box = m_controls->layout();
-        while (QLayoutItem *item = box->takeAt(0)) {
-            if (QLayout *nested = item->layout()) {
-                while (QLayoutItem *inner = nested->takeAt(0))
-                    delete inner;
-            }
-            delete item;
-        }
-
-        switch (kind) {
-        case core::NodeKind::Blend: {
-            auto *modes = new QComboBox(m_controls);
-            for (int i = 0; i < core::blendModeCount(); ++i)
-                modes->addItem(core::blendModeLabel(core::BlendMode(i)));
-            modes->setCurrentIndex(int(m_current.blendMode));
-            box->addWidget(modes);
-            connect(modes, &QComboBox::currentIndexChanged, this, [this](int i) {
-                m_current.blendMode = core::BlendMode(i);
-                preview();
-                commit();
-            });
-            addSlider(QStringLiteral("Opacity"), 0, 100,
-                      qRound(m_current.opacity * 100.0), [this](int v) {
-                          m_current.opacity = v / 100.0;
-                      });
-            break;
-        }
-        case core::NodeKind::Mask: {
-            auto *invert = new QCheckBox(QStringLiteral("Invert mask"),
-                                         m_controls);
-            invert->setChecked(m_current.invertMask);
-            box->addWidget(invert);
-            connect(invert, &QCheckBox::toggled, this, [this](bool on) {
-                m_current.invertMask = on;
-                preview();
-                commit();
-            });
-            break;
-        }
-        case core::NodeKind::Key: {
-            auto *modes = new QComboBox(m_controls);
-            modes->addItem(QStringLiteral("Chroma"));
-            modes->addItem(QStringLiteral("Luma"));
-            modes->setCurrentIndex(m_current.lumaKey ? 1 : 0);
-            box->addWidget(modes);
-            connect(modes, &QComboBox::currentIndexChanged, this, [this](int i) {
-                m_current.lumaKey = i == 1;
-                preview();
-                commit();
-            });
-            auto *color = new QPushButton(QStringLiteral("Key color…"),
-                                          m_controls);
-            box->addWidget(color);
-            connect(color, &QPushButton::clicked, this, [this] {
-                const QColor picked = QColorDialog::getColor(
-                    m_current.keyColor, this, QStringLiteral("Key color"));
-                if (!picked.isValid())
-                    return;
-                m_current.keyColor = picked;
-                preview();
-                commit();
-            });
-            addSlider(QStringLiteral("Tolerance"), 0, 100,
-                      qRound(m_current.keyTolerance * 100.0), [this](int v) {
-                          m_current.keyTolerance = v / 100.0;
-                      });
-            addSlider(QStringLiteral("Softness"), 0, 100,
-                      qRound(m_current.keySoftness * 100.0), [this](int v) {
-                          m_current.keySoftness = v / 100.0;
-                      });
-            break;
-        }
-        case core::NodeKind::Transform: {
-            addSlider(QStringLiteral("X"), -100, 100,
-                      qRound(m_current.translateX * 100.0), [this](int v) {
-                          m_current.translateX = v / 100.0;
-                      });
-            addSlider(QStringLiteral("Y"), -100, 100,
-                      qRound(m_current.translateY * 100.0), [this](int v) {
-                          m_current.translateY = v / 100.0;
-                      });
-            addSlider(QStringLiteral("Scale"), 10, 400,
-                      qRound(m_current.scale * 100.0), [this](int v) {
-                          m_current.scale = v / 100.0;
-                      });
-            addSlider(QStringLiteral("Rotation"), -180, 180,
-                      qRound(m_current.rotationDeg), [this](int v) {
-                          m_current.rotationDeg = double(v);
-                      });
-            break;
-        }
-        default:
-            break;
-        }
-        adjustSize();
-    }
-
-    NodeLayerItem *m_layer = nullptr;
-    PreviewController *m_previews = nullptr;
-    QLabel *m_title = nullptr;
-    QWidget *m_controls = nullptr;
-    int m_nodeId = -1;
-    core::CompositeParams m_before;
-    core::CompositeParams m_current;
 };
 
 // The chrome surfaces the canvas asks for: the registry-driven model picker,
