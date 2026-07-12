@@ -98,11 +98,15 @@ class GenerationHandler(BaseHTTPRequestHandler):
             return
         match = _JOB_PATH.match(self.path)
         if match and match.group(2) == "cancel":
+            # The body is unused but must be drained: leaving it unread would
+            # corrupt the next request on this kept-alive connection.
+            self._read_body()
             if self.manager.cancel(match.group(1)):
                 self._send_json(200, {"ok": True})
             else:
                 self._send_json(404, {"error": "not_found"})
             return
+        self._read_body()
         self._send_json(404, {"error": "not_found"})
 
     def _read_body(self) -> dict | None:
