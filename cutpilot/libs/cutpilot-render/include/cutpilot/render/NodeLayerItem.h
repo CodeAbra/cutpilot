@@ -46,6 +46,10 @@ public:
     // Seed the starting board with a single content-first prompt node.
     Q_INVOKABLE void seedStarterNode();
 
+    // Scatter a board of content-first nodes wide enough that any viewport holds only a
+    // fraction, for the frame-budget check at scale. The count is capped.
+    Q_INVOKABLE void seedStressBoard(int count);
+
     // Create a default content-first node centred on a world point and add it through
     // an undoable command. The reusable creation seam a double-click, and later a
     // palette or tool pill, calls.

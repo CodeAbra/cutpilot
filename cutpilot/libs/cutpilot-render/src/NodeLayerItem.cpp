@@ -131,6 +131,34 @@ void NodeLayerItem::seedStarterNode()
     update();
 }
 
+void NodeLayerItem::seedStressBoard(int count)
+{
+    constexpr int kMaxStressNodes = 5000;
+    const int total = qBound(0, count, kMaxStressNodes);
+    if (total == 0)
+        return;
+
+    // A wide grid: spacing well beyond a node's size so any viewport holds only a
+    // fraction of the board.
+    const int columns = qMax(1, qCeil(qSqrt(qreal(total))));
+    constexpr qreal spacingX = 520.0;
+    constexpr qreal spacingY = 420.0;
+    const QPointF centreOffset(140.0, 100.0);
+
+    for (int i = 0; i < total; ++i) {
+        const int column = i % columns;
+        const int row = i / columns;
+        const QPointF topLeft(column * spacingX, row * spacingY);
+        core::Node node = defaultNode(topLeft + centreOffset);
+        node.title = QStringLiteral("Node %1").arg(i + 1);
+        m_graph.addNode(node);
+    }
+
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+}
+
 void NodeLayerItem::addNodeAtCursor(const QPointF &worldPoint)
 {
     m_commands.push(std::make_unique<core::AddNodeCommand>(defaultNode(worldPoint)),

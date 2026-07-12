@@ -82,8 +82,17 @@ public:
         QQuickItem *root = m_quick->rootObject();
         if (root) {
             m_controller = root->findChild<CanvasController *>();
-            if (auto *layer = root->findChild<NodeLayerItem *>())
-                layer->seedStarterNode();
+            if (auto *layer = root->findChild<NodeLayerItem *>()) {
+                // Setting CUTPILOT_STRESS_NODES to a positive count seeds a wide stress
+                // board for the frame-budget check; otherwise the single starter node.
+                bool ok = false;
+                const int stressCount =
+                    qEnvironmentVariableIntValue("CUTPILOT_STRESS_NODES", &ok);
+                if (ok && stressCount > 0)
+                    layer->seedStressBoard(stressCount);
+                else
+                    layer->seedStarterNode();
+            }
         }
 
         m_readout = new ZoomReadout(m_theme, this);
