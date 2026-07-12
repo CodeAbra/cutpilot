@@ -5,6 +5,11 @@ it as a PNG using only the standard library. The same inputs always produce
 byte-identical output, which makes the offline generation path reproducible
 and testable. Rendering proceeds in horizontal bands so a long render can
 report progress and honour cancellation between bands.
+
+The module also decodes PNG inputs (8-bit RGB/RGBA, non-interlaced) and
+derives new images from them — a nearest-neighbour upscale and a blend of the
+procedural layer over the input — so image-consuming models run offline with
+the same determinism as plain generation.
 """
 
 from __future__ import annotations
@@ -137,3 +142,148 @@ def render_png(
     data = encode_png(rows, width, height)
     with open(path, "wb") as handle:
         handle.write(data)
+
+
+def _paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+
+def decode_png(data: bytes) -> tuple[int, int, list[bytes]]:
+    """Decode an 8-bit RGB or RGBA non-interlaced PNG into plain RGB rows
+    (no filter prefix). Raises ValueError for anything else."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Input is not a PNG image")
+
+    width = height = 0
+    channels = 0
+    idat = bytearray()
+    offset = 8
+    while offset + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[offset : offset + 4])
+        kind = data[offset + 4 : offset + 8]
+        payload = data[offset + 8 : offset + 8 + length]
+        offset += 12 + length
+        if kind == b"IHDR":
+            if len(payload) != 13:
+                raise ValueError("Corrupt PNG header")
+            width, height, depth, color, _, _, interlace = struct.unpack(
+                ">IIBBBBB", payload
+            )
+            if depth != 8 or color not in (2, 6) or interlace != 0:
+                raise ValueError(
+                    "Unsupported PNG: only 8-bit RGB/RGBA non-interlaced "
+                    "images can be used as inputs"
+                )
+            channels = 3 if color == 2 else 4
+        elif kind == b"IDAT":
+            idat += payload
+        elif kind == b"IEND":
+            break
+    if width <= 0 or height <= 0 or channels == 0 or not idat:
+        raise ValueError("Corrupt PNG image")
+
+    try:
+        raw = zlib.decompress(bytes(idat))
+    except zlib.error as exc:
+        raise ValueError("Corrupt PNG image data") from exc
+
+    stride = width * channels
+    if len(raw) != (stride + 1) * height:
+        raise ValueError("Corrupt PNG image data")
+
+    rows: list[bytes] = []
+    previous = bytearray(stride)
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_type = raw[start]
+        line = bytearray(raw[start + 1 : start + 1 + stride])
+        if filter_type == 1:  # Sub
+            for i in range(channels, stride):
+                line[i] = (line[i] + line[i - channels]) & 0xFF
+        elif filter_type == 2:  # Up
+            for i in range(stride):
+                line[i] = (line[i] + previous[i]) & 0xFF
+        elif filter_type == 3:  # Average
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + previous[i]) >> 1)) & 0xFF
+        elif filter_type == 4:  # Paeth
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                above_left = previous[i - channels] if i >= channels else 0
+                line[i] = (line[i] + _paeth(left, previous[i], above_left)) & 0xFF
+        elif filter_type != 0:
+            raise ValueError("Corrupt PNG image data")
+        previous = line
+        if channels == 4:
+            rgb = bytearray(width * 3)
+            for x in range(width):
+                rgb[x * 3 : x * 3 + 3] = line[x * 4 : x * 4 + 3]
+            rows.append(bytes(rgb))
+        else:
+            rows.append(bytes(line))
+    return width, height, rows
+
+
+def upscale_rows(
+    rows: list[bytes],
+    width: int,
+    height: int,
+    factor: int = 2,
+    on_progress: Callable[[float], None] | None = None,
+    is_canceled: Callable[[], bool] | None = None,
+) -> list[bytes]:
+    """Nearest-neighbour upscale of plain RGB rows into filter-prefixed
+    scanlines ready for encode_png."""
+    out: list[bytes] = []
+    for y in range(height):
+        if is_canceled and y % BAND_ROWS == 0 and is_canceled():
+            raise RenderCanceled()
+        source = rows[y]
+        line = bytearray(1 + width * factor * 3)
+        offset = 1
+        for x in range(width):
+            pixel = source[x * 3 : x * 3 + 3]
+            for _ in range(factor):
+                line[offset : offset + 3] = pixel
+                offset += 3
+        scanline = bytes(line)
+        out.extend([scanline] * factor)
+        if on_progress and y % BAND_ROWS == BAND_ROWS - 1:
+            on_progress((y + 1) / height)
+    return out
+
+
+def blend_rows(
+    rows: list[bytes],
+    width: int,
+    height: int,
+    prompt: str,
+    seed: int,
+    mix: float = 0.45,
+    on_progress: Callable[[float], None] | None = None,
+    is_canceled: Callable[[], bool] | None = None,
+) -> list[bytes]:
+    """Blend the prompt-seeded procedural layer over plain RGB rows, returning
+    filter-prefixed scanlines ready for encode_png."""
+    layer = render_rows(prompt, seed, width, height)
+    keep = 1.0 - mix
+    out: list[bytes] = []
+    for y in range(height):
+        if is_canceled and y % BAND_ROWS == 0 and is_canceled():
+            raise RenderCanceled()
+        source = rows[y]
+        overlay = layer[y]
+        line = bytearray(1 + width * 3)
+        for i in range(width * 3):
+            line[1 + i] = int(source[i] * keep + overlay[1 + i] * mix)
+        out.append(bytes(line))
+        if on_progress and y % BAND_ROWS == BAND_ROWS - 1:
+            on_progress((y + 1) / height)
+    return out

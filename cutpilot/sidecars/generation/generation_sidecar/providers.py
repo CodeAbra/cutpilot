@@ -16,7 +16,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from . import keys
-from .procedural import RenderCanceled, render_png
+from .procedural import (
+    RenderCanceled,
+    blend_rows,
+    decode_png,
+    encode_png,
+    render_png,
+    upscale_rows,
+)
 from .registry import ModelInfo
 
 # Pacing between procedural render bands: keeps a cancellation window open and
@@ -45,6 +52,7 @@ class GenerationRequest:
     height: int
     seed: int
     out_path: str
+    input_path: str = ""
 
 
 @dataclass
@@ -160,14 +168,112 @@ class OpenAiImagesProvider:
         )
 
 
+def _decode_input(request: GenerationRequest) -> tuple[int, int, list[bytes]]:
+    try:
+        with open(request.input_path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        raise RuntimeError(f"Input image could not be read: {exc}") from exc
+    try:
+        return decode_png(data)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+class ProceduralUpscaleProvider:
+    """Deterministic offline 2x upscale of the input image."""
+
+    FACTOR = 2
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        on_progress: ProgressFn,
+        is_canceled: CanceledFn,
+    ) -> GenerationResult:
+        width, height, rows = _decode_input(request)
+
+        def paced_progress(fraction: float) -> None:
+            on_progress(fraction)
+            time.sleep(PROCEDURAL_BAND_PAUSE_S)
+
+        try:
+            scanlines = upscale_rows(
+                rows,
+                width,
+                height,
+                factor=self.FACTOR,
+                on_progress=paced_progress,
+                is_canceled=is_canceled,
+            )
+        except RenderCanceled as exc:
+            raise JobCanceled() from exc
+
+        out_width, out_height = width * self.FACTOR, height * self.FACTOR
+        with open(request.out_path, "wb") as handle:
+            handle.write(encode_png(scanlines, out_width, out_height))
+        return GenerationResult(
+            path=request.out_path,
+            cost_usd=request.model.price_usd,
+            width=out_width,
+            height=out_height,
+        )
+
+
+class ProceduralEditProvider:
+    """Deterministic offline edit: the prompt-seeded procedural layer blended
+    over the input image at its own size."""
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        on_progress: ProgressFn,
+        is_canceled: CanceledFn,
+    ) -> GenerationResult:
+        width, height, rows = _decode_input(request)
+
+        def paced_progress(fraction: float) -> None:
+            on_progress(fraction)
+            time.sleep(PROCEDURAL_BAND_PAUSE_S)
+
+        try:
+            scanlines = blend_rows(
+                rows,
+                width,
+                height,
+                request.prompt,
+                request.seed,
+                on_progress=paced_progress,
+                is_canceled=is_canceled,
+            )
+        except RenderCanceled as exc:
+            raise JobCanceled() from exc
+
+        with open(request.out_path, "wb") as handle:
+            handle.write(encode_png(scanlines, width, height))
+        return GenerationResult(
+            path=request.out_path,
+            cost_usd=request.model.price_usd,
+            width=width,
+            height=height,
+        )
+
+
+# Model-specific adapters win over the provider family, so several local
+# models can share the keyless "local" provider while running different code.
+_MODEL_PROVIDERS = {
+    "local/procedural-v1": ProceduralProvider(),
+    "local/procedural-upscale-v1": ProceduralUpscaleProvider(),
+    "local/procedural-edit-v1": ProceduralEditProvider(),
+}
+
 _PROVIDERS = {
-    "local": ProceduralProvider(),
     "openai": OpenAiImagesProvider(),
 }
 
 
 def provider_for(model: ModelInfo):
-    provider = _PROVIDERS.get(model.provider)
+    provider = _MODEL_PROVIDERS.get(model.id) or _PROVIDERS.get(model.provider)
     if provider is None:
         raise RuntimeError(f"Unsupported provider: {model.provider}")
     return provider

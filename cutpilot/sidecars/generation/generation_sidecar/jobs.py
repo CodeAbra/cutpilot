@@ -8,6 +8,7 @@ is cooperative: the flag is checked between progress steps.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import threading
@@ -28,6 +29,9 @@ class JobSnapshot:
     progress: float
     message: str
     result_path: str
+    # SHA-256 of the finished result file: the result's identity, so a
+    # consumer can key derived work off the actual bytes it received.
+    result_digest: str
     cost_usd: float
     width: int
     height: int
@@ -46,6 +50,7 @@ class Job:
             progress=0.0,
             message="",
             result_path="",
+            result_digest="",
             cost_usd=-1.0,
             width=0,
             height=0,
@@ -89,7 +94,13 @@ class JobManager:
             return self._jobs.get(job_id)
 
     def submit(
-        self, model: ModelInfo, prompt: str, width: int, height: int, seed: int
+        self,
+        model: ModelInfo,
+        prompt: str,
+        width: int,
+        height: int,
+        seed: int,
+        input_path: str = "",
     ) -> Job:
         job = Job(uuid.uuid4().hex[:12])
         with self._lock:
@@ -102,6 +113,7 @@ class JobManager:
             height=height,
             seed=seed,
             out_path=os.path.join(self._gen_dir, f"{job.id}.png"),
+            input_path=input_path,
         )
         worker = threading.Thread(
             target=self._run, args=(job, request), name=f"gen-{job.id}", daemon=True
@@ -144,10 +156,21 @@ class JobManager:
         if job.cancel_requested:
             job.update(state="canceled", message="Stopped")
             return
+
+        digest = hashlib.sha256()
+        try:
+            with open(result.path, "rb") as handle:
+                for block in iter(lambda: handle.read(1 << 16), b""):
+                    digest.update(block)
+        except OSError as exc:
+            job.update(state="error", message=f"Result file unreadable: {exc}")
+            return
+
         job.update(
             state="done",
             progress=1.0,
             result_path=result.path,
+            result_digest=digest.hexdigest(),
             cost_usd=result.cost_usd,
             width=result.width,
             height=result.height,

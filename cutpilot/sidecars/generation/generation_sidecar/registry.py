@@ -17,6 +17,11 @@ class ModelInfo:
     provider: str
     price_usd: float
     needs_key: bool
+    # What the model consumes: a text prompt, an input image, or both. The
+    # server refuses submissions missing a required piece, and the desktop app
+    # reads the same flags to gate a run before it is ever submitted.
+    needs_prompt: bool = True
+    needs_input: bool = False
 
 
 MODELS: tuple[ModelInfo, ...] = (
@@ -26,6 +31,23 @@ MODELS: tuple[ModelInfo, ...] = (
         provider="local",
         price_usd=0.002,
         needs_key=False,
+    ),
+    ModelInfo(
+        id="local/procedural-edit-v1",
+        label="Procedural Edit (local)",
+        provider="local",
+        price_usd=0.003,
+        needs_key=False,
+        needs_input=True,
+    ),
+    ModelInfo(
+        id="local/procedural-upscale-v1",
+        label="Procedural Upscale (local)",
+        provider="local",
+        price_usd=0.001,
+        needs_key=False,
+        needs_prompt=False,
+        needs_input=True,
     ),
     ModelInfo(
         id="openai/gpt-image-1",

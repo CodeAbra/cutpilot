@@ -11,6 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from generation_sidecar.procedural import decode_png, render_png  # noqa: E402
 from generation_sidecar.server import build_server  # noqa: E402
 
 TOKEN = "test-token"
@@ -213,6 +214,120 @@ class SidecarTestCase(unittest.TestCase):
         status, data = self.request("GET", "/jobs/feedbeef/events")
         self.assertEqual(status, 404)
         self.assertEqual(data["error"], "not_found")
+
+    def run_to_done(self, **overrides):
+        status, submitted = self.submit(**overrides)
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        return snapshots[-1]
+
+    def render_input(self, name="input.png", width=96, height=64, seed=3):
+        path = os.path.join(self.gen_dir, name)
+        render_png("an input plate", seed, width, height, path)
+        return path
+
+    def test_models_report_prompt_and_input_needs(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        by_id = {model["id"]: model for model in data["models"]}
+        upscale = by_id["local/procedural-upscale-v1"]
+        self.assertFalse(upscale["needs_prompt"])
+        self.assertTrue(upscale["needs_input"])
+        self.assertTrue(upscale["has_key"])
+        edit = by_id["local/procedural-edit-v1"]
+        self.assertTrue(edit["needs_prompt"])
+        self.assertTrue(edit["needs_input"])
+        base = by_id["local/procedural-v1"]
+        self.assertTrue(base["needs_prompt"])
+        self.assertFalse(base["needs_input"])
+
+    def test_result_digest_matches_the_file(self):
+        final = self.run_to_done()
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertEqual(
+            final["result_digest"], hashlib.sha256(content).hexdigest()
+        )
+
+    def test_upscale_doubles_the_input_and_is_deterministic(self):
+        input_path = self.render_input()
+        finals = [
+            self.run_to_done(
+                model="local/procedural-upscale-v1",
+                prompt="",
+                input_path=input_path,
+            )
+            for _ in range(2)
+        ]
+        for final in finals:
+            self.assertEqual(final["state"], "done")
+            self.assertEqual((final["width"], final["height"]), (192, 128))
+        self.assertEqual(finals[0]["result_digest"], finals[1]["result_digest"])
+
+        # The output really is the input scaled: corner pixels survive.
+        with open(input_path, "rb") as handle:
+            in_w, in_h, in_rows = decode_png(handle.read())
+        with open(finals[0]["result_path"], "rb") as handle:
+            out_w, out_h, out_rows = decode_png(handle.read())
+        self.assertEqual((out_w, out_h), (in_w * 2, in_h * 2))
+        self.assertEqual(out_rows[0][:3], in_rows[0][:3])
+        self.assertEqual(out_rows[-1][-3:], in_rows[-1][-3:])
+
+    def test_edit_blends_over_the_input(self):
+        input_path = self.render_input(name="edit-input.png")
+        base = self.run_to_done(
+            model="local/procedural-edit-v1",
+            prompt="warm dusk grade",
+            input_path=input_path,
+        )
+        self.assertEqual(base["state"], "done")
+        self.assertEqual((base["width"], base["height"]), (96, 64))
+
+        with open(input_path, "rb") as handle:
+            input_digest = hashlib.sha256(handle.read()).hexdigest()
+        self.assertNotEqual(base["result_digest"], input_digest)
+
+        again = self.run_to_done(
+            model="local/procedural-edit-v1",
+            prompt="warm dusk grade",
+            input_path=input_path,
+        )
+        self.assertEqual(again["result_digest"], base["result_digest"])
+
+        different = self.run_to_done(
+            model="local/procedural-edit-v1",
+            prompt="cold morning grade",
+            input_path=input_path,
+        )
+        self.assertNotEqual(different["result_digest"], base["result_digest"])
+
+    def test_input_only_model_accepts_an_empty_prompt(self):
+        input_path = self.render_input(name="promptless.png")
+        status, submitted = self.submit(
+            model="local/procedural-upscale-v1", prompt="", input_path=input_path
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        self.assertEqual(snapshots[-1]["state"], "done")
+
+    def test_missing_input_is_rejected(self):
+        for input_path in (None, os.path.join(self.gen_dir, "absent.png")):
+            overrides = {"model": "local/procedural-upscale-v1", "prompt": ""}
+            if input_path is not None:
+                overrides["input_path"] = input_path
+            status, data = self.submit(**overrides)
+            self.assertEqual(status, 400)
+            self.assertEqual(data["error"], "missing_input")
+
+    def test_unsupported_input_surfaces_a_job_error(self):
+        junk_path = os.path.join(self.gen_dir, "junk.bin")
+        with open(junk_path, "wb") as handle:
+            handle.write(b"not a png at all")
+        final = self.run_to_done(
+            model="local/procedural-upscale-v1", prompt="", input_path=junk_path
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("PNG", final["message"])
 
 
 if __name__ == "__main__":

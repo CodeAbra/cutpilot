@@ -80,6 +80,8 @@ class GenerationHandler(BaseHTTPRequestHandler):
                     "price_usd": model.price_usd,
                     "needs_key": model.needs_key,
                     "has_key": (not model.needs_key) or keys.has_key(model.provider),
+                    "needs_prompt": model.needs_prompt,
+                    "needs_input": model.needs_input,
                 }
                 for model in list_models()
             ]
@@ -149,8 +151,13 @@ class GenerationHandler(BaseHTTPRequestHandler):
             return
 
         prompt = str(payload.get("prompt", "")).strip()
-        if not prompt:
+        if model.needs_prompt and not prompt:
             self._send_json(400, {"error": "empty_prompt"})
+            return
+
+        input_path = str(payload.get("input_path", "")).strip()
+        if model.needs_input and not os.path.isfile(input_path):
+            self._send_json(400, {"error": "missing_input"})
             return
 
         try:
@@ -173,7 +180,7 @@ class GenerationHandler(BaseHTTPRequestHandler):
             )
             return
 
-        job = self.manager.submit(model, prompt, width, height, seed)
+        job = self.manager.submit(model, prompt, width, height, seed, input_path)
         # Every accepted job enters the queue; the worker may already be past
         # that by the time this response is written, so the submission state
         # is reported as queued rather than sampled.
