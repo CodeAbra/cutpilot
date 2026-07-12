@@ -2,9 +2,11 @@
 
 #include <QPointF>
 #include <QQuickItem>
+#include <QSet>
 #include <QVector>
 
 #include "cutpilot/core/NodeGraph.h"
+#include "cutpilot/core/SpatialIndex.h"
 #include "cutpilot/core/command/CommandStack.h"
 #include "cutpilot/render/CanvasController.h"
 #include "cutpilot/theme/ThemeTable.h"
@@ -69,9 +71,20 @@ private:
 
     core::Node defaultNode(const QPointF &worldCentre) const;
 
-    // Reconcile one child geometry node per model node under the camera transform,
-    // reusing existing children and their buffers where the vertex counts still fit.
-    void rebuildNodes(QSGTransformNode *camera, bool detailed);
+    // Rebuild the spatial index from the model. Called after any add, move, delete, or
+    // restore so culling and picking stay in step with the model.
+    void syncSpatialIndex();
+
+    // The top-most node containing the world point through the spatial index, or -1.
+    int pickTopMost(const QPointF &world) const;
+
+    // The ids overlapping the current viewport under the camera, through the index.
+    QVector<int> visibleForViewport() const;
+
+    // Reconcile one child geometry node per visible model node under the camera
+    // transform, reusing existing children and their buffers where the vertex counts
+    // still fit. Only nodes in the visible set are meshed.
+    void rebuildNodes(QSGTransformNode *camera, bool detailed, const QSet<int> &visible);
 
     // Add, remove, or refresh the screen-space overlay children (the marquee band)
     // under the container root.
@@ -79,6 +92,7 @@ private:
 
     CanvasController *m_controller = nullptr;
     core::NodeGraph m_graph;
+    core::SpatialIndex m_index;
     core::CommandStack m_commands;
     theme::ThemeTable m_theme{theme::Theme::Dark};
 
@@ -88,6 +102,11 @@ private:
     bool m_geometryDirty = true;
     bool m_lastDetailed = true;
     bool m_overlayDirty = false;
+
+    // The visible id set the child subtree currently holds; the subtree is rebuilt only
+    // when this membership changes, so a pan that keeps the same nodes visible re-sets
+    // only the transform matrix.
+    QSet<int> m_lastVisibleSet;
 
     // A selection drag: the grabbed set moves live for 1:1 feedback and coalesces into
     // one net-delta move command on release.

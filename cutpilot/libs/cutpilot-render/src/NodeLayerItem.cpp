@@ -120,6 +120,7 @@ void NodeLayerItem::seedStarterNode()
         { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
     };
     m_graph.addNode(node);
+    syncSpatialIndex();
     m_geometryDirty = true;
     update();
 }
@@ -128,8 +129,38 @@ void NodeLayerItem::addNodeAtCursor(const QPointF &worldPoint)
 {
     m_commands.push(std::make_unique<core::AddNodeCommand>(defaultNode(worldPoint)),
                     m_graph);
+    syncSpatialIndex();
     m_geometryDirty = true;
     update();
+}
+
+void NodeLayerItem::syncSpatialIndex()
+{
+    m_index.rebuild(m_graph.nodes());
+}
+
+int NodeLayerItem::pickTopMost(const QPointF &world) const
+{
+    // The point query narrows candidates through the index; the top-most is the one
+    // latest in the model's z-order (list order).
+    const QVector<int> candidates = m_index.queryPoint(world);
+    int bestId = -1;
+    int bestIndex = -1;
+    for (int id : candidates) {
+        const int index = m_graph.indexOfId(id);
+        if (index > bestIndex) {
+            bestIndex = index;
+            bestId = id;
+        }
+    }
+    return bestId;
+}
+
+QVector<int> NodeLayerItem::visibleForViewport() const
+{
+    const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
+    const QSizeF viewport(width(), height());
+    return core::visibleIds(m_index, zoom, panLogical(), viewport);
 }
 
 qreal NodeLayerItem::devicePixelRatio() const
@@ -180,10 +211,18 @@ QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
     matrix.scale(float(zoom), float(zoom));
     camera->setMatrix(matrix);
 
+    // Cull to the nodes overlapping the viewport. The subtree is rebuilt when the model
+    // changed, the detail tier flipped, or the visible membership changed; a pan or
+    // in-tier zoom whose visible set is unchanged re-sets only the transform matrix.
+    const QVector<int> visibleList = visibleForViewport();
+    const QSet<int> visible(visibleList.cbegin(), visibleList.cend());
+    const bool membershipChanged = visible != m_lastVisibleSet;
+
     const bool detailed = zoom >= NodeGeometryBuilder::kDetailZoom;
-    if (m_geometryDirty || detailed != m_lastDetailed) {
-        rebuildNodes(camera, detailed);
+    if (m_geometryDirty || detailed != m_lastDetailed || membershipChanged) {
+        rebuildNodes(camera, detailed, visible);
         m_lastDetailed = detailed;
+        m_lastVisibleSet = visible;
         m_geometryDirty = false;
     }
 
@@ -191,12 +230,16 @@ QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
     return root;
 }
 
-void NodeLayerItem::rebuildNodes(QSGTransformNode *camera, bool detailed)
+void NodeLayerItem::rebuildNodes(QSGTransformNode *camera, bool detailed,
+                                 const QSet<int> &visible)
 {
     NodeGeometryBuilder builder;
 
     QSGNode *child = camera->firstChild();
     for (const core::Node &node : m_graph.nodes()) {
+        if (!visible.contains(node.id))
+            continue; // off-screen nodes are not drawn
+
         const NodeGeometryBuilder::Mesh mesh =
             builder.buildNode(node, m_theme, detailed);
 
@@ -273,7 +316,7 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
     }
 
     const QPointF world = worldFromLocal(event->position());
-    const int hitId = m_graph.hitTest(world);
+    const int hitId = pickTopMost(world);
     const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
 
     if (hitId != -1) {
@@ -335,6 +378,7 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
         const QPointF delta = world - m_dragLastWorld;
         m_dragLastWorld = world;
         m_graph.moveNodesBy(m_dragIds, delta); // live 1:1 feedback
+        syncSpatialIndex();
         m_geometryDirty = true;
         update();
         event->accept();
@@ -390,7 +434,7 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
     }
 
     const QPointF world = worldFromLocal(event->position());
-    if (m_graph.hitTest(world) == -1) {
+    if (pickTopMost(world) == -1) {
         addNodeAtCursor(world); // empty canvas: add a node at the cursor
         event->accept();
         return;
@@ -450,6 +494,7 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
         const QVector<int> ids = m_graph.selectedIds();
         if (!ids.isEmpty()) {
             m_commands.push(std::make_unique<core::DeleteNodesCommand>(ids), m_graph);
+            syncSpatialIndex();
             m_geometryDirty = true;
             update();
         }
@@ -462,6 +507,7 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
             m_commands.redo(m_graph);
         else
             m_commands.undo(m_graph);
+        syncSpatialIndex();
         m_geometryDirty = true;
         update();
         event->accept();
