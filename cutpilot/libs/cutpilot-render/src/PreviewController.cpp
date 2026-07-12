@@ -69,6 +69,7 @@ void PreviewController::refresh()
         return;
 
     bool dropped = false;
+    QSet<int> referenced;
     for (int slot = 0; slot < 2; ++slot) {
         const int pin = m_pins[slot];
         if (pin == -1) {
@@ -89,7 +90,10 @@ void PreviewController::refresh()
         PreviewBufferData data;
         data.plan = core::buildCompositePlan(m_layer->graph(), pin);
         data.active = data.plan.valid;
+        for (const core::CompositePass &pass : data.plan.passes)
+            referenced.insert(pass.nodeId);
         for (int sourceId : data.plan.sourceNodeIds) {
+            referenced.insert(sourceId);
             PreviewSource source;
             source.nodeId = sourceId;
             source.image = m_layer->nodeMediaImage(sourceId);
@@ -98,6 +102,14 @@ void PreviewController::refresh()
                 data.sources.push_back(source);
         }
         m_item->setBuffer(slot, data);
+    }
+
+    if (m_item) {
+        for (int nodeId : std::as_const(m_planNodes)) {
+            if (!referenced.contains(nodeId))
+                m_item->releaseNode(nodeId);
+        }
+        m_planNodes = referenced;
     }
 
     if (dropped)

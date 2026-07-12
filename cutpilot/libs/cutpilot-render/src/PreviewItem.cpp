@@ -152,6 +152,10 @@ bool PreviewRenderer::ensureStatics()
 void PreviewRenderer::synchronize(QQuickRhiItem *rhiItem)
 {
     auto *item = static_cast<PreviewItem *>(rhiItem);
+    for (int nodeId : std::as_const(item->m_pendingReleases))
+        m_engine.releaseNode(nodeId);
+    item->m_pendingReleases.clear();
+
     m_mode = item->compareMode();
     m_wipe = float(item->wipePosition());
     m_overlayOpacity = float(item->overlayOpacity());
@@ -301,6 +305,14 @@ void PreviewItem::clearBuffer(int slot)
 const PreviewBufferData &PreviewItem::buffer(int slot) const
 {
     return m_buffers[qBound(0, slot, 1)];
+}
+
+void PreviewItem::releaseNode(int nodeId)
+{
+    if (nodeId == -1 || m_pendingReleases.contains(nodeId))
+        return;
+    m_pendingReleases.append(nodeId);
+    update();
 }
 
 void PreviewItem::setCompareMode(CompareMode mode)

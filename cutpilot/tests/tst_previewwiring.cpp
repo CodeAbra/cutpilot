@@ -76,6 +76,8 @@ private slots:
     void refreshFollowsParameterChanges();
     void aScrubCommitsAsOneUndoStep();
     void aDeletedPinIsDropped();
+    void unpinningQueuesTheBuffersNodesForRelease();
+    void aRewiredPlanQueuesTheNodesItDropped();
     void compareStateLandsInTheItem();
 };
 
@@ -196,6 +198,44 @@ void PreviewWiringTest::aDeletedPinIsDropped()
     QCOMPARE(rig.previews.pinnedNode(PreviewController::Buffer::A), -1);
     QVERIFY(!rig.item.buffer(0).active);
     QCOMPARE(pinsSpy.count(), 1);
+}
+
+void PreviewWiringTest::unpinningQueuesTheBuffersNodesForRelease()
+{
+    Rig rig;
+    const int still = rig.addProto(NodeKind::Still);
+    const int blend = rig.addProto(NodeKind::Blend);
+    rig.wire(still, 0, blend, 0);
+    rig.layer.setNodeMedia(still, rig.gray(120));
+
+    rig.previews.pin(PreviewController::Buffer::A, blend);
+    QVERIFY(rig.item.pendingReleases().isEmpty());
+
+    // Unpinning must hand every node of the buffer's plan — passes and
+    // sources alike — to the renderer for release, or their GPU textures
+    // outlive the preview for the rest of the session.
+    rig.previews.unpin(PreviewController::Buffer::A);
+    QVERIFY(rig.item.pendingReleases().contains(blend));
+    QVERIFY(rig.item.pendingReleases().contains(still));
+}
+
+void PreviewWiringTest::aRewiredPlanQueuesTheNodesItDropped()
+{
+    Rig rig;
+    const int still = rig.addProto(NodeKind::Still);
+    const int blend = rig.addProto(NodeKind::Blend);
+    rig.wire(still, 0, blend, 0);
+    rig.layer.setNodeMedia(still, rig.gray(120));
+
+    rig.previews.pin(PreviewController::Buffer::A, blend);
+
+    // The still leaves the pinned plan; the pin itself stays. Only the
+    // departed upstream node is queued.
+    rig.layer.graph().removeNode(still);
+    rig.previews.refresh();
+
+    QVERIFY(rig.item.pendingReleases().contains(still));
+    QVERIFY(!rig.item.pendingReleases().contains(blend));
 }
 
 void PreviewWiringTest::compareStateLandsInTheItem()

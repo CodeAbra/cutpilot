@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QSet>
 
 namespace cutpilot::render {
 
@@ -12,7 +13,9 @@ class PreviewItem;
 // selection, so one node can be tweaked while a downstream result stays on
 // screen. On any relevant change the controller rebuilds each pin's
 // composite plan and source set and hands them to the preview item; a pin
-// whose node left the graph is dropped.
+// whose node left the graph is dropped, and any node that left every
+// pinned plan is queued on the item so the renderer frees its GPU
+// resources.
 class PreviewController : public QObject {
     Q_OBJECT
 
@@ -48,6 +51,10 @@ private:
     NodeLayerItem *m_layer = nullptr;
     PreviewItem *m_item = nullptr;
     int m_pins[2] = { -1, -1 };
+
+    // Every node id the current buffers' plans touch; ids that drop out on
+    // the next refresh are handed to the item for release.
+    QSet<int> m_planNodes;
 };
 
 } // namespace cutpilot::render

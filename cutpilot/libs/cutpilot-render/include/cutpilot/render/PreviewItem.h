@@ -50,6 +50,12 @@ public:
     void clearBuffer(int slot);
     const PreviewBufferData &buffer(int slot) const;
 
+    // Queue a node's GPU resources for release once it leaves every pinned
+    // plan; the renderer consumes the queue on its own thread during the
+    // next synchronize.
+    void releaseNode(int nodeId);
+    QVector<int> pendingReleases() const { return m_pendingReleases; }
+
     void setCompareMode(CompareMode mode);
     CompareMode compareMode() const { return m_mode; }
 
@@ -75,6 +81,7 @@ private:
     friend class PreviewRenderer;
 
     PreviewBufferData m_buffers[2];
+    QVector<int> m_pendingReleases;
     CompareMode m_mode = CompareMode::Single;
     qreal m_wipe = 0.5;
     qreal m_overlayOpacity = 0.5;
