@@ -205,7 +205,7 @@ void NodeLayerItem::seedStarterNode()
     upscale.modelId = QStringLiteral("local/procedural-upscale-v1");
     upscale.modelLabel = QStringLiteral("Procedural Upscale (local)");
     upscale.worldSize = QSizeF(240.0, 160.0);
-    upscale.worldPos = QPointF(1180.0, 190.0);
+    upscale.worldPos = QPointF(960.0, 190.0);
     upscale.ports = {
         { QStringLiteral("image"), core::PortType::Image, true, 0.4 },
         { QStringLiteral("run"), core::PortType::Control, true, 0.7 },

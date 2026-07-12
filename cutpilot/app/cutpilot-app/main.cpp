@@ -10,7 +10,9 @@
 
 #include <QApplication>
 #include <QCursor>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
@@ -19,6 +21,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWidget>
@@ -90,6 +93,107 @@ public:
     }
 };
 
+// The pipeline's control strip, floated over the canvas: run everything,
+// resume held work or abort while paused, the run-wide spending cap, and the
+// live counts/spend readout the coordinator streams.
+class RunPanel : public QWidget {
+public:
+    QPushButton *runAll = nullptr;
+    QPushButton *resume = nullptr;
+    QPushButton *abort = nullptr;
+    QDoubleSpinBox *cap = nullptr;
+    QLabel *status = nullptr;
+
+    explicit RunPanel(const ThemeTable &theme, QWidget *parent)
+        : QWidget(parent)
+    {
+        const QColor surface = theme.bgCanvas().lighter(125);
+        setStyleSheet(QStringLiteral(
+                          "QWidget { color: %1; }"
+                          "QLabel { color: %1; }"
+                          "QPushButton {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px;"
+                          "  padding: 3px 10px;"
+                          "}"
+                          "QPushButton:disabled { color: %6; }"
+                          "QDoubleSpinBox {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px; padding: 2px;"
+                          "}")
+                          .arg(theme.textPrimary().name())
+                          .arg(surface.red())
+                          .arg(surface.green())
+                          .arg(surface.blue())
+                          .arg(theme.borderSubtle().name(),
+                               theme.textSecondary().name()));
+
+        auto *row = new QHBoxLayout(this);
+        row->setContentsMargins(8, 6, 8, 6);
+        row->setSpacing(8);
+
+        runAll = new QPushButton(QStringLiteral("Run all"), this);
+        resume = new QPushButton(QStringLiteral("Resume"), this);
+        abort = new QPushButton(QStringLiteral("Abort"), this);
+
+        cap = new QDoubleSpinBox(this);
+        cap->setPrefix(QStringLiteral("cap $"));
+        cap->setDecimals(3);
+        cap->setRange(0.0, 1000.0);
+        cap->setSingleStep(0.01);
+        cap->setSpecialValueText(QStringLiteral("no cap"));
+        cap->setToolTip(QStringLiteral("Pause the run before spending past this"));
+
+        status = new QLabel(this);
+
+        row->addWidget(runAll);
+        row->addWidget(resume);
+        row->addWidget(abort);
+        row->addWidget(cap);
+        row->addWidget(status);
+
+        showSummary(cutpilot::ipc::RunSummary());
+    }
+
+    void showSummary(const cutpilot::ipc::RunSummary &summary)
+    {
+        runAll->setEnabled(!summary.active);
+        resume->setVisible(summary.active && summary.paused);
+        abort->setVisible(summary.active);
+
+        QStringList parts;
+        if (summary.total > 0) {
+            parts << QStringLiteral("%1%").arg(summary.percent());
+            if (summary.running > 0)
+                parts << QStringLiteral("%1 running").arg(summary.running);
+            if (summary.fresh > 0)
+                parts << QStringLiteral("%1 done").arg(summary.fresh);
+            if (summary.reused > 0)
+                parts << QStringLiteral("%1 reused").arg(summary.reused);
+            if (summary.held > 0)
+                parts << QStringLiteral("%1 held").arg(summary.held);
+            if (summary.failed > 0)
+                parts << QStringLiteral("%1 failed").arg(summary.failed);
+            QString spend = QStringLiteral("$%1").arg(summary.spentUsd, 0, 'f', 3);
+            if (summary.capUsd > 0.0)
+                spend += QStringLiteral(" of $%1").arg(summary.capUsd, 0, 'f', 3);
+            parts << spend;
+            if (summary.paused && !summary.pauseReason.isEmpty())
+                parts << summary.pauseReason;
+        } else {
+            parts << QStringLiteral("Ready");
+        }
+        status->setText(parts.join(QStringLiteral(" · ")));
+        adjustSize();
+        if (parentWidget()) {
+            const int margin = 12;
+            move(parentWidget()->width() - width() - margin,
+                 parentWidget()->height() - height() - margin);
+            raise();
+        }
+    }
+};
+
 // Hosts the GPU canvas (grid + node layers, sharing one camera) and overlays the
 // zoom readout in the bottom-left corner.
 class CanvasView : public QWidget {
@@ -145,6 +249,7 @@ public:
         }
 
         m_readout = new ZoomReadout(m_theme, this);
+        m_runPanel = new RunPanel(m_theme, this);
 
         if (m_controller) {
             QObject::connect(m_controller, &CanvasController::cameraChanged, this,
@@ -158,6 +263,7 @@ public:
     CanvasController *controller() const { return m_controller; }
     NodeLayerItem *layer() const { return m_layer; }
     QQuickWidget *quickWidget() const { return m_quick; }
+    RunPanel *runPanel() const { return m_runPanel; }
 
 protected:
     void resizeEvent(QResizeEvent *event) override
@@ -168,6 +274,9 @@ protected:
         m_readout->move(margin,
                         height() - m_readout->height() - margin);
         m_readout->raise();
+        m_runPanel->move(width() - m_runPanel->width() - margin,
+                         height() - m_runPanel->height() - margin);
+        m_runPanel->raise();
     }
 
 private:
@@ -176,6 +285,7 @@ private:
     CanvasController *m_controller = nullptr;
     NodeLayerItem *m_layer = nullptr;
     ZoomReadout *m_readout = nullptr;
+    RunPanel *m_runPanel = nullptr;
 };
 
 // An inline prompt editor floated over a prompt node's body. Committing on
@@ -302,6 +412,37 @@ public:
                 return;
             }
         }
+    }
+
+    void showNodeRunMenu(int nodeId)
+    {
+        NodeLayerItem *layer = m_view->layer();
+        if (!layer->graph().nodeById(nodeId))
+            return;
+        QMenu menu(m_view);
+        QAction *runHere = menu.addAction(QStringLiteral("Run to here"));
+        QAction *rerun = menu.addAction(QStringLiteral("Re-run ignoring cache"));
+        QAction *chosen = menu.exec(QCursor::pos());
+        if (chosen == runHere)
+            m_coordinator->runTo(nodeId);
+        else if (chosen == rerun)
+            m_coordinator->rerunNode(nodeId);
+    }
+
+    void editGateLimit(int nodeId)
+    {
+        NodeLayerItem *layer = m_view->layer();
+        const core::Node *node = layer->graph().nodeById(nodeId);
+        if (!node || node->kind != core::NodeKind::CostGate)
+            return;
+        bool accepted = false;
+        const double limit = QInputDialog::getDouble(
+            m_view, QStringLiteral("Cost gate limit"),
+            QStringLiteral("Pause this gate's branch once the run has spent"),
+            node->gateLimitUsd, 0.0, 1000.0, 3, &accepted,
+            Qt::WindowFlags(), 0.01);
+        if (accepted)
+            layer->setGateLimit(nodeId, limit);
     }
 
     void promptAddKey(int nodeId, const QString &provider)
@@ -456,11 +597,39 @@ int main(int argc, char *argv[])
         QObject::connect(layer, &NodeLayerItem::promptEditRequested, chrome,
                          [chrome](int nodeId) { chrome->openPromptEditor(nodeId); },
                          Qt::QueuedConnection);
+        QObject::connect(layer, &NodeLayerItem::nodeMenuRequested, chrome,
+                         [chrome](int nodeId) { chrome->showNodeRunMenu(nodeId); },
+                         Qt::QueuedConnection);
+        QObject::connect(layer, &NodeLayerItem::gateLimitEditRequested, chrome,
+                         [chrome](int nodeId) { chrome->editGateLimit(nodeId); },
+                         Qt::QueuedConnection);
         QObject::connect(coordinator, &GenerationCoordinator::addKeyNeeded, chrome,
                          [chrome](int nodeId, const QString &provider) {
                              chrome->promptAddKey(nodeId, provider);
                          },
                          Qt::QueuedConnection);
+
+        // The run panel drives whole-graph runs and reflects the live
+        // summary; a refused run explains itself on the same strip.
+        RunPanel *panel = view->runPanel();
+        QObject::connect(panel->runAll, &QPushButton::clicked, coordinator,
+                         &GenerationCoordinator::runGraph);
+        QObject::connect(panel->resume, &QPushButton::clicked, coordinator,
+                         &GenerationCoordinator::resumeRun);
+        QObject::connect(panel->abort, &QPushButton::clicked, coordinator,
+                         &GenerationCoordinator::abortRun);
+        QObject::connect(panel->cap, &QDoubleSpinBox::valueChanged, coordinator,
+                         &GenerationCoordinator::setRunCapUsd);
+        QObject::connect(coordinator, &GenerationCoordinator::runSummaryChanged,
+                         panel,
+                         [panel](const cutpilot::ipc::RunSummary &summary) {
+                             panel->showSummary(summary);
+                         });
+        QObject::connect(coordinator, &GenerationCoordinator::runRefused, panel,
+                         [panel](const QString &reason) {
+                             panel->status->setText(reason);
+                             panel->adjustSize();
+                         });
 
         host.start();
     }
@@ -476,9 +645,9 @@ int main(int argc, char *argv[])
     if (statsActive)
         runFrameStats(view, statsFrames);
 
-    // CUTPILOT_AUTORUN=1 runs the board's first generation node as soon as the
-    // model registry lands; with CUTPILOT_SCREENSHOT the capture then waits for
-    // that run to settle instead of firing on a fixed delay.
+    // CUTPILOT_AUTORUN=1 runs the whole board as a pipeline as soon as the
+    // model registry lands; with CUTPILOT_SCREENSHOT the capture then waits
+    // for that run to settle instead of firing on a fixed delay.
     const bool autorun =
         qEnvironmentVariableIntValue("CUTPILOT_AUTORUN") > 0 && coordinator;
     const QString shotPath = qEnvironmentVariable("CUTPILOT_SCREENSHOT");
@@ -486,14 +655,7 @@ int main(int argc, char *argv[])
     if (autorun) {
         QObject::connect(
             coordinator, &GenerationCoordinator::modelsReady, view,
-            [layer, coordinator] {
-                for (const core::Node &node : layer->graph().nodes()) {
-                    if (node.kind == core::NodeKind::Generate) {
-                        coordinator->runNode(node.id);
-                        return;
-                    }
-                }
-            },
+            [coordinator] { coordinator->runGraph(); },
             static_cast<Qt::ConnectionType>(Qt::AutoConnection
                                             | Qt::SingleShotConnection));
     }
@@ -501,15 +663,10 @@ int main(int argc, char *argv[])
     if (!shotPath.isEmpty() && autorun) {
         auto captured = std::make_shared<bool>(false);
         QObject::connect(
-            coordinator, &GenerationCoordinator::nodeContentChanged, &window,
-            [&window, layer, shotPath, statsActive, captured](int nodeId) {
-                const core::Node *node = layer->graph().nodeById(nodeId);
-                if (!node || *captured)
-                    return;
-                const bool settled = node->runState == core::RunState::Done
-                    || node->runState == core::RunState::Error
-                    || node->runState == core::RunState::NeedsKey;
-                if (!settled)
+            coordinator, &GenerationCoordinator::runSummaryChanged, &window,
+            [&window, shotPath, statsActive,
+             captured](const cutpilot::ipc::RunSummary &summary) {
+                if (*captured || summary.active || summary.total == 0)
                     return;
                 *captured = true;
                 QTimer::singleShot(700, &window, [&window, shotPath, statsActive] {
