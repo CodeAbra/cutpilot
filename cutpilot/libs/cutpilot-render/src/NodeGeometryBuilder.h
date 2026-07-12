@@ -10,6 +10,7 @@
 
 namespace cutpilot::core {
 struct Node;
+enum class PortType;
 }
 
 namespace cutpilot::theme {
@@ -65,18 +66,28 @@ public:
     Mesh buildScreenLines(const QVector<QLineF> &lines, const QColor &color,
                           qreal width) const;
 
-private:
+    // The resolved theme color for a port type — shared by the port dots, the
+    // connectors, and the live wiring drag so a type reads as one hue everywhere.
+    static QColor portColor(core::PortType type, const theme::ThemeTable &theme);
+
+    // The world radius of a port dot (control ports draw as squares of the same
+    // reach). Shared with hit-testing so the visual and the target agree.
+    static constexpr qreal kPortRadiusWorld = 5.0;
+
+    // Shared mesh primitives, reused by the connector builder.
     static void appendQuad(Mesh &mesh, const QRectF &rect, const QColor &color);
     static void appendLineQuad(Mesh &mesh, const QPointF &a, const QPointF &b,
                                qreal width, const QColor &color);
+    static void appendDisc(Mesh &mesh, const QPointF &center, qreal radius,
+                           const QColor &color);
+
+private:
     static void appendTriangle(Mesh &mesh, const QPointF &a, const QPointF &b,
                                const QPointF &c, const QColor &color);
     static void appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,
                                   const QColor &color);
     static void appendRoundedRectStroke(Mesh &mesh, const QRectF &rect, qreal radius,
                                         qreal width, const QColor &color);
-    static void appendDisc(Mesh &mesh, const QPointF &center, qreal radius,
-                           const QColor &color);
 };
 
 } // namespace cutpilot::render

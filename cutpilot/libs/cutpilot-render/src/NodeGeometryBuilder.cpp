@@ -13,12 +13,12 @@ namespace cutpilot::render {
 namespace {
 
 // Node card geometry in world units: a slim header strip over a larger body,
-// rounded corners, small typed port dots on the side edges, a hairline border, and
-// the selection outline and elevation halo of a selected card.
+// rounded corners, small typed ports on the side edges (round for data, square for
+// control), a hairline border, and the selection outline and elevation halo of a
+// selected card.
 constexpr qreal kHeaderWorldHeight = 30.0;
 constexpr qreal kBodyRadiusWorld = 10.0;
 constexpr qreal kBorderWorldWidth = 1.5;
-constexpr qreal kPortWorldRadius = 5.0;
 constexpr qreal kPortBackingWorldWidth = 1.0;
 constexpr qreal kSelectionWorldWidth = 2.0;
 constexpr qreal kHaloWorldWidth = 6.0;
@@ -44,7 +44,9 @@ QColor over(const QColor &top, const QColor &under)
                             1.0);
 }
 
-QColor portColorFor(core::PortType type, const theme::ThemeTable &theme)
+} // namespace
+
+QColor NodeGeometryBuilder::portColor(core::PortType type, const theme::ThemeTable &theme)
 {
     switch (type) {
     case core::PortType::Image:
@@ -66,8 +68,6 @@ QColor portColorFor(core::PortType type, const theme::ThemeTable &theme)
     }
     return theme.typeAny();
 }
-
-} // namespace
 
 void NodeGeometryBuilder::appendTriangle(Mesh &mesh, const QPointF &a, const QPointF &b,
                                          const QPointF &c, const QColor &color)
@@ -253,17 +253,30 @@ NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &
                                 theme.borderDefault());
     }
 
-    // Typed port dots on the side edges, hidden at the low-detail tier.
+    // Typed ports on the side edges, hidden at the low-detail tier. Data ports are
+    // round and control ports square, so the type system never leans on color alone.
     if (detailed) {
-        for (const core::Port &port : node.ports) {
-            const qreal edgeX = port.isInput ? rect.left() : rect.right();
-            const qreal edgeY = rect.top() + rect.height() * port.edgeFraction;
-            const QPointF center(edgeX, edgeY);
-            // A subtle dark backing disc separates the dot from the card edge, then
-            // the typed color on top.
-            appendDisc(mesh, center, kPortWorldRadius + kPortBackingWorldWidth,
-                       theme.bgCanvas());
-            appendDisc(mesh, center, kPortWorldRadius, portColorFor(port.type, theme));
+        for (int i = 0; i < node.ports.size(); ++i) {
+            const core::Port &port = node.ports[i];
+            const QPointF center = node.portWorldPosition(i);
+            const QColor color = portColor(port.type, theme);
+            // A subtle dark backing separates the port from the card edge, then the
+            // typed color on top.
+            if (port.type == core::PortType::Control) {
+                const qreal outer = kPortRadiusWorld + kPortBackingWorldWidth;
+                appendQuad(mesh,
+                           QRectF(center - QPointF(outer, outer),
+                                  QSizeF(outer * 2.0, outer * 2.0)),
+                           theme.bgCanvas());
+                appendQuad(mesh,
+                           QRectF(center - QPointF(kPortRadiusWorld, kPortRadiusWorld),
+                                  QSizeF(kPortRadiusWorld * 2.0, kPortRadiusWorld * 2.0)),
+                           color);
+            } else {
+                appendDisc(mesh, center, kPortRadiusWorld + kPortBackingWorldWidth,
+                           theme.bgCanvas());
+                appendDisc(mesh, center, kPortRadiusWorld, color);
+            }
         }
     }
 

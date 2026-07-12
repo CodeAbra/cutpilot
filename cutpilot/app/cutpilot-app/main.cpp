@@ -4,14 +4,24 @@
 #include "cutpilot/theme/ThemeTable.h"
 
 #include <QApplication>
+#include <QCursor>
+#include <QElapsedTimer>
 #include <QLabel>
 #include <QMainWindow>
+#include <QMenu>
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWidget>
+#include <QQuickWindow>
 #include <QResizeEvent>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <algorithm>
+#include <cstdio>
+#include <memory>
+#include <vector>
 
 using cutpilot::render::CanvasController;
 using cutpilot::render::CanvasItem;
@@ -83,8 +93,9 @@ public:
         if (root) {
             m_controller = root->findChild<CanvasController *>();
             if (auto *layer = root->findChild<NodeLayerItem *>()) {
+                m_layer = layer;
                 // Setting CUTPILOT_STRESS_NODES to a positive count seeds a wide stress
-                // board for the frame-budget check; otherwise the single starter node.
+                // board for the frame-budget check; otherwise the wired starter pair.
                 bool ok = false;
                 const int stressCount =
                     qEnvironmentVariableIntValue("CUTPILOT_STRESS_NODES", &ok);
@@ -92,6 +103,27 @@ public:
                     layer->seedStressBoard(stressCount);
                 else
                     layer->seedStarterNode();
+
+                // Dropping a fresh connector on empty canvas asks the chrome for a
+                // node palette; a plain menu stands in for the command palette. The
+                // queued hop lets the release event finish before the menu blocks.
+                QObject::connect(
+                    layer, &NodeLayerItem::paletteRequested, this,
+                    [this] {
+                        const QStringList titles = m_layer->paletteEntryTitles();
+                        if (titles.isEmpty()) {
+                            m_layer->cancelPalette();
+                            return;
+                        }
+                        QMenu menu(this);
+                        for (int i = 0; i < titles.size(); ++i)
+                            menu.addAction(titles[i])->setData(i);
+                        if (QAction *chosen = menu.exec(QCursor::pos()))
+                            m_layer->placePaletteEntry(chosen->data().toInt());
+                        else
+                            m_layer->cancelPalette();
+                    },
+                    Qt::QueuedConnection);
             }
         }
 
@@ -105,6 +137,9 @@ public:
             m_readout->setZoomPercent(m_controller->zoomPercent());
         }
     }
+
+    CanvasController *controller() const { return m_controller; }
+    QQuickWidget *quickWidget() const { return m_quick; }
 
 protected:
     void resizeEvent(QResizeEvent *event) override
@@ -121,8 +156,65 @@ private:
     ThemeTable m_theme;
     QQuickWidget *m_quick = nullptr;
     CanvasController *m_controller = nullptr;
+    NodeLayerItem *m_layer = nullptr;
     ZoomReadout *m_readout = nullptr;
 };
+
+// Continuously pans the camera while timing the gaps between rendered frames, then
+// prints the distribution and quits. Driven by CUTPILOT_FRAME_STATS=<frame count>;
+// pairs with CUTPILOT_STRESS_NODES to check the frame budget at scale.
+void runFrameStats(CanvasView *view, int frameTarget)
+{
+    // Sweep the camera left, then right, faster than the frame rate so every frame
+    // has a pending repaint and the measured cadence is the renderer's own.
+    auto *driver = new QTimer(view);
+    QObject::connect(driver, &QTimer::timeout, view, [view, tick = 0]() mutable {
+        const int phase = (tick / 240) % 2;
+        view->controller()->panByPixels(QPointF(phase == 0 ? -12.0 : 12.0, 0.0));
+        ++tick;
+    });
+    driver->start(4);
+
+    struct Capture {
+        QElapsedTimer clock;
+        std::vector<double> intervalsMs;
+        int warmupLeft = 30; // skip startup frames: pipeline builds, font caches
+        bool done = false;
+    };
+    auto capture = std::make_shared<Capture>();
+    capture->intervalsMs.reserve(size_t(frameTarget));
+
+    QObject::connect(
+        view->quickWidget()->quickWindow(), &QQuickWindow::afterRendering, view,
+        [capture, frameTarget, driver] {
+            if (capture->done)
+                return;
+            if (capture->warmupLeft > 0) {
+                --capture->warmupLeft;
+                capture->clock.start();
+                return;
+            }
+            capture->intervalsMs.push_back(capture->clock.nsecsElapsed() / 1e6);
+            capture->clock.restart();
+            if (int(capture->intervalsMs.size()) < frameTarget)
+                return;
+
+            capture->done = true;
+            driver->stop();
+            std::vector<double> sorted = capture->intervalsMs;
+            std::sort(sorted.begin(), sorted.end());
+            double sum = 0.0;
+            for (double v : sorted)
+                sum += v;
+            std::printf("frame intervals: frames=%zu avg=%.2fms median=%.2fms "
+                        "p95=%.2fms max=%.2fms\n",
+                        sorted.size(), sum / double(sorted.size()),
+                        sorted[sorted.size() / 2],
+                        sorted[(sorted.size() * 95) / 100], sorted.back());
+            std::fflush(stdout);
+            QCoreApplication::quit();
+        });
+}
 
 } // namespace
 
@@ -143,6 +235,26 @@ int main(int argc, char *argv[])
     window.setCentralWidget(view);
     window.resize(1280, 800);
     window.show();
+
+    // Runtime diagnostics. CUTPILOT_FRAME_STATS=<frames> pans continuously, prints
+    // the frame-interval distribution, and exits; CUTPILOT_SCREENSHOT=<path> saves
+    // a capture of the window shortly after startup (and exits unless the frame
+    // run is still measuring).
+    bool statsRequested = false;
+    const int statsFrames =
+        qEnvironmentVariableIntValue("CUTPILOT_FRAME_STATS", &statsRequested);
+    const bool statsActive = statsRequested && statsFrames > 0 && view->controller();
+    if (statsActive)
+        runFrameStats(view, statsFrames);
+
+    const QString shotPath = qEnvironmentVariable("CUTPILOT_SCREENSHOT");
+    if (!shotPath.isEmpty()) {
+        QTimer::singleShot(1500, &window, [&window, shotPath, statsActive] {
+            window.grab().save(shotPath);
+            if (!statsActive)
+                QCoreApplication::quit();
+        });
+    }
 
     return app.exec();
 }

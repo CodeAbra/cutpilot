@@ -6,7 +6,8 @@ qt_add_library(cutpilot-render STATIC
     src/CanvasItem.cpp
     src/CanvasRenderer.cpp
     src/NodeLayerItem.cpp
-    src/NodeGeometryBuilder.cpp)
+    src/NodeGeometryBuilder.cpp
+    src/ConnectorGeometryBuilder.cpp)
 
 target_include_directories(cutpilot-render
     PUBLIC include
