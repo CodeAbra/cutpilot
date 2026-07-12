@@ -2,26 +2,31 @@
 
 #include <QPointF>
 #include <QQuickItem>
+#include <QVector>
 
 #include "cutpilot/core/NodeGraph.h"
+#include "cutpilot/core/command/CommandStack.h"
 #include "cutpilot/render/CanvasController.h"
 #include "cutpilot/theme/ThemeTable.h"
 
 QT_BEGIN_NAMESPACE
+class QSGNode;
 class QSGTransformNode;
 QT_END_NAMESPACE
 
 namespace cutpilot::render {
 
 // The node layer: a scene-graph QQuickItem stacked over the grid that draws the node
-// model as vertex-colored geometry and handles node selection and drag. Each node is
-// one scene-graph geometry node built in world space under a single transform node
-// that carries the shared camera, so pan and zoom are a matrix change and never
-// re-triangulate any node. Geometry rebuilds only when the model or the detail tier
-// changes, so a static board — and every pan or in-tier zoom — issues no rebuild.
+// model and handles selection, marquee, drag, add, delete, and undo/redo. The
+// scene-graph root is a plain container: a camera transform child holds one geometry
+// node per node in world space, so pan and zoom are a matrix change and never
+// re-triangulate a node; a screen-space marquee child is drawn in the item's logical
+// pixels, so its outline holds a constant width at any zoom.
 //
-// Hit-testing runs in world space against the model, not via Qt item picking, so it
-// is ready to back onto a spatial index as the board grows.
+// Every model mutation runs here on the GUI thread through the command stack, so a
+// gesture is undoable and updatePaintNode only ever reads the model. Hit-testing runs
+// in world space against the model. Touching a node raises it to the top of the
+// z-order.
 class NodeLayerItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(cutpilot::render::CanvasController *controller READ controller WRITE
@@ -38,6 +43,11 @@ public:
     // Seed the starting board with a single content-first prompt node.
     Q_INVOKABLE void seedStarterNode();
 
+    // Create a default content-first node centred on a world point and add it through
+    // an undoable command. The reusable creation seam a double-click, and later a
+    // palette or tool pill, calls.
+    Q_INVOKABLE void addNodeAtCursor(const QPointF &worldPoint);
+
 signals:
     void controllerChanged();
 
@@ -47,6 +57,7 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
@@ -56,22 +67,40 @@ private:
     QPointF worldFromLocal(const QPointF &localLogical) const;
     QPointF panLogical() const;
 
+    core::Node defaultNode(const QPointF &worldCentre) const;
+
     // Reconcile one child geometry node per model node under the camera transform,
     // reusing existing children and their buffers where the vertex counts still fit.
-    void rebuildNodes(QSGTransformNode *root, bool detailed);
+    void rebuildNodes(QSGTransformNode *camera, bool detailed);
+
+    // Add, remove, or refresh the screen-space overlay children (the marquee band)
+    // under the container root.
+    void updateOverlay(QSGNode *root, QSGTransformNode *camera);
 
     CanvasController *m_controller = nullptr;
     core::NodeGraph m_graph;
+    core::CommandStack m_commands;
     theme::ThemeTable m_theme{theme::Theme::Dark};
 
     // Rebuild node geometry only when the model or the detail tier changes; a plain
-    // camera move just re-sets the transform matrix.
+    // camera move just re-sets the transform matrix. Overlay dirtiness is tracked
+    // apart so a marquee update never rebuilds the node geometry.
     bool m_geometryDirty = true;
     bool m_lastDetailed = true;
+    bool m_overlayDirty = false;
 
+    // A selection drag: the grabbed set moves live for 1:1 feedback and coalesces into
+    // one net-delta move command on release.
     bool m_dragging = false;
-    int m_dragNodeId = -1;
-    QPointF m_dragGrabWorldOffset;
+    QVector<int> m_dragIds;
+    QPointF m_dragPressWorld;
+    QPointF m_dragLastWorld;
+
+    // A marquee band drawn in the item's logical pixels; additive when Shift is held.
+    bool m_marqueeActive = false;
+    bool m_marqueeAdditive = false;
+    QPointF m_marqueeStartLogical;
+    QPointF m_marqueeCurrentLogical;
 
     bool m_panning = false;
     bool m_spaceHeld = false;

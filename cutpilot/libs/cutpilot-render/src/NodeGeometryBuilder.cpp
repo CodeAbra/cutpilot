@@ -81,6 +81,12 @@ void NodeGeometryBuilder::appendTriangle(Mesh &mesh, const QPointF &a, const QPo
     mesh.indices.push_back(static_cast<uint16_t>(base + 2));
 }
 
+void NodeGeometryBuilder::appendQuad(Mesh &mesh, const QRectF &rect, const QColor &color)
+{
+    appendTriangle(mesh, rect.topLeft(), rect.topRight(), rect.bottomRight(), color);
+    appendTriangle(mesh, rect.topLeft(), rect.bottomRight(), rect.bottomLeft(), color);
+}
+
 // A filled rounded rect, triangulated as a fan from the rect center out to a ring of
 // boundary points (straight edges plus tessellated corner arcs).
 void NodeGeometryBuilder::appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,
@@ -245,6 +251,34 @@ NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &
 
     // One node's mesh stays well under the 16-bit index ceiling; a node that grew
     // past it would need splitting into multiple geometry nodes.
+    Q_ASSERT(mesh.vertices.size() <= 0xFFFF);
+    return mesh;
+}
+
+NodeGeometryBuilder::Mesh
+NodeGeometryBuilder::buildScreenRect(const QRectF &rect, const QColor &fill,
+                                     const QColor &outline, qreal outlineWidth) const
+{
+    Mesh mesh;
+    const QRectF r = rect.normalized();
+
+    appendQuad(mesh, r, fill);
+
+    // Four edge bands tiling the outline without overlap, centred on the rect edges.
+    const qreal w = qMax(outlineWidth, 0.0);
+    if (w > 0.0) {
+        const qreal h = w / 2.0;
+        const QRectF outer = r.adjusted(-h, -h, h, h);
+        appendQuad(mesh, QRectF(outer.left(), outer.top(), outer.width(), w), outline);
+        appendQuad(mesh, QRectF(outer.left(), outer.bottom() - w, outer.width(), w),
+                   outline);
+        appendQuad(mesh, QRectF(outer.left(), outer.top() + w, w, outer.height() - 2 * w),
+                   outline);
+        appendQuad(mesh,
+                   QRectF(outer.right() - w, outer.top() + w, w, outer.height() - 2 * w),
+                   outline);
+    }
+
     Q_ASSERT(mesh.vertices.size() <= 0xFFFF);
     return mesh;
 }

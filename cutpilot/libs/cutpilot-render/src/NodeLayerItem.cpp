@@ -1,18 +1,67 @@
 #include "cutpilot/render/NodeLayerItem.h"
 #include "NodeGeometryBuilder.h"
 
+#include "cutpilot/core/command/AddNodeCommand.h"
+#include "cutpilot/core/command/DeleteNodesCommand.h"
+#include "cutpilot/core/command/MoveNodesCommand.h"
+
 #include <QKeyEvent>
 #include <QMatrix4x4>
 #include <QMouseEvent>
 #include <QQuickWindow>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
+#include <QSGNode>
 #include <QSGTransformNode>
 #include <QSGVertexColorMaterial>
 #include <QWheelEvent>
 #include <QtMath>
 
+#include <memory>
+
 namespace cutpilot::render {
+
+namespace {
+
+// The marquee outline in the item's logical pixels: a constant hairline at any zoom.
+constexpr qreal kMarqueeOutlineWidth = 1.0;
+
+// Copy a built mesh into a geometry node, reusing the existing buffers unless the
+// vertex or index counts changed.
+void uploadMesh(QSGGeometryNode *node, const NodeGeometryBuilder::Mesh &mesh)
+{
+    QSGGeometry *geometry = node->geometry();
+    if (!geometry || geometry->vertexCount() != mesh.vertices.size()
+        || geometry->indexCount() != mesh.indices.size()) {
+        geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
+                                   mesh.vertices.size(), mesh.indices.size());
+        geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+        node->setGeometry(geometry);
+    }
+
+    auto *vd = geometry->vertexDataAsColoredPoint2D();
+    for (int i = 0; i < mesh.vertices.size(); ++i) {
+        const auto &v = mesh.vertices[i];
+        vd[i].set(v.x, v.y, v.r, v.g, v.b, v.a);
+    }
+    quint16 *id = geometry->indexDataAsUShort();
+    for (int i = 0; i < mesh.indices.size(); ++i)
+        id[i] = mesh.indices[i];
+
+    node->markDirty(QSGNode::DirtyGeometry);
+}
+
+QSGGeometryNode *makeGeometryNode()
+{
+    auto *node = new QSGGeometryNode;
+    auto *material = new QSGVertexColorMaterial;
+    node->setMaterial(material);
+    node->setFlag(QSGNode::OwnsMaterial, true);
+    node->setFlag(QSGNode::OwnsGeometry, true);
+    return node;
+}
+
+} // namespace
 
 NodeLayerItem::NodeLayerItem(QQuickItem *parent)
     : QQuickItem(parent)
@@ -43,6 +92,22 @@ void NodeLayerItem::setController(CanvasController *controller)
     update();
 }
 
+core::Node NodeLayerItem::defaultNode(const QPointF &worldCentre) const
+{
+    core::Node node;
+    node.title = QStringLiteral("Node");
+    const QSizeF size(280.0, 200.0);
+    node.worldSize = size;
+    node.worldPos =
+        worldCentre - QPointF(size.width() / 2.0, size.height() / 2.0);
+    node.ports = {
+        { QStringLiteral("image"), core::PortType::Image, true, 0.42 },
+        { QStringLiteral("text"), core::PortType::Text, true, 0.66 },
+        { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
+    };
+    return node;
+}
+
 void NodeLayerItem::seedStarterNode()
 {
     core::Node node;
@@ -55,6 +120,14 @@ void NodeLayerItem::seedStarterNode()
         { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
     };
     m_graph.addNode(node);
+    m_geometryDirty = true;
+    update();
+}
+
+void NodeLayerItem::addNodeAtCursor(const QPointF &worldPoint)
+{
+    m_commands.push(std::make_unique<core::AddNodeCommand>(defaultNode(worldPoint)),
+                    m_graph);
     m_geometryDirty = true;
     update();
 }
@@ -83,10 +156,18 @@ QPointF NodeLayerItem::worldFromLocal(const QPointF &localLogical) const
 
 QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
 {
-    auto *root = static_cast<QSGTransformNode *>(oldNode);
+    QSGNode *root = oldNode;
+    QSGTransformNode *camera = nullptr;
     if (!root) {
-        root = new QSGTransformNode;
+        // A plain container: a camera transform child in world space plus, on demand,
+        // screen-space overlay children drawn in the item's logical pixels.
+        root = new QSGNode;
+        camera = new QSGTransformNode;
+        root->appendChildNode(camera);
         m_geometryDirty = true;
+        m_overlayDirty = true;
+    } else {
+        camera = static_cast<QSGTransformNode *>(root->firstChild());
     }
 
     const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
@@ -97,69 +178,73 @@ QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
     QMatrix4x4 matrix;
     matrix.translate(float(pan.x()), float(pan.y()));
     matrix.scale(float(zoom), float(zoom));
-    root->setMatrix(matrix);
+    camera->setMatrix(matrix);
 
     const bool detailed = zoom >= NodeGeometryBuilder::kDetailZoom;
     if (m_geometryDirty || detailed != m_lastDetailed) {
-        rebuildNodes(root, detailed);
+        rebuildNodes(camera, detailed);
         m_lastDetailed = detailed;
         m_geometryDirty = false;
     }
 
+    updateOverlay(root, camera);
     return root;
 }
 
-void NodeLayerItem::rebuildNodes(QSGTransformNode *root, bool detailed)
+void NodeLayerItem::rebuildNodes(QSGTransformNode *camera, bool detailed)
 {
     NodeGeometryBuilder builder;
 
-    QSGNode *child = root->firstChild();
+    QSGNode *child = camera->firstChild();
     for (const core::Node &node : m_graph.nodes()) {
         const NodeGeometryBuilder::Mesh mesh =
             builder.buildNode(node, m_theme, detailed);
 
         auto *geometryNode = static_cast<QSGGeometryNode *>(child);
         if (!geometryNode) {
-            geometryNode = new QSGGeometryNode;
-            auto *material = new QSGVertexColorMaterial;
-            geometryNode->setMaterial(material);
-            geometryNode->setFlag(QSGNode::OwnsMaterial, true);
-            geometryNode->setFlag(QSGNode::OwnsGeometry, true);
-            root->appendChildNode(geometryNode);
+            geometryNode = makeGeometryNode();
+            camera->appendChildNode(geometryNode);
         }
 
-        // Reuse the existing buffers unless the vertex or index counts changed;
-        // OwnsGeometry frees the previous geometry when a new one is set.
-        QSGGeometry *geometry = geometryNode->geometry();
-        if (!geometry || geometry->vertexCount() != mesh.vertices.size()
-            || geometry->indexCount() != mesh.indices.size()) {
-            geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
-                                       mesh.vertices.size(), mesh.indices.size());
-            geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-            geometryNode->setGeometry(geometry);
-        }
-
-        auto *vd = geometry->vertexDataAsColoredPoint2D();
-        for (int i = 0; i < mesh.vertices.size(); ++i) {
-            const auto &v = mesh.vertices[i];
-            vd[i].set(v.x, v.y, v.r, v.g, v.b, v.a);
-        }
-        quint16 *id = geometry->indexDataAsUShort();
-        for (int i = 0; i < mesh.indices.size(); ++i)
-            id[i] = mesh.indices[i];
-
-        geometryNode->markDirty(QSGNode::DirtyGeometry);
-
+        uploadMesh(geometryNode, mesh);
         child = geometryNode->nextSibling();
     }
 
     // Drop any geometry nodes left over from a larger previous board.
     while (child) {
         QSGNode *next = child->nextSibling();
-        root->removeChildNode(child);
+        camera->removeChildNode(child);
         delete child;
         child = next;
     }
+}
+
+void NodeLayerItem::updateOverlay(QSGNode *root, QSGTransformNode *camera)
+{
+    // The marquee is the container root's second child, a sibling of the camera
+    // transform, so its vertices draw in the item's logical pixels.
+    auto *marquee = static_cast<QSGGeometryNode *>(camera->nextSibling());
+
+    if (m_marqueeActive) {
+        if (!marquee) {
+            marquee = makeGeometryNode();
+            root->appendChildNode(marquee);
+            m_overlayDirty = true;
+        }
+        if (m_overlayDirty) {
+            NodeGeometryBuilder builder;
+            const QRectF rect =
+                QRectF(m_marqueeStartLogical, m_marqueeCurrentLogical).normalized();
+            uploadMesh(marquee,
+                       builder.buildScreenRect(rect, m_theme.selectionFill(),
+                                               m_theme.selection(), kMarqueeOutlineWidth));
+        }
+    } else if (marquee) {
+        root->removeChildNode(marquee);
+        delete marquee;
+    }
+
+    m_overlayDirty = false;
 }
 
 void NodeLayerItem::mousePressEvent(QMouseEvent *event)
@@ -170,8 +255,8 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
     }
     forceActiveFocus();
 
-    // Middle-button, or Space + left-button, pans the canvas; handled on the top
-    // layer so a node hit and a pan never fight over the same press.
+    // Middle-button, or Space + left-button, pans the canvas; handled on the top layer
+    // so a node hit and a pan never fight over the same press.
     const bool panButton = event->button() == Qt::MiddleButton
         || (event->button() == Qt::LeftButton && m_spaceHeld);
     if (panButton) {
@@ -189,23 +274,38 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
 
     const QPointF world = worldFromLocal(event->position());
     const int hitId = m_graph.hitTest(world);
-    const bool changed = m_graph.selectOnly(hitId);
+    const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
 
     if (hitId != -1) {
-        m_dragging = true;
-        m_dragNodeId = hitId;
-        const core::Node *n = m_graph.nodeById(hitId);
-        m_dragGrabWorldOffset = world - n->worldPos;
-        setCursor(Qt::ClosedHandCursor);
-    } else {
-        // A plain left-press on empty canvas clears the selection and starts a pan,
-        // so dragging the empty surface moves the camera 1:1.
-        m_panning = true;
-        m_lastPanPosLogical = event->position();
-        setCursor(Qt::ClosedHandCursor);
-    }
+        if (shift) {
+            m_graph.toggleSelected(hitId);
+        } else if (!m_graph.nodeById(hitId)->selected) {
+            // A plain click on an unselected node makes it the only selection; a plain
+            // click on an already-selected node keeps the whole selection to drag it.
+            m_graph.selectOnly(hitId);
+        }
 
-    if (changed) {
+        if (m_graph.nodeById(hitId) && m_graph.nodeById(hitId)->selected) {
+            const QVector<int> ids = m_graph.selectedIds();
+            m_graph.raiseToTop(ids); // selecting or dragging raises to the top
+            m_dragging = true;
+            m_dragIds = m_graph.selectedIds();
+            m_dragPressWorld = world;
+            m_dragLastWorld = world;
+            setCursor(Qt::ClosedHandCursor);
+        }
+        m_geometryDirty = true;
+        update();
+    } else {
+        // Empty canvas: a plain press clears the selection and starts a marquee band;
+        // Shift keeps the current selection so the band adds to it.
+        if (!shift)
+            m_graph.clearSelection();
+        m_marqueeActive = true;
+        m_marqueeAdditive = shift;
+        m_marqueeStartLogical = event->position();
+        m_marqueeCurrentLogical = event->position();
+        m_overlayDirty = true;
         m_geometryDirty = true;
         update();
     }
@@ -222,9 +322,19 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
-    if (m_dragging && m_dragNodeId != -1) {
+    if (m_marqueeActive) {
+        m_marqueeCurrentLogical = event->position();
+        m_overlayDirty = true;
+        update();
+        event->accept();
+        return;
+    }
+
+    if (m_dragging) {
         const QPointF world = worldFromLocal(event->position());
-        m_graph.moveNodeTo(m_dragNodeId, world - m_dragGrabWorldOffset);
+        const QPointF delta = world - m_dragLastWorld;
+        m_dragLastWorld = world;
+        m_graph.moveNodesBy(m_dragIds, delta); // live 1:1 feedback
         m_geometryDirty = true;
         update();
         event->accept();
@@ -243,14 +353,49 @@ void NodeLayerItem::mouseReleaseEvent(QMouseEvent *event)
         event->accept();
         return;
     }
+
+    if (m_marqueeActive) {
+        const QPointF worldStart = worldFromLocal(m_marqueeStartLogical);
+        const QPointF worldEnd = worldFromLocal(m_marqueeCurrentLogical);
+        m_graph.selectInRect(QRectF(worldStart, worldEnd).normalized(), m_marqueeAdditive);
+        m_marqueeActive = false;
+        m_overlayDirty = true;
+        m_geometryDirty = true;
+        update();
+        event->accept();
+        return;
+    }
+
     if (m_dragging) {
+        // Coalesce the whole drag into one net-delta move: the nodes already moved live
+        // by this delta, so record (do not re-apply) it as a single undo step.
+        const QPointF net = m_dragLastWorld - m_dragPressWorld;
+        if (!net.isNull())
+            m_commands.record(std::make_unique<core::MoveNodesCommand>(m_dragIds, net));
         m_dragging = false;
-        m_dragNodeId = -1;
+        m_dragIds.clear();
         unsetCursor();
         event->accept();
         return;
     }
+
     event->ignore();
+}
+
+void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (!m_controller || event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+
+    const QPointF world = worldFromLocal(event->position());
+    if (m_graph.hitTest(world) == -1) {
+        addNodeAtCursor(world); // empty canvas: add a node at the cursor
+        event->accept();
+        return;
+    }
+    event->ignore(); // on a node, a double-click does not add
 }
 
 void NodeLayerItem::wheelEvent(QWheelEvent *event)
@@ -290,13 +435,56 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
         event->accept();
         return;
     }
-    if (event->key() == Qt::Key_0
-        && event->modifiers().testFlag(Qt::ControlModifier)) {
+
+    const bool control = event->modifiers().testFlag(Qt::ControlModifier);
+    const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+
+    if (control && event->key() == Qt::Key_0) {
         if (m_controller)
             m_controller->reset();
         event->accept();
         return;
     }
+
+    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
+        const QVector<int> ids = m_graph.selectedIds();
+        if (!ids.isEmpty()) {
+            m_commands.push(std::make_unique<core::DeleteNodesCommand>(ids), m_graph);
+            m_geometryDirty = true;
+            update();
+        }
+        event->accept();
+        return;
+    }
+
+    if (control && event->key() == Qt::Key_Z) {
+        if (shift)
+            m_commands.redo(m_graph);
+        else
+            m_commands.undo(m_graph);
+        m_geometryDirty = true;
+        update();
+        event->accept();
+        return;
+    }
+
+    if (control && event->key() == Qt::Key_A) {
+        for (const core::Node &n : m_graph.nodes())
+            m_graph.setSelected(n.id, true);
+        m_geometryDirty = true;
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape) {
+        m_graph.clearSelection();
+        m_geometryDirty = true;
+        update();
+        event->accept();
+        return;
+    }
+
     event->ignore();
 }
 

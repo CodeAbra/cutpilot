@@ -52,7 +52,14 @@ public:
     Mesh buildNode(const core::Node &node, const theme::ThemeTable &theme,
                    bool detailed) const;
 
+    // Build a screen-space rectangle as a translucent fill under a thin outline. Used
+    // for the marquee band; the rect is in the item's logical pixels so it draws at a
+    // constant width under the transform-free overlay root regardless of zoom.
+    Mesh buildScreenRect(const QRectF &rect, const QColor &fill, const QColor &outline,
+                         qreal outlineWidth) const;
+
 private:
+    static void appendQuad(Mesh &mesh, const QRectF &rect, const QColor &color);
     static void appendTriangle(Mesh &mesh, const QPointF &a, const QPointF &b,
                                const QPointF &c, const QColor &color);
     static void appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,
