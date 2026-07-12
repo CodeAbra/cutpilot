@@ -53,7 +53,7 @@ public:
     QColor selection() const { return m_selection; }
     QColor glowEmphasis() const { return m_glowEmphasis; }
 
-    // The neutral low-alpha band fill under the marquee and the multi-select wash.
+    // The neutral low-alpha band fill under the marquee.
     QColor selectionFill() const { return m_selectionFill; }
 
     // The light-neutral hairline colour drawn for alignment guides.
