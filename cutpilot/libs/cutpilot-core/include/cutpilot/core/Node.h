@@ -31,6 +31,27 @@ struct Port {
     qreal edgeFraction = 0.5;
 };
 
+// What a node's body is made of: a plain content card, editable prompt text
+// that feeds downstream generation, or a model-backed generation whose body
+// becomes the produced media.
+enum class NodeKind {
+    Blank,
+    Prompt,
+    Generate
+};
+
+// A generation node's run lifecycle. NeedsKey marks a run refused because the
+// picked model's vendor has no API key configured; the node surfaces the
+// add-a-key affordance instead of failing silently.
+enum class RunState {
+    Idle,
+    Queued,
+    Running,
+    Done,
+    Error,
+    NeedsKey
+};
+
 // A node on the canvas, expressed entirely in world coordinates. The body is the
 // content; the header is a slim strip carrying the title and model name. The
 // renderer draws this; the node never becomes a per-instance widget.
@@ -41,6 +62,35 @@ struct Node {
     QSizeF worldSize{0, 0};   // card size, in world units
     bool selected = false;
     QVector<Port> ports;
+
+    NodeKind kind = NodeKind::Blank;
+
+    // Prompt-node body text; a Generate node falls back to its own text when
+    // no upstream prompt is wired in.
+    QString promptText;
+
+    // The picked generation model and its display name for the header chip.
+    QString modelId;
+    QString modelLabel;
+
+    // Live run status, written directly (not through commands): status is
+    // transient job state, not an undoable edit.
+    RunState runState = RunState::Idle;
+    qreal runProgress = 0.0;
+    QString statusMessage;
+
+    // The finished result: media path, final cost (negative until known), and
+    // the produced resolution.
+    QString resultPath;
+    double costUsd = -1.0;
+    int resultWidth = 0;
+    int resultHeight = 0;
+
+    // Bumped on every content or status change so cached rasters and textures
+    // know to refresh; geometry-only changes (move, select) leave it alone.
+    int contentRevision = 0;
+
+    void bumpContent() { ++contentRevision; }
 
     QRectF worldRect() const { return QRectF(worldPos, worldSize); }
     bool containsWorld(const QPointF &world) const { return worldRect().contains(world); }

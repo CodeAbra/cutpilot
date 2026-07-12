@@ -28,6 +28,10 @@ qt_add_executable(tst_connectorpath tst_connectorpath.cpp)
 target_link_libraries(tst_connectorpath PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.connectorpath COMMAND tst_connectorpath)
 
+qt_add_executable(tst_generationcommands tst_generationcommands.cpp)
+target_link_libraries(tst_generationcommands PRIVATE Qt6::Test cutpilot-core)
+add_test(NAME core.generationcommands COMMAND tst_generationcommands)
+
 qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
