@@ -85,3 +85,14 @@ if(Python3_FOUND)
     set_tests_properties(sidecar.generation PROPERTIES
         ENVIRONMENT "CUTPILOT_DISABLE_KEYCHAIN=1")
 endif()
+
+# The composite inspector against the real command stack: a scrub commits one
+# undo step, and an undo taken while the panel stays open must survive the
+# panel's next gesture untouched.
+qt_add_executable(tst_compositeinspector tst_compositeinspector.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/CompositeInspector.cpp)
+target_include_directories(tst_compositeinspector PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_compositeinspector PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-render)
+add_test(NAME app.compositeinspector COMMAND tst_compositeinspector)

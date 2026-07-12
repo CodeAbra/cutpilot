@@ -67,10 +67,24 @@ CompositeInspector::CompositeInspector(const ThemeTable &theme,
 
     connect(close, &QPushButton::clicked, this, &QWidget::hide);
     connect(layer, &NodeLayerItem::graphMutated, this, [this] {
+        if (m_nodeId == -1)
+            return;
+        const core::Node *node = m_layer->graph().nodeById(m_nodeId);
         // The edited node can vanish through delete or undo.
-        if (isVisible() && m_nodeId != -1
-            && !m_layer->graph().nodeById(m_nodeId))
-            hide();
+        if (!node) {
+            if (isVisible())
+                hide();
+            return;
+        }
+        // The node's content moved without this panel writing it — an undo,
+        // a redo, or another writer. The graph is the truth: re-read it, or
+        // the next gesture here would push stale values back over it.
+        if (node->contentRevision != m_seenRevision) {
+            m_before = node->comp;
+            m_current = node->comp;
+            m_seenRevision = node->contentRevision;
+            rebuildControls(node->kind);
+        }
     });
 
     if (parent)
@@ -87,6 +101,7 @@ void CompositeInspector::openFor(int nodeId)
     m_nodeId = nodeId;
     m_before = node->comp;
     m_current = node->comp;
+    m_seenRevision = node->contentRevision;
     m_title->setText(node->title);
     rebuildControls(node->kind);
     show();
@@ -114,6 +129,10 @@ void CompositeInspector::reanchor()
 void CompositeInspector::preview()
 {
     m_layer->previewCompositeParams(m_nodeId, m_current);
+    // This panel's own write; the resync above must not mistake it for a
+    // foreign change.
+    if (const core::Node *node = m_layer->graph().nodeById(m_nodeId))
+        m_seenRevision = node->contentRevision;
     m_previews->refresh();
 }
 

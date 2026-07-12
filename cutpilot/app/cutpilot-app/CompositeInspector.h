@@ -56,6 +56,9 @@ private:
     QLabel *m_title = nullptr;
     QWidget *m_controls = nullptr;
     int m_nodeId = -1;
+    // The bound node's contentRevision as of this panel's last read or
+    // write; a mismatch on graphMutated means someone else moved the values.
+    int m_seenRevision = -1;
     core::CompositeParams m_before;
     core::CompositeParams m_current;
 };
