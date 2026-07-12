@@ -170,9 +170,8 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
     }
     forceActiveFocus();
 
-    // Middle-button, or Space + left-button, pans the canvas — the same gestures the
-    // empty canvas offered before nodes existed, now handled on the top layer so a
-    // node hit and a pan never fight over the same press.
+    // Middle-button, or Space + left-button, pans the canvas; handled on the top
+    // layer so a node hit and a pan never fight over the same press.
     const bool panButton = event->button() == Qt::MiddleButton
         || (event->button() == Qt::LeftButton && m_spaceHeld);
     if (panButton) {

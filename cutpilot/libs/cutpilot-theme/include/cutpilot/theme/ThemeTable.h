@@ -14,8 +14,8 @@ enum class Theme {
 
 // Resolved values for every named design token a surface may read. Each surface,
 // whether a Qt widget or the GPU canvas, reads from one table so chrome and canvas
-// can never drift. Phase one needs only the canvas surface, the grid tint, and the
-// subtle border; the table is structured to grow token-by-token from here.
+// can never drift. Only the canvas surface, grid tint, and subtle border are resolved
+// so far; the table is structured to grow token-by-token from here.
 class ThemeTable {
 public:
     explicit ThemeTable(Theme theme = Theme::Dark);
@@ -44,8 +44,7 @@ public:
     QColor textPrimary() const { return m_textPrimary; }
     QColor textSecondary() const { return m_textSecondary; }
 
-    // Node card surfaces: the resting body, the slim header strip over it, and the
-    // hatched body of a muted node (unused until later phases).
+    // Node card surfaces: the resting body and the slim header strip over it.
     QColor nodeBody() const { return m_nodeBody; }
     QColor nodeHeader() const { return m_nodeHeader; }
 
