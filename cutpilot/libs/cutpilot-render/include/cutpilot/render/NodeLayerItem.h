@@ -226,7 +226,10 @@ private:
     bool m_guidesActive = false;
     QVector<QLineF> m_guideLinesLogical;
 
+    // The pan gesture remembers the button that started it, so releasing a
+    // different button (a concurrent left-button gesture) never ends the pan.
     bool m_panning = false;
+    Qt::MouseButton m_panButton = Qt::NoButton;
     bool m_spaceHeld = false;
     QPointF m_lastPanPosLogical;
 };

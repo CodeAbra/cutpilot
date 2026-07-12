@@ -56,6 +56,30 @@ void key(DrivableLayer &layer, Qt::Key k, Qt::KeyboardModifiers mods)
     layer.keyPressEvent(&event);
 }
 
+// Button-explicit variants for gestures that mix mouse buttons.
+void pressButton(DrivableLayer &layer, const QPointF &pos, Qt::MouseButton button,
+                 Qt::MouseButtons alreadyHeld)
+{
+    QMouseEvent event(QEvent::MouseButtonPress, pos, pos, button,
+                      alreadyHeld | button, Qt::NoModifier);
+    layer.mousePressEvent(&event);
+}
+
+void releaseButton(DrivableLayer &layer, const QPointF &pos, Qt::MouseButton button,
+                   Qt::MouseButtons stillHeld)
+{
+    QMouseEvent event(QEvent::MouseButtonRelease, pos, pos, button, stillHeld,
+                      Qt::NoModifier);
+    layer.mouseReleaseEvent(&event);
+}
+
+void moveButtons(DrivableLayer &layer, const QPointF &pos, Qt::MouseButtons held)
+{
+    QMouseEvent event(QEvent::MouseMove, pos, pos, Qt::NoButton, held,
+                      Qt::NoModifier);
+    layer.mouseMoveEvent(&event);
+}
+
 // True when every connection's endpoints resolve to live nodes.
 bool allEndpointsExist(const cutpilot::core::NodeGraph &graph)
 {
@@ -124,6 +148,7 @@ private slots:
     void deleteDuringConnectDragCannotOrphanAConnection();
     void undoDuringConnectDragCannotOrphanAConnection();
     void flickReleaseWithoutTrailingMoveStillConnects();
+    void leftReleaseDuringMiddlePanEndsTheWireNotThePan();
 };
 
 void TstNodeLayerWiring::dragOutputToCompatibleInputConnects()
@@ -358,6 +383,42 @@ void TstNodeLayerWiring::flickReleaseWithoutTrailingMoveStillConnects()
     QCOMPARE(wire.fromPortIndex, 3);
     QCOMPARE(wire.toNodeId, bId);
     QCOMPARE(wire.toPortIndex, 0);
+}
+
+void TstNodeLayerWiring::leftReleaseDuringMiddlePanEndsTheWireNotThePan()
+{
+    Board board;
+    const QPointF a(300, 300);
+    const QPointF b(900, 500);
+    const int aId = board.addDefaultNode(a);
+    const int bId = board.addDefaultNode(b);
+
+    // A left-button wire-drag and a middle-button pan run at the same time.
+    press(board.layer, outputPort(a));
+    moveButtons(board.layer, QPointF(600, 380), Qt::LeftButton);
+    pressButton(board.layer, QPointF(600, 380), Qt::MiddleButton, Qt::LeftButton);
+
+    // Releasing the left button ends the wire gesture: the wire commits at the
+    // release point and must not be misread as the end of the pan.
+    releaseButton(board.layer, imageInputPort(b), Qt::LeftButton, Qt::MiddleButton);
+    const core::NodeGraph &graph = board.layer.graph();
+    QCOMPARE(graph.connections().size(), 1);
+    QCOMPARE(graph.connections().first().fromNodeId, aId);
+    QCOMPARE(graph.connections().first().toNodeId, bId);
+
+    // The pan is still live: moving with the middle button held pans the camera.
+    const QPointF panBefore = board.controller.panPixels();
+    moveButtons(board.layer, imageInputPort(b) + QPointF(20, 20), Qt::MiddleButton);
+    QVERIFY(board.controller.panPixels() != panBefore);
+
+    // Releasing the middle button ends the pan; a further move pans no more,
+    // and the finished wire gesture leaves the model alone.
+    releaseButton(board.layer, imageInputPort(b) + QPointF(20, 20),
+                  Qt::MiddleButton, Qt::NoButton);
+    const QPointF panAfter = board.controller.panPixels();
+    moveButtons(board.layer, imageInputPort(b) + QPointF(60, 60), Qt::NoButton);
+    QCOMPARE(board.controller.panPixels(), panAfter);
+    QCOMPARE(graph.connections().size(), 1);
 }
 
 int main(int argc, char *argv[])

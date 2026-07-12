@@ -958,9 +958,12 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
     const bool panButton = event->button() == Qt::MiddleButton
         || (event->button() == Qt::LeftButton && m_spaceHeld);
     if (panButton) {
-        m_panning = true;
-        m_lastPanPosLogical = event->position();
-        setCursor(Qt::ClosedHandCursor);
+        if (!m_panning) {
+            m_panning = true;
+            m_panButton = event->button();
+            m_lastPanPosLogical = event->position();
+            setCursor(Qt::ClosedHandCursor);
+        }
         event->accept();
         return;
     }
@@ -1073,11 +1076,21 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
 
 void NodeLayerItem::mouseReleaseEvent(QMouseEvent *event)
 {
-    if (m_panning) {
+    // Each gesture ends only on the release of the button that drives it: the
+    // pan on its recorded button, everything else on the left button.
+    if (m_panning && event->button() == m_panButton) {
         m_panning = false;
-        if (!m_spaceHeld)
+        m_panButton = Qt::NoButton;
+        if (m_connectActive)
+            setCursor(Qt::CrossCursor);
+        else if (!m_spaceHeld)
             unsetCursor();
         event->accept();
+        return;
+    }
+
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
         return;
     }
 
