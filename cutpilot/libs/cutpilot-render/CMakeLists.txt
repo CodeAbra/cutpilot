@@ -2,6 +2,7 @@ qt_add_library(cutpilot-render STATIC
     include/cutpilot/render/CanvasController.h
     include/cutpilot/render/CanvasItem.h
     include/cutpilot/render/CompositorEngine.h
+    include/cutpilot/render/CompositorService.h
     include/cutpilot/render/NodeLayerItem.h
     include/cutpilot/render/PreviewController.h
     include/cutpilot/render/PreviewItem.h
@@ -9,6 +10,7 @@ qt_add_library(cutpilot-render STATIC
     src/CanvasItem.cpp
     src/CanvasRenderer.cpp
     src/CompositorEngine.cpp
+    src/CompositorService.cpp
     src/NodeLayerItem.cpp
     src/PreviewController.cpp
     src/PreviewItem.cpp
@@ -26,6 +28,7 @@ target_link_libraries(cutpilot-render
         cutpilot-theme
         Qt6::Quick
     PRIVATE
+        Qt6::Concurrent
         Qt6::GuiPrivate)
 
 # Bake the grid and compositor shaders to .qsb and embed them under the

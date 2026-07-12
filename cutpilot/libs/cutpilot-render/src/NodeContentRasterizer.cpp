@@ -1,9 +1,11 @@
 #include "NodeContentRasterizer.h"
 #include "NodeCardLayout.h"
 
+#include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/Node.h"
 #include "cutpilot/theme/ThemeTable.h"
 
+#include <QFileInfo>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QPainter>
@@ -89,10 +91,39 @@ StatusLine statusLine(const core::Node &node, const theme::ThemeTable &theme)
     return { QStringLiteral("Ready"), theme.textSecondary() };
 }
 
+// One line summarizing a compositing node's parameters, painted over an
+// empty body so the card reads at a glance without opening the inspector.
+QString compositeSummary(const core::Node &node)
+{
+    const core::CompositeParams &p = node.comp;
+    switch (node.kind) {
+    case core::NodeKind::Blend:
+        return QStringLiteral("%1 · %2%")
+            .arg(core::blendModeLabel(p.blendMode))
+            .arg(qRound(p.opacity * 100.0));
+    case core::NodeKind::Mask:
+        return p.invertMask ? QStringLiteral("Inverted") : QStringLiteral("Direct");
+    case core::NodeKind::Key:
+        return QStringLiteral("%1 · tol %2 · soft %3")
+            .arg(p.lumaKey ? QStringLiteral("Luma") : QStringLiteral("Chroma"))
+            .arg(p.keyTolerance, 0, 'f', 2)
+            .arg(p.keySoftness, 0, 'f', 2);
+    case core::NodeKind::Transform:
+        return QStringLiteral("×%1 · %2° · %3, %4")
+            .arg(p.scale, 0, 'f', 2)
+            .arg(p.rotationDeg, 0, 'f', 0)
+            .arg(p.translateX, 0, 'f', 2)
+            .arg(p.translateY, 0, 'f', 2);
+    default:
+        return QString();
+    }
+}
+
 } // namespace
 
 QImage NodeContentRasterizer::rasterize(const core::Node &node,
-                                        const theme::ThemeTable &theme) const
+                                        const theme::ThemeTable &theme,
+                                        bool hasMedia) const
 {
     const QSizeF worldSize = node.worldSize;
     const QSize pixels(qMax(1, qRound(worldSize.width() * kScale)),
@@ -157,6 +188,27 @@ QImage NodeContentRasterizer::rasterize(const core::Node &node,
         painter.setPen(theme.textSecondary());
         painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
                          QStringLiteral("No result yet — press run"));
+    } else if (node.kind == core::NodeKind::Still && !hasMedia) {
+        painter.setFont(uiFont(12.0));
+        painter.setPen(theme.textSecondary());
+        if (node.mediaPath.isEmpty()) {
+            painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
+                             QStringLiteral("Double-click to choose an image"));
+        } else if (!node.statusMessage.isEmpty()) {
+            painter.setPen(theme.statusWarning());
+            painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
+                             node.statusMessage);
+        } else {
+            painter.drawText(
+                body, Qt::AlignCenter | Qt::TextWordWrap,
+                QStringLiteral("Loading %1").arg(
+                    QFileInfo(node.mediaPath).fileName()));
+        }
+    } else if (core::isCompositeKind(node.kind) && !hasMedia) {
+        painter.setFont(uiFont(12.0));
+        painter.setPen(theme.textSecondary());
+        painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
+                         compositeSummary(node));
     } else if (node.kind == core::NodeKind::CostGate) {
         // The gate card reads as policy: the limit, what its branch has
         // spent this run, and whether it is holding work.

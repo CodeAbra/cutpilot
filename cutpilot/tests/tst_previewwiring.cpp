@@ -18,11 +18,18 @@ using render::PreviewItem;
 
 namespace {
 
+// Promotes the protected key handler so undo can be driven with synthesized
+// events on the offscreen platform.
+class DrivableLayer : public render::NodeLayerItem {
+public:
+    using render::NodeLayerItem::keyPressEvent;
+};
+
 // The preview's plumbing under test: a board, the controller that owns the
 // pins, and the surface receiving the built plans.
 struct Rig {
     render::CanvasController camera;
-    render::NodeLayerItem layer;
+    DrivableLayer layer;
     PreviewItem item;
     PreviewController previews;
 
@@ -67,6 +74,7 @@ private slots:
     void pinsAreDecoupledFromSelection();
     void bothBuffersHoldIndependentPins();
     void refreshFollowsParameterChanges();
+    void aScrubCommitsAsOneUndoStep();
     void aDeletedPinIsDropped();
     void compareStateLandsInTheItem();
 };
@@ -147,6 +155,28 @@ void PreviewWiringTest::refreshFollowsParameterChanges()
 
     const QString after = rig.item.buffer(0).plan.passes.last().signature;
     QVERIFY(before != after);
+}
+
+void PreviewWiringTest::aScrubCommitsAsOneUndoStep()
+{
+    Rig rig;
+    const int transform = rig.addProto(NodeKind::Transform);
+
+    // The inspector writes live values while the slider moves, then records
+    // the gesture on release; a single undo returns to the pre-scrub state.
+    const core::CompositeParams before =
+        rig.layer.graph().nodeById(transform)->comp;
+    core::CompositeParams live = before;
+    for (double degree : { 5.0, 12.0, 33.0 }) {
+        live.rotationDeg = degree;
+        rig.layer.previewCompositeParams(transform, live);
+    }
+    QCOMPARE(rig.layer.graph().nodeById(transform)->comp.rotationDeg, 33.0);
+
+    rig.layer.commitCompositeParams(transform, before, live);
+    QKeyEvent undo(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+    rig.layer.keyPressEvent(&undo);
+    QCOMPARE(rig.layer.graph().nodeById(transform)->comp, before);
 }
 
 void PreviewWiringTest::aDeletedPinIsDropped()

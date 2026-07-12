@@ -5,6 +5,7 @@
 #include "NodeGeometryBuilder.h"
 
 #include "cutpilot/core/AlignmentGuides.h"
+#include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/ConnectorPath.h"
 #include "cutpilot/core/command/AddConnectedNodeCommand.h"
 #include "cutpilot/core/command/AddNodeCommand.h"
@@ -14,13 +15,19 @@
 #include "cutpilot/core/command/DisconnectCommand.h"
 #include "cutpilot/core/command/EditPromptCommand.h"
 #include "cutpilot/core/command/MoveNodesCommand.h"
+#include "cutpilot/core/command/SetCompositeParamsCommand.h"
 #include "cutpilot/core/command/SetGateLimitCommand.h"
+#include "cutpilot/core/command/SetMediaPathCommand.h"
 #include "cutpilot/core/command/SetModelCommand.h"
 
+#include <QDir>
 #include <QKeyEvent>
+#include <QLinearGradient>
 #include <QMatrix4x4>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QQuickWindow>
+#include <QStandardPaths>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
 #include <QSGNode>
@@ -111,6 +118,7 @@ public:
     int nodeId = -1;
     int contentRevision = -1;
     int mediaVersion = -1;
+    bool hadMedia = false;
 };
 
 // The generated image sized to fit the node's media well without distortion.
@@ -232,6 +240,98 @@ void NodeLayerItem::seedStarterNode()
     update();
 }
 
+void NodeLayerItem::seedCompositeBoard()
+{
+    // Two generated stills: a dusk-gradient backdrop, and a subject on a
+    // solid green field for the key to remove.
+    QImage backdrop(768, 512, QImage::Format_RGBA8888);
+    {
+        QPainter painter(&backdrop);
+        QLinearGradient sky(0, 0, 0, backdrop.height());
+        sky.setColorAt(0.0, QColor(24, 32, 68));
+        sky.setColorAt(0.6, QColor(120, 60, 96));
+        sky.setColorAt(1.0, QColor(226, 128, 60));
+        painter.fillRect(backdrop.rect(), sky);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(255, 214, 140, 200));
+        painter.drawEllipse(QPointF(560, 150), 46, 46);
+    }
+
+    const QColor field(0, 177, 64);
+    QImage subject(768, 512, QImage::Format_RGBA8888);
+    {
+        QPainter painter(&subject);
+        painter.fillRect(subject.rect(), field);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(236, 240, 244));
+        painter.drawEllipse(QPointF(384, 200), 90, 90);
+        painter.setBrush(QColor(52, 120, 190));
+        painter.drawRoundedRect(QRectF(294, 300, 180, 170), 24, 24);
+    }
+
+    const QString tempDir =
+        QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    const QString backdropPath = QDir(tempDir).filePath(
+        QStringLiteral("cutpilot-composite-backdrop.png"));
+    const QString subjectPath =
+        QDir(tempDir).filePath(QStringLiteral("cutpilot-composite-subject.png"));
+    backdrop.save(backdropPath);
+    subject.save(subjectPath);
+
+    core::Node backdropStill =
+        core::compositeNodePrototype(core::NodeKind::Still);
+    backdropStill.title = QStringLiteral("Backdrop");
+    backdropStill.mediaPath = backdropPath;
+    backdropStill.worldPos = QPointF(120.0, 120.0);
+    const int backdropId = m_graph.addNode(backdropStill);
+
+    core::Node subjectStill = core::compositeNodePrototype(core::NodeKind::Still);
+    subjectStill.title = QStringLiteral("Subject");
+    subjectStill.mediaPath = subjectPath;
+    subjectStill.worldPos = QPointF(120.0, 420.0);
+    const int subjectId = m_graph.addNode(subjectStill);
+
+    core::Node key = core::compositeNodePrototype(core::NodeKind::Key);
+    key.comp.keyColor = field;
+    key.comp.keyTolerance = 0.22;
+    key.comp.keySoftness = 0.06;
+    key.worldPos = QPointF(500.0, 420.0);
+    const int keyId = m_graph.addNode(key);
+
+    core::Node transform = core::compositeNodePrototype(core::NodeKind::Transform);
+    transform.comp.scale = 0.85;
+    transform.comp.translateX = -0.16;
+    transform.comp.translateY = 0.05;
+    transform.worldPos = QPointF(880.0, 420.0);
+    const int transformId = m_graph.addNode(transform);
+
+    core::Node blend = core::compositeNodePrototype(core::NodeKind::Blend);
+    blend.worldPos = QPointF(1260.0, 640.0);
+    const int blendId = m_graph.addNode(blend);
+
+    const auto connect = [this](int from, int fromPort, int to, int toPort) {
+        core::Connection wire;
+        wire.fromNodeId = from;
+        wire.fromPortIndex = fromPort;
+        wire.toNodeId = to;
+        wire.toPortIndex = toPort;
+        m_graph.addConnection(wire);
+    };
+    connect(subjectId, 0, keyId, 0);
+    connect(keyId, 1, transformId, 0);
+    connect(backdropId, 0, blendId, 0);
+    connect(transformId, 1, blendId, 1);
+
+    setNodeMedia(backdropId, backdrop);
+    setNodeMedia(subjectId, subject);
+
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+}
+
 void NodeLayerItem::seedStressBoard(int count)
 {
     constexpr int kMaxStressNodes = 5000;
@@ -320,11 +420,62 @@ void NodeLayerItem::setGateLimit(int nodeId, double limitUsd)
     emit graphMutated();
 }
 
+void NodeLayerItem::setNodeMediaPath(int nodeId, const QString &mediaPath)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || node->kind != core::NodeKind::Still
+        || node->mediaPath == mediaPath)
+        return;
+    m_commands.push(std::make_unique<core::SetMediaPathCommand>(nodeId, mediaPath),
+                    m_graph);
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+void NodeLayerItem::previewCompositeParams(int nodeId,
+                                           const core::CompositeParams &params)
+{
+    core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || !core::isCompositeKind(node->kind) || node->comp == params)
+        return;
+    node->comp = params;
+    node->bumpContent();
+    m_geometryDirty = true;
+    update();
+}
+
+void NodeLayerItem::commitCompositeParams(int nodeId,
+                                          const core::CompositeParams &before,
+                                          const core::CompositeParams &after)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || !core::isCompositeKind(node->kind) || before == after)
+        return;
+    // The values are already live from the scrub; record the gesture as one
+    // undo step rather than applying it a second time.
+    m_commands.record(
+        std::make_unique<core::SetCompositeParamsCommand>(nodeId, before, after));
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
 void NodeLayerItem::setNodeMedia(int nodeId, const QImage &image)
 {
     if (image.isNull())
         return;
     m_mediaImages.insert(nodeId, image);
+    m_mediaVersions[nodeId] = m_mediaVersions.value(nodeId, 0) + 1;
+    m_geometryDirty = true;
+    update();
+}
+
+void NodeLayerItem::clearNodeMedia(int nodeId)
+{
+    if (!m_mediaImages.contains(nodeId))
+        return;
+    m_mediaImages.remove(nodeId);
     m_mediaVersions[nodeId] = m_mediaVersions.value(nodeId, 0) + 1;
     m_geometryDirty = true;
     update();
@@ -425,6 +576,11 @@ QVector<core::Node> paletteCatalog()
         entry(QStringLiteral("Extract Mask"), QSizeF(240, 160),
               { { QStringLiteral("image"), core::PortType::Image, true, 0.5 },
                 { QStringLiteral("mask"), core::PortType::Mask, false, 0.5 } }),
+        core::compositeNodePrototype(core::NodeKind::Still),
+        core::compositeNodePrototype(core::NodeKind::Blend),
+        core::compositeNodePrototype(core::NodeKind::Mask),
+        core::compositeNodePrototype(core::NodeKind::Key),
+        core::compositeNodePrototype(core::NodeKind::Transform),
         entry(QStringLiteral("Generate Video"), QSizeF(300, 210),
               { { QStringLiteral("prompt"), core::PortType::Text, true, 0.35 },
                 { QStringLiteral("image"), core::PortType::Image, true, 0.6 },
@@ -959,10 +1115,15 @@ void NodeLayerItem::rebuildNodes(QSGNode *nodeRoot, bool detailed,
                 group->content->setFiltering(QSGTexture::Linear);
                 group->appendChildNode(group->content);
             }
-            if (reassigned || group->contentRevision != node.contentRevision) {
+            // Media arriving or leaving redraws the text layer too, so the
+            // placeholder guidance never lingers over a thumbnail.
+            const bool mediaPresent = !mediaImage.isNull();
+            if (reassigned || group->contentRevision != node.contentRevision
+                || group->hadMedia != mediaPresent) {
                 group->content->setTexture(window()->createTextureFromImage(
-                    rasterizer.rasterize(node, m_theme)));
+                    rasterizer.rasterize(node, m_theme, mediaPresent)));
                 group->contentRevision = node.contentRevision;
+                group->hadMedia = mediaPresent;
             }
             group->content->setRect(node.worldRect());
         } else if (group->content) {
@@ -1462,6 +1623,22 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
         m_geometryDirty = true;
         update();
         emit gateLimitEditRequested(hitId);
+        event->accept();
+        return;
+    }
+    if (hitNode->kind == core::NodeKind::Still) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        emit mediaPickRequested(hitId);
+        event->accept();
+        return;
+    }
+    if (core::isCompositeKind(hitNode->kind)) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        emit compositeEditRequested(hitId);
         event->accept();
         return;
     }

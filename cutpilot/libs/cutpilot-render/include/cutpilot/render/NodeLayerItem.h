@@ -73,15 +73,30 @@ public:
 
     // Undoable content edits, pushed through the command stack like any other
     // graph mutation. The chrome calls these from its prompt editor, model
-    // picker, and gate limit dialog.
+    // picker, gate limit dialog, file picker, and parameter inspector.
     void setNodePrompt(int nodeId, const QString &text);
     void setNodeModel(int nodeId, const QString &modelId, const QString &modelLabel);
     void setGateLimit(int nodeId, double limitUsd);
+    void setNodeMediaPath(int nodeId, const QString &mediaPath);
+
+    // The scrub seam, mirroring how a drag moves nodes: the inspector writes
+    // parameters directly for live feedback, then records the whole gesture
+    // as one undoable step on release without re-applying it.
+    void previewCompositeParams(int nodeId, const core::CompositeParams &params);
+    void commitCompositeParams(int nodeId, const core::CompositeParams &before,
+                               const core::CompositeParams &after);
+
+    // Seed a local compositing chain — stills through a key and a transform
+    // into a blend — for demos and evidence runs, no vendor required. The
+    // still images are generated and written under the system temp location.
+    Q_INVOKABLE void seedCompositeBoard();
 
     // Hand the layer a node's decoded result to display as the card's media
     // body. Images stay keyed by node id, which is never reused, so a node
-    // restored by undo finds its media again.
+    // restored by undo finds its media again. Clearing drops the image and
+    // returns the card to its textual body.
     void setNodeMedia(int nodeId, const QImage &image);
+    void clearNodeMedia(int nodeId);
 
     // The node's current media image and its upload version — the preview
     // and the thumbnail compositor read their source pixels from here.
@@ -123,6 +138,11 @@ signals:
     // here, re-run ignoring cache); a cost gate wants its limit editor.
     void nodeMenuRequested(int nodeId);
     void gateLimitEditRequested(int nodeId);
+
+    // A still node wants the file picker; a compositing node wants the
+    // parameter inspector. The chrome supplies both surfaces.
+    void mediaPickRequested(int nodeId);
+    void compositeEditRequested(int nodeId);
 
     // The graph structure or content changed through a command or history
     // walk; run bookkeeping (orphaned states, dead jobs) should reconcile.

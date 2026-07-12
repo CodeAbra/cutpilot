@@ -24,8 +24,10 @@ public:
     // detailed zoom range without oversized uploads.
     static constexpr qreal kScale = 2.0;
 
-    QImage rasterize(const core::Node &node,
-                     const theme::ThemeTable &theme) const;
+    // hasMedia reports whether the card already shows a media body, so the
+    // placeholder guidance is painted only over an empty well.
+    QImage rasterize(const core::Node &node, const theme::ThemeTable &theme,
+                     bool hasMedia = false) const;
 };
 
 } // namespace cutpilot::render
