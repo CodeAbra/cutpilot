@@ -1,6 +1,8 @@
 # Headless domain-core tests. Each target links Qt6::Test and cutpilot-core only,
 # so the tested logic stays free of any GUI dependency. Sibling executables are
-# added a line at a time as new core surfaces land.
+# added a line at a time as new core surfaces land. The one exception at the
+# bottom drives the canvas layer's wiring gestures with synthesized events on the
+# offscreen platform — still windowless, but linked against the render library.
 
 qt_add_executable(tst_nodegraph tst_nodegraph.cpp)
 target_link_libraries(tst_nodegraph PRIVATE Qt6::Test cutpilot-core)
@@ -25,3 +27,7 @@ add_test(NAME core.connections COMMAND tst_connections)
 qt_add_executable(tst_connectorpath tst_connectorpath.cpp)
 target_link_libraries(tst_connectorpath PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.connectorpath COMMAND tst_connectorpath)
+
+qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
+target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
