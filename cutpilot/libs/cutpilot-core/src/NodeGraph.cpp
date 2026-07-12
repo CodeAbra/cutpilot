@@ -102,8 +102,16 @@ QVector<int> NodeGraph::selectedIds() const
 
 void NodeGraph::selectInRect(const QRectF &worldRect, bool additive)
 {
+    const QRectF band = worldRect.normalized();
     for (Node &n : m_nodes) {
-        if (n.worldRect().intersects(worldRect))
+        const QRectF r = n.worldRect();
+        // Inclusive overlap on all four edges: a purely horizontal or vertical drag
+        // makes a zero-area band, and QRectF::intersects reports false for an empty
+        // rect, so a thin band would select nothing. This still selects the nodes it
+        // crosses.
+        const bool hit = band.left() <= r.right() && band.right() >= r.left()
+            && band.top() <= r.bottom() && band.bottom() >= r.top();
+        if (hit)
             n.selected = true;
         else if (!additive)
             n.selected = false;

@@ -29,6 +29,7 @@ private slots:
 
     void setAndToggleAndClearSelection();
     void rectSelectIntersectionPlainAndAdditive();
+    void thinBandSelectsNodesItCrosses();
     void removeAndIndexOf();
     void insertPreservesIdAndKeepsNextIdAhead();
     void removeRestoreRoundTrip();
@@ -123,6 +124,21 @@ void TstNodeGraph::rectSelectIntersectionPlainAndAdditive()
     // Additive keeps c and adds a.
     graph.selectInRect(QRectF(10, 10, 20, 20), true);
     QCOMPARE(graph.selectedIds(), (QVector<int>{ a, c }));
+}
+
+void TstNodeGraph::thinBandSelectsNodesItCrosses()
+{
+    NodeGraph graph;
+    const int a = graph.addNode(makeNode(QPointF(0, 0), QSizeF(100, 100)));
+    const int b = graph.addNode(makeNode(QPointF(300, 0), QSizeF(100, 100)));
+
+    // A zero-height horizontal band drawn across both cards still selects them.
+    graph.selectInRect(QRectF(QPointF(50, 50), QPointF(350, 50)), false);
+    QCOMPARE(graph.selectedIds(), (QVector<int>{ a, b }));
+
+    // A zero-area band in empty space selects nothing.
+    graph.selectInRect(QRectF(QPointF(1000, 1000), QPointF(1000, 1000)), false);
+    QVERIFY(graph.selectedIds().isEmpty());
 }
 
 void TstNodeGraph::removeAndIndexOf()
