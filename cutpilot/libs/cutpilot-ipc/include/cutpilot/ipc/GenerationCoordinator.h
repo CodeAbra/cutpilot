@@ -3,10 +3,12 @@
 #include <QHash>
 #include <QImage>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QVector>
 
 #include "cutpilot/ipc/GenerationTypes.h"
+#include "cutpilot/ipc/ResultCache.h"
 
 namespace cutpilot::core {
 class NodeGraph;
@@ -17,15 +19,26 @@ namespace cutpilot::ipc {
 
 class GenerationClient;
 
-// Drives generation runs for the node graph: resolves a node's prompt and
-// model, submits the job, and writes the streamed status back onto the node
-// so the canvas can draw it. Everything happens on this object's thread; the
-// slow work stays in the service, so writing status is the only graph
-// mutation and the UI thread never waits on a vendor.
+// Drives generation for the node graph as a pipeline. A run — everything, the
+// subgraph upstream of one node, or a forced re-run of one node — is ordered
+// dependency-first, refuses cycles outright, and submits every node whose
+// inputs are ready, so independent branches run concurrently. Results flow
+// along the wires: an image-consuming node receives its upstream node's
+// result file, and each finished result's digest keys the cache, so a node
+// whose effective inputs and parameters are unchanged is served its previous
+// result ("Reused") without a vendor call.
+//
+// Spending is governed twice: a run-wide cap pauses the whole run before a
+// submission would cross it, and each cost-gate node holds just its
+// downstream branch at the gate's own limit. Held work resumes after the
+// limit is raised, or the run is aborted. Everything happens on this
+// object's thread; the slow work stays in the service, so writing status is
+// the only graph mutation and the UI thread never waits on a vendor.
 //
 // Prompt resolution order: the node wired into the generate node's text input
-// supplies the prompt; without a wire the node's own prompt text is used; an
-// empty prompt refuses the run with guidance instead of submitting.
+// supplies the prompt; without a wire the node's own prompt text is used; a
+// prompt-needing model with an empty prompt refuses the run with guidance
+// instead of submitting.
 class GenerationCoordinator : public QObject {
     Q_OBJECT
 
@@ -45,12 +58,36 @@ public:
     // presence is current.
     void refreshModels();
 
+    // Start a run. Only one run is active at a time; starting another while
+    // one is active is ignored. runNode is the node's run control: it
+    // evaluates the subgraph upstream of the node, serving unchanged nodes
+    // from cache. rerunNode forces the node itself to regenerate even when
+    // its cached result would match.
+    void runGraph();
+    void runTo(int nodeId);
     void runNode(int nodeId);
+    void rerunNode(int nodeId);
+
     void stopNode(int nodeId);
 
+    // The run-wide spending cap in USD; zero means no cap. The active run
+    // re-checks it on resume.
+    void setRunCapUsd(double capUsd);
+    double runCapUsd() const { return m_runCapUsd; }
+
+    // Held work re-enters the run (a raised limit lets it through; an
+    // unchanged one holds it again). abortRun cancels in-flight jobs and
+    // settles everything pending back to idle.
+    void resumeRun();
+    void abortRun();
+
+    bool runActive() const { return m_run.active; }
+    RunSummary summary() const;
+
     // Drop run state that no longer matches reality: nodes claiming to run
-    // without a live job fall back to idle, and jobs whose node vanished are
-    // canceled. Called after any structural edit or history walk.
+    // without a live job fall back to idle, jobs whose node vanished are
+    // canceled, and the active run forgets deleted nodes. Called after any
+    // structural edit or history walk.
     void reconcile();
 
 signals:
@@ -63,12 +100,53 @@ signals:
     void modelsReady();
     void addKeyNeeded(int nodeId, const QString &provider);
 
+    // The run's live counts, spend, and pause state moved.
+    void runSummaryChanged(const cutpilot::ipc::RunSummary &summary);
+
+    // A run could not start at all (a dependency cycle, no service).
+    void runRefused(const QString &reason);
+
 private:
+    // One pipeline run's bookkeeping. Nodes move pending → inFlight →
+    // completed/reusedByCache/failed, or into held when a limit stops them.
+    struct PipelineRun {
+        bool active = false;
+        bool capPaused = false;
+        QString pauseReason;
+        QVector<int> order;
+        QSet<int> pending;
+        QSet<int> inFlight;
+        QSet<int> held;
+        QSet<int> completed;
+        QSet<int> reusedByCache;
+        QSet<int> failed;
+        QSet<int> forced;
+        QHash<int, QString> signatures;
+        QHash<int, double> committedUsd;
+        double spentUsd = 0.0;
+    };
+
     core::Node *generateNode(int nodeId);
     QString resolvePrompt(const core::Node &node) const;
     const ModelInfo *modelById(const QString &id) const;
     void touchNode(core::Node *node);
     void decodeResult(int nodeId, const QString &path);
+
+    void startRun(const QVector<int> &subset, const QSet<int> &forced);
+    void advanceRun();
+    bool dependenciesSettled(int nodeId, const QHash<int, QSet<int>> &dependencies,
+                             bool &upstreamFailed) const;
+    QString nodeSignature(const core::Node &node, const ModelInfo &model);
+    QString resolveInputPath(const core::Node &node) const;
+    QVector<QString> inputDigests(const core::Node &node);
+    bool applyCachedResult(core::Node *node, const QString &signature);
+    void submitNode(core::Node *node, const ModelInfo &model,
+                    const QString &signature);
+    void failRunNode(int nodeId, const QString &message);
+    void finishRunIfSettled();
+    void updateGateReadouts();
+    void refreshEstimates();
+    void announceRun();
 
     void onModelsFetched(const QVector<ModelInfo> &models);
     void onJobSubmitted(int nodeId, const QString &jobId, double estimatedCostUsd);
@@ -84,6 +162,10 @@ private:
 
     QHash<QString, int> m_nodeByJob;
     QHash<int, QString> m_jobByNode;
+
+    ResultCache m_cache;
+    PipelineRun m_run;
+    double m_runCapUsd = 0.0;
 };
 
 } // namespace cutpilot::ipc

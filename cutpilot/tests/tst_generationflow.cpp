@@ -77,7 +77,7 @@ private slots:
     void cleanupTestCase();
 
     void runsAPromptThroughTheServiceToADoneNode();
-    void sameNodeRerunReproducesTheResult();
+    void unchangedRerunServesTheCachedResult();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
     void emptyPromptRefusesTheRunWithoutSubmitting();
@@ -174,7 +174,7 @@ void GenerationFlowTest::runsAPromptThroughTheServiceToADoneNode()
     QVERIFY(!mediaSpy.first().at(1).value<QImage>().isNull());
 }
 
-void GenerationFlowTest::sameNodeRerunReproducesTheResult()
+void GenerationFlowTest::unchangedRerunServesTheCachedResult()
 {
     core::NodeGraph graph;
     const Pipeline pipeline =
@@ -185,21 +185,25 @@ void GenerationFlowTest::sameNodeRerunReproducesTheResult()
     coordinator.serviceBecameReady();
     QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
 
+    QSignalSpy submissionSpy(&m_client, &ipc::GenerationClient::jobSubmitted);
+
     coordinator.runNode(pipeline.generateId);
     QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(pipeline.generateId)->runState,
                               core::RunState::Done, 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 10000);
+    QCOMPARE(submissionSpy.count(), 1);
     const QByteArray first = fileDigest(graph.nodeById(pipeline.generateId)->resultPath);
     QVERIFY(!first.isEmpty());
 
+    // Nothing changed, so the second run is a cache hit: no vendor call, no
+    // Running transition, the identical result marked as reused.
     coordinator.runNode(pipeline.generateId);
-    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(pipeline.generateId)->runState,
-                              core::RunState::Running, 10000);
-    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(pipeline.generateId)->runState,
-                              core::RunState::Done, 30000);
-    const QByteArray second =
-        fileDigest(graph.nodeById(pipeline.generateId)->resultPath);
-
-    QCOMPARE(second, first);
+    const core::Node *node = graph.nodeById(pipeline.generateId);
+    QCOMPARE(node->runState, core::RunState::Done);
+    QCOMPARE(node->statusMessage, QStringLiteral("Reused"));
+    QCOMPARE(submissionSpy.count(), 1);
+    QCOMPARE(fileDigest(node->resultPath), first);
+    QVERIFY(!coordinator.runActive());
 }
 
 void GenerationFlowTest::stopCancelsAnInFlightRun()

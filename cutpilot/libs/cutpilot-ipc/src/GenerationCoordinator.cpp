@@ -1,12 +1,36 @@
 #include "cutpilot/ipc/GenerationCoordinator.h"
 
 #include "cutpilot/core/NodeGraph.h"
+#include "cutpilot/core/PipelineOrder.h"
 #include "cutpilot/ipc/GenerationClient.h"
 
+#include <QCryptographicHash>
+#include <QFile>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 
 namespace cutpilot::ipc {
+
+namespace {
+
+QString money(double usd)
+{
+    return QStringLiteral("$%1").arg(usd, 0, 'f', 3);
+}
+
+// SHA-256 of a file's contents, or an empty string when unreadable.
+QString hashFile(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return QString();
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!hash.addData(&file))
+        return QString();
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+} // namespace
 
 GenerationCoordinator::GenerationCoordinator(core::NodeGraph *graph,
                                              GenerationClient *client,
@@ -69,6 +93,47 @@ QString GenerationCoordinator::resolvePrompt(const core::Node &node) const
     return node.promptText.trimmed();
 }
 
+QString GenerationCoordinator::resolveInputPath(const core::Node &node) const
+{
+    for (int i = 0; i < node.ports.size(); ++i) {
+        const core::Port &port = node.ports[i];
+        if (!port.isInput || port.type != core::PortType::Image)
+            continue;
+        const int connectionId = m_graph->connectionAtInput(node.id, i);
+        if (connectionId == -1)
+            continue;
+        const core::Connection *edge = m_graph->connectionById(connectionId);
+        const core::Node *source = edge ? m_graph->nodeById(edge->fromNodeId) : nullptr;
+        if (source && !source->resultPath.isEmpty())
+            return source->resultPath;
+    }
+    return QString();
+}
+
+QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node)
+{
+    QVector<QString> digests;
+    for (int i = 0; i < node.ports.size(); ++i) {
+        const core::Port &port = node.ports[i];
+        // Text feeds the resolved prompt, which the signature already
+        // carries; control wires carry policy, not data.
+        if (!port.isInput || port.type == core::PortType::Text
+            || port.type == core::PortType::Control)
+            continue;
+        const int connectionId = m_graph->connectionAtInput(node.id, i);
+        if (connectionId == -1)
+            continue;
+        const core::Connection *edge = m_graph->connectionById(connectionId);
+        core::Node *source = edge ? m_graph->nodeById(edge->fromNodeId) : nullptr;
+        if (!source || source->resultPath.isEmpty())
+            continue;
+        if (source->resultDigest.isEmpty())
+            source->resultDigest = hashFile(source->resultPath);
+        digests.push_back(QStringLiteral("%1=%2").arg(i).arg(source->resultDigest));
+    }
+    return digests;
+}
+
 const ModelInfo *GenerationCoordinator::modelById(const QString &id) const
 {
     for (const ModelInfo &model : m_models) {
@@ -84,14 +149,21 @@ void GenerationCoordinator::touchNode(core::Node *node)
     emit nodeContentChanged(node->id);
 }
 
-void GenerationCoordinator::runNode(int nodeId)
+void GenerationCoordinator::runGraph()
+{
+    QVector<int> subset;
+    for (const core::Node &node : m_graph->nodes()) {
+        if (core::isEvaluatable(node))
+            subset.push_back(node.id);
+    }
+    startRun(subset, {});
+}
+
+void GenerationCoordinator::runTo(int nodeId)
 {
     core::Node *node = generateNode(nodeId);
     if (!node)
         return;
-    if (node->runState == core::RunState::Queued
-        || node->runState == core::RunState::Running)
-        return; // already in flight; stopping is the only valid action
 
     if (!m_serviceReady) {
         node->runState = core::RunState::Error;
@@ -102,44 +174,463 @@ void GenerationCoordinator::runNode(int nodeId)
         return;
     }
 
-    const QString prompt = resolvePrompt(*node);
-    if (prompt.isEmpty()) {
+    const QSet<int> upstream = core::upstreamClosure(*m_graph, nodeId);
+    QVector<int> subset;
+    for (const core::Node &candidate : m_graph->nodes()) {
+        if (core::isEvaluatable(candidate) && upstream.contains(candidate.id))
+            subset.push_back(candidate.id);
+    }
+    startRun(subset, {});
+}
+
+void GenerationCoordinator::runNode(int nodeId)
+{
+    runTo(nodeId);
+}
+
+void GenerationCoordinator::rerunNode(int nodeId)
+{
+    core::Node *node = generateNode(nodeId);
+    if (!node)
+        return;
+    if (!m_serviceReady) {
         node->runState = core::RunState::Error;
-        node->statusMessage = QStringLiteral("Add a prompt");
+        node->statusMessage = m_unavailableReason.isEmpty()
+            ? QStringLiteral("Generation service unavailable")
+            : m_unavailableReason;
         touchNode(node);
         return;
     }
 
-    QString modelId = node->modelId;
-    if (modelId.isEmpty() && !m_models.isEmpty()) {
-        // No explicit pick: the registry's first entry is the default.
-        node->modelId = m_models.first().id;
-        node->modelLabel = m_models.first().label;
-        modelId = node->modelId;
+    const QSet<int> upstream = core::upstreamClosure(*m_graph, nodeId);
+    QVector<int> subset;
+    for (const core::Node &candidate : m_graph->nodes()) {
+        if (core::isEvaluatable(candidate) && upstream.contains(candidate.id))
+            subset.push_back(candidate.id);
     }
-    if (modelId.isEmpty()) {
-        node->runState = core::RunState::Error;
-        node->statusMessage = QStringLiteral("Pick a model");
-        touchNode(node);
+    startRun(subset, { nodeId });
+}
+
+void GenerationCoordinator::startRun(const QVector<int> &subset,
+                                     const QSet<int> &forced)
+{
+    if (m_run.active) {
+        emit runRefused(QStringLiteral("A run is already active"));
+        return;
+    }
+    if (subset.isEmpty())
+        return;
+    if (!m_serviceReady) {
+        emit runRefused(m_unavailableReason.isEmpty()
+                            ? QStringLiteral("Generation service unavailable")
+                            : m_unavailableReason);
+        return;
+    }
+    for (int nodeId : subset) {
+        if (m_jobByNode.contains(nodeId)) {
+            emit runRefused(QStringLiteral("Still stopping the previous run"));
+            return;
+        }
+    }
+
+    const core::EvaluationPlan plan = core::evaluationOrder(*m_graph, subset);
+    if (plan.hasCycle) {
+        emit runRefused(QStringLiteral(
+            "The graph loops back on itself; disconnect the cycle to run"));
         return;
     }
 
+    m_run = PipelineRun();
+    m_run.active = true;
+    m_run.order = plan.order;
+    m_run.pending = QSet<int>(plan.order.cbegin(), plan.order.cend());
+    m_run.forced = forced;
+
+    // Each run starts a fresh spend ledger on every gate.
+    QVector<int> gates;
+    for (const core::Node &node : m_graph->nodes()) {
+        if (node.kind == core::NodeKind::CostGate)
+            gates.push_back(node.id);
+    }
+    for (int gateId : gates) {
+        core::Node *gate = m_graph->nodeById(gateId);
+        if (!gate)
+            continue;
+        gate->gateSpentUsd = 0.0;
+        gate->statusMessage.clear();
+        touchNode(gate);
+    }
+
+    advanceRun();
+}
+
+bool GenerationCoordinator::dependenciesSettled(
+    int nodeId, const QHash<int, QSet<int>> &dependencies, bool &upstreamFailed) const
+{
+    upstreamFailed = false;
+    for (int dep : dependencies.value(nodeId)) {
+        if (m_run.failed.contains(dep)) {
+            upstreamFailed = true;
+            return false;
+        }
+        if (m_run.completed.contains(dep) || m_run.reusedByCache.contains(dep))
+            continue;
+        if (m_run.pending.contains(dep) || m_run.inFlight.contains(dep)
+            || m_run.held.contains(dep))
+            return false;
+        // Outside the run entirely: its existing result stands in.
+        const core::Node *node = m_graph->nodeById(dep);
+        if (!node || node->runState != core::RunState::Done
+            || node->resultPath.isEmpty())
+            return false;
+    }
+    return true;
+}
+
+QString GenerationCoordinator::nodeSignature(const core::Node &node,
+                                             const ModelInfo &model)
+{
     GenerationRequest request;
-    request.modelId = modelId;
-    request.prompt = prompt;
-    request.seed = nodeId; // stable per node, so a re-run reproduces its result
+    return ResultCache::signature(model.id, resolvePrompt(node), request.width,
+                                  request.height, node.id, inputDigests(node));
+}
+
+bool GenerationCoordinator::applyCachedResult(core::Node *node,
+                                              const QString &signature)
+{
+    const std::optional<ResultCache::Entry> entry = m_cache.lookup(signature);
+    if (!entry)
+        return false;
+
+    node->runState = core::RunState::Done;
+    node->runProgress = 1.0;
+    node->statusMessage = QStringLiteral("Reused");
+    node->resultPath = entry->resultPath;
+    node->resultDigest = entry->resultDigest;
+    node->costUsd = entry->costUsd;
+    node->resultWidth = entry->width;
+    node->resultHeight = entry->height;
+    touchNode(node);
+    decodeResult(node->id, entry->resultPath);
+    return true;
+}
+
+void GenerationCoordinator::submitNode(core::Node *node, const ModelInfo &model,
+                                       const QString &signature)
+{
+    GenerationRequest request;
+    request.modelId = model.id;
+    request.prompt = resolvePrompt(*node);
+    request.inputPath = resolveInputPath(*node);
+    request.seed = node->id; // stable per node, so a re-run reproduces its result
+
+    m_run.signatures.insert(node->id, signature);
+    m_run.committedUsd.insert(node->id, model.priceUsd);
+    m_run.pending.remove(node->id);
+    m_run.inFlight.insert(node->id);
 
     node->runState = core::RunState::Queued;
     node->runProgress = 0.0;
-    if (const ModelInfo *model = modelById(modelId)) {
-        node->statusMessage =
-            QStringLiteral("Queued · ~$%1").arg(model->priceUsd, 0, 'f', 3);
-    } else {
-        node->statusMessage = QStringLiteral("Queued");
-    }
+    node->statusMessage = QStringLiteral("Queued · ~%1").arg(money(model.priceUsd));
     touchNode(node);
 
-    m_client->submitJob(nodeId, request);
+    m_client->submitJob(node->id, request);
+}
+
+void GenerationCoordinator::failRunNode(int nodeId, const QString &message)
+{
+    m_run.pending.remove(nodeId);
+    m_run.inFlight.remove(nodeId);
+    m_run.held.remove(nodeId);
+    m_run.committedUsd.remove(nodeId);
+    m_run.failed.insert(nodeId);
+
+    if (core::Node *node = generateNode(nodeId)) {
+        node->runState = core::RunState::Error;
+        node->statusMessage = message;
+        touchNode(node);
+    }
+}
+
+void GenerationCoordinator::advanceRun()
+{
+    if (!m_run.active)
+        return;
+
+    const QHash<int, QSet<int>> dependencies = core::generationDependencies(*m_graph);
+
+    double committedTotal = 0.0;
+    for (double estimate : m_run.committedUsd)
+        committedTotal += estimate;
+
+    // Governed sets and per-gate spend, refreshed as the pass progresses.
+    QVector<int> gateIds;
+    for (const core::Node &node : m_graph->nodes()) {
+        if (node.kind == core::NodeKind::CostGate)
+            gateIds.push_back(node.id);
+    }
+    QHash<int, QSet<int>> governed;
+    for (int gateId : gateIds) {
+        QSet<int> branch = core::downstreamClosure(*m_graph, gateId);
+        branch.remove(gateId);
+        governed.insert(gateId, branch);
+    }
+    const auto gateSpend = [this, &governed](int gateId) {
+        double spend = 0.0;
+        const QSet<int> &branch = governed.value(gateId);
+        for (int id : m_run.completed) {
+            const core::Node *node = m_graph->nodeById(id);
+            if (node && branch.contains(id) && node->costUsd > 0.0)
+                spend += node->costUsd;
+        }
+        for (auto it = m_run.committedUsd.cbegin(); it != m_run.committedUsd.cend();
+             ++it) {
+            if (branch.contains(it.key()))
+                spend += it.value();
+        }
+        return spend;
+    };
+
+    bool progressed = true;
+    while (progressed) {
+        progressed = false;
+        for (int nodeId : m_run.order) {
+            if (!m_run.pending.contains(nodeId))
+                continue;
+
+            core::Node *node = generateNode(nodeId);
+            if (!node) {
+                // The node vanished mid-run; forget it entirely.
+                m_run.pending.remove(nodeId);
+                m_run.order.removeAll(nodeId);
+                progressed = true;
+                break; // the order list changed under the loop
+            }
+
+            bool upstreamFailed = false;
+            if (!dependenciesSettled(nodeId, dependencies, upstreamFailed)) {
+                if (upstreamFailed) {
+                    m_run.pending.remove(nodeId);
+                    m_run.failed.insert(nodeId);
+                    node->runState = core::RunState::Idle;
+                    node->runProgress = 0.0;
+                    node->statusMessage = QStringLiteral("Skipped · upstream failed");
+                    touchNode(node);
+                    progressed = true;
+                }
+                continue;
+            }
+
+            const ModelInfo *model = modelById(node->modelId);
+            if (!model) {
+                failRunNode(nodeId, node->modelId.isEmpty()
+                                ? QStringLiteral("Pick a model")
+                                : QStringLiteral("Unknown model %1").arg(node->modelId));
+                progressed = true;
+                continue;
+            }
+            if (model->needsPrompt && resolvePrompt(*node).isEmpty()) {
+                failRunNode(nodeId, QStringLiteral("Add a prompt"));
+                progressed = true;
+                continue;
+            }
+            if (model->needsInput && resolveInputPath(*node).isEmpty()) {
+                failRunNode(nodeId, QStringLiteral("Connect an image input"));
+                progressed = true;
+                continue;
+            }
+
+            const QString signature = nodeSignature(*node, *model);
+            if (!m_run.forced.contains(nodeId) && applyCachedResult(node, signature)) {
+                m_run.pending.remove(nodeId);
+                m_run.reusedByCache.insert(nodeId);
+                progressed = true;
+                continue;
+            }
+
+            // Nothing more is submitted once the run cap pauses the run;
+            // in-flight work keeps streaming.
+            if (m_run.capPaused)
+                continue;
+
+            if (m_runCapUsd > 0.0
+                && m_run.spentUsd + committedTotal + model->priceUsd > m_runCapUsd) {
+                m_run.pending.remove(nodeId);
+                m_run.held.insert(nodeId);
+                m_run.capPaused = true;
+                m_run.pauseReason =
+                    QStringLiteral("Run cap %1 reached").arg(money(m_runCapUsd));
+                node->runState = core::RunState::Held;
+                node->statusMessage =
+                    QStringLiteral("Held · run cap %1").arg(money(m_runCapUsd));
+                touchNode(node);
+                progressed = true;
+                continue;
+            }
+
+            int blockingGate = -1;
+            for (int gateId : gateIds) {
+                const core::Node *gate = m_graph->nodeById(gateId);
+                if (!gate || !governed.value(gateId).contains(nodeId))
+                    continue;
+                if (gateSpend(gateId) + model->priceUsd > gate->gateLimitUsd) {
+                    blockingGate = gateId;
+                    break;
+                }
+            }
+            if (blockingGate != -1) {
+                const core::Node *gate = m_graph->nodeById(blockingGate);
+                m_run.pending.remove(nodeId);
+                m_run.held.insert(nodeId);
+                if (m_run.pauseReason.isEmpty())
+                    m_run.pauseReason = QStringLiteral("Cost gate at %1 reached")
+                                            .arg(money(gate->gateLimitUsd));
+                node->runState = core::RunState::Held;
+                node->statusMessage = QStringLiteral("Held · cost gate at %1")
+                                          .arg(money(gate->gateLimitUsd));
+                touchNode(node);
+                progressed = true;
+                continue;
+            }
+
+            submitNode(node, *model, signature);
+            committedTotal += model->priceUsd;
+            progressed = true;
+        }
+    }
+
+    updateGateReadouts();
+    finishRunIfSettled();
+    announceRun();
+}
+
+void GenerationCoordinator::updateGateReadouts()
+{
+    QVector<int> gateIds;
+    for (const core::Node &node : m_graph->nodes()) {
+        if (node.kind == core::NodeKind::CostGate)
+            gateIds.push_back(node.id);
+    }
+    for (int gateId : gateIds) {
+        core::Node *gate = m_graph->nodeById(gateId);
+        if (!gate)
+            continue;
+        QSet<int> branch = core::downstreamClosure(*m_graph, gateId);
+        branch.remove(gateId);
+
+        double spend = 0.0;
+        bool holding = false;
+        for (int id : branch) {
+            const core::Node *node = m_graph->nodeById(id);
+            if (!node)
+                continue;
+            if (m_run.completed.contains(id) && node->costUsd > 0.0)
+                spend += node->costUsd;
+            if (m_run.committedUsd.contains(id))
+                spend += m_run.committedUsd.value(id);
+            if (m_run.held.contains(id))
+                holding = true;
+        }
+
+        const QString message = holding
+            ? QStringLiteral("Holding · %1 of %2")
+                  .arg(money(spend), money(gate->gateLimitUsd))
+            : QString();
+        if (gate->gateSpentUsd != spend || gate->statusMessage != message) {
+            gate->gateSpentUsd = spend;
+            gate->statusMessage = message;
+            touchNode(gate);
+        }
+    }
+}
+
+void GenerationCoordinator::finishRunIfSettled()
+{
+    if (!m_run.active)
+        return;
+    if (m_run.pending.isEmpty() && m_run.inFlight.isEmpty() && m_run.held.isEmpty()) {
+        m_run.active = false;
+        m_run.capPaused = false;
+        m_run.pauseReason.clear();
+    }
+}
+
+RunSummary GenerationCoordinator::summary() const
+{
+    RunSummary summary;
+    summary.active = m_run.active;
+    summary.paused = m_run.capPaused || !m_run.held.isEmpty();
+    summary.pauseReason = m_run.pauseReason;
+    summary.total = m_run.order.size();
+    summary.fresh = m_run.completed.size();
+    summary.reused = m_run.reusedByCache.size();
+    summary.running = m_run.inFlight.size();
+    summary.held = m_run.held.size();
+    summary.failed = m_run.failed.size();
+    summary.spentUsd = m_run.spentUsd;
+    for (double estimate : m_run.committedUsd)
+        summary.committedUsd += estimate;
+    summary.capUsd = m_runCapUsd;
+    return summary;
+}
+
+void GenerationCoordinator::announceRun()
+{
+    emit runSummaryChanged(summary());
+}
+
+void GenerationCoordinator::setRunCapUsd(double capUsd)
+{
+    m_runCapUsd = qMax(0.0, capUsd);
+    announceRun();
+}
+
+void GenerationCoordinator::resumeRun()
+{
+    if (!m_run.active)
+        return;
+    m_run.capPaused = false;
+    m_run.pauseReason.clear();
+
+    const QSet<int> held = m_run.held;
+    m_run.held.clear();
+    for (int nodeId : held) {
+        m_run.pending.insert(nodeId);
+        if (core::Node *node = generateNode(nodeId)) {
+            node->runState = core::RunState::Idle;
+            node->statusMessage.clear();
+            touchNode(node);
+        }
+    }
+    advanceRun();
+}
+
+void GenerationCoordinator::abortRun()
+{
+    if (!m_run.active)
+        return;
+
+    // Deactivate first: the cancellations below stream terminal states back,
+    // and those must be plain node updates, not run bookkeeping.
+    m_run.active = false;
+    const QSet<int> inFlight = m_run.inFlight;
+    const QSet<int> parked = m_run.pending + m_run.held;
+    m_run = PipelineRun();
+
+    for (int nodeId : inFlight) {
+        const QString jobId = m_jobByNode.value(nodeId);
+        if (!jobId.isEmpty())
+            m_client->cancelJob(jobId);
+    }
+    for (int nodeId : parked) {
+        if (core::Node *node = generateNode(nodeId)) {
+            node->runState = core::RunState::Idle;
+            node->runProgress = 0.0;
+            node->statusMessage.clear();
+            touchNode(node);
+        }
+    }
+    announceRun();
 }
 
 void GenerationCoordinator::stopNode(int nodeId)
@@ -156,8 +647,39 @@ void GenerationCoordinator::stopNode(int nodeId)
 
 void GenerationCoordinator::reconcile()
 {
-    // Nodes claiming to run without a live job (restored by undo, or edited
-    // while a submission was refused mid-flight) fall back to idle. Ids are
+    // The active run forgets nodes that no longer exist, then re-advances:
+    // a deletion can unblock a branch or settle the whole run.
+    if (m_run.active) {
+        const auto pruneSet = [this](QSet<int> &set) {
+            for (auto it = set.begin(); it != set.end();) {
+                if (!m_graph->nodeById(*it))
+                    it = set.erase(it);
+                else
+                    ++it;
+            }
+        };
+        pruneSet(m_run.pending);
+        pruneSet(m_run.inFlight);
+        pruneSet(m_run.held);
+        pruneSet(m_run.completed);
+        pruneSet(m_run.reusedByCache);
+        pruneSet(m_run.failed);
+        for (auto it = m_run.committedUsd.begin(); it != m_run.committedUsd.end();) {
+            if (!m_graph->nodeById(it.key()))
+                it = m_run.committedUsd.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = m_run.order.begin(); it != m_run.order.end();) {
+            if (!m_graph->nodeById(*it))
+                it = m_run.order.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    // Nodes claiming live or held run state without the bookkeeping to back
+    // it (restored by undo, or edited mid-refusal) fall back to idle. Ids are
     // collected first: touching a node emits synchronously, and a slot that
     // edits the graph would invalidate an iterator held across the emit.
     QVector<int> orphaned;
@@ -166,7 +688,10 @@ void GenerationCoordinator::reconcile()
             continue;
         const bool claimsLive = node.runState == core::RunState::Queued
             || node.runState == core::RunState::Running;
+        const bool claimsHeld = node.runState == core::RunState::Held;
         if (claimsLive && !m_jobByNode.contains(node.id))
+            orphaned.push_back(node.id);
+        else if (claimsHeld && !(m_run.active && m_run.held.contains(node.id)))
             orphaned.push_back(node.id);
     }
     for (int nodeId : orphaned) {
@@ -188,6 +713,31 @@ void GenerationCoordinator::reconcile()
             it = m_jobByNode.erase(it);
         } else {
             ++it;
+        }
+    }
+
+    refreshEstimates();
+
+    if (m_run.active)
+        advanceRun();
+}
+
+void GenerationCoordinator::refreshEstimates()
+{
+    QVector<int> generateIds;
+    for (const core::Node &node : m_graph->nodes()) {
+        if (node.kind == core::NodeKind::Generate)
+            generateIds.push_back(node.id);
+    }
+    for (int nodeId : generateIds) {
+        core::Node *node = m_graph->nodeById(nodeId);
+        if (!node)
+            continue;
+        const ModelInfo *model = modelById(node->modelId);
+        const double estimate = model ? model->priceUsd : -1.0;
+        if (node->estimatedCostUsd != estimate) {
+            node->estimatedCostUsd = estimate;
+            touchNode(node);
         }
     }
 }
@@ -212,6 +762,7 @@ void GenerationCoordinator::onModelsFetched(const QVector<ModelInfo> &models)
             touchNode(node);
         }
     }
+    refreshEstimates();
     emit modelsReady();
 }
 
@@ -232,27 +783,37 @@ void GenerationCoordinator::onJobSubmitted(int nodeId, const QString &jobId,
 void GenerationCoordinator::onSubmitRefused(int nodeId, SubmitRefusal refusal,
                                             const QString &detail)
 {
-    core::Node *node = generateNode(nodeId);
-    if (!node)
-        return;
-
-    switch (refusal) {
-    case SubmitRefusal::MissingKey:
-        node->runState = core::RunState::NeedsKey;
-        node->statusMessage = QStringLiteral("Add a key · %1").arg(detail);
-        touchNode(node);
-        emit addKeyNeeded(nodeId, detail);
-        return;
-    case SubmitRefusal::Invalid:
-        node->runState = core::RunState::Error;
-        node->statusMessage = QStringLiteral("Run refused: %1").arg(detail);
-        break;
-    case SubmitRefusal::Unavailable:
-        node->runState = core::RunState::Error;
-        node->statusMessage = detail;
-        break;
+    const bool inRun = m_run.active && m_run.inFlight.contains(nodeId);
+    if (inRun) {
+        m_run.inFlight.remove(nodeId);
+        m_run.committedUsd.remove(nodeId);
+        m_run.failed.insert(nodeId);
     }
-    touchNode(node);
+
+    core::Node *node = generateNode(nodeId);
+    if (node) {
+        switch (refusal) {
+        case SubmitRefusal::MissingKey:
+            node->runState = core::RunState::NeedsKey;
+            node->statusMessage = QStringLiteral("Add a key · %1").arg(detail);
+            touchNode(node);
+            emit addKeyNeeded(nodeId, detail);
+            break;
+        case SubmitRefusal::Invalid:
+            node->runState = core::RunState::Error;
+            node->statusMessage = QStringLiteral("Run refused: %1").arg(detail);
+            touchNode(node);
+            break;
+        case SubmitRefusal::Unavailable:
+            node->runState = core::RunState::Error;
+            node->statusMessage = detail;
+            touchNode(node);
+            break;
+        }
+    }
+
+    if (inRun)
+        advanceRun();
 }
 
 void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
@@ -265,6 +826,9 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
         m_client->cancelJob(update.jobId);
         return;
     }
+
+    const bool inRun = m_run.active && m_run.inFlight.contains(nodeId);
+    bool settled = false;
 
     switch (update.state) {
     case JobState::Queued:
@@ -280,10 +844,29 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
         node->runProgress = 1.0;
         node->statusMessage.clear();
         node->resultPath = update.resultPath;
+        node->resultDigest = update.resultDigest;
         node->costUsd = update.costUsd;
         node->resultWidth = update.width;
         node->resultHeight = update.height;
         decodeResult(nodeId, update.resultPath);
+        settled = true;
+        if (inRun) {
+            m_run.inFlight.remove(nodeId);
+            m_run.committedUsd.remove(nodeId);
+            m_run.completed.insert(nodeId);
+            if (update.costUsd > 0.0)
+                m_run.spentUsd += update.costUsd;
+            const QString signature = m_run.signatures.value(nodeId);
+            if (!signature.isEmpty()) {
+                ResultCache::Entry entry;
+                entry.resultPath = update.resultPath;
+                entry.resultDigest = update.resultDigest;
+                entry.costUsd = update.costUsd;
+                entry.width = update.width;
+                entry.height = update.height;
+                m_cache.store(signature, entry);
+            }
+        }
         break;
     case JobState::Error:
         node->runState = core::RunState::Error;
@@ -291,6 +874,12 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
         node->statusMessage = update.message.isEmpty()
             ? QStringLiteral("Generation failed")
             : update.message;
+        settled = true;
+        if (inRun) {
+            m_run.inFlight.remove(nodeId);
+            m_run.committedUsd.remove(nodeId);
+            m_run.failed.insert(nodeId);
+        }
         break;
     case JobState::Canceled:
         // A stopped run keeps whatever result the node already had.
@@ -298,9 +887,18 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
                                                     : core::RunState::Done;
         node->runProgress = 0.0;
         node->statusMessage = QStringLiteral("Stopped");
+        settled = true;
+        if (inRun) {
+            m_run.inFlight.remove(nodeId);
+            m_run.committedUsd.remove(nodeId);
+            m_run.failed.insert(nodeId);
+        }
         break;
     }
     touchNode(node);
+
+    if (inRun && settled)
+        advanceRun();
 }
 
 void GenerationCoordinator::onStreamClosed(const QString &jobId)
@@ -326,6 +924,12 @@ void GenerationCoordinator::onStreamClosed(const QString &jobId)
         node->runState = core::RunState::Error;
         node->statusMessage = QStringLiteral("Generation service unavailable");
         touchNode(node);
+    }
+    if (m_run.active && m_run.inFlight.contains(nodeId)) {
+        m_run.inFlight.remove(nodeId);
+        m_run.committedUsd.remove(nodeId);
+        m_run.failed.insert(nodeId);
+        advanceRun();
     }
 }
 

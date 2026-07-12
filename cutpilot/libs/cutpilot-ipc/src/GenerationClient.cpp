@@ -33,6 +33,7 @@ JobUpdate updateFromJson(const QJsonObject &object)
     update.progress = object.value(QStringLiteral("progress")).toDouble();
     update.message = object.value(QStringLiteral("message")).toString();
     update.resultPath = object.value(QStringLiteral("result_path")).toString();
+    update.resultDigest = object.value(QStringLiteral("result_digest")).toString();
     update.costUsd = object.value(QStringLiteral("cost_usd")).toDouble(-1.0);
     update.width = object.value(QStringLiteral("width")).toInt();
     update.height = object.value(QStringLiteral("height")).toInt();
@@ -117,6 +118,10 @@ void GenerationClient::fetchModels()
             model.priceUsd = object.value(QStringLiteral("price_usd")).toDouble();
             model.needsKey = object.value(QStringLiteral("needs_key")).toBool();
             model.hasKey = object.value(QStringLiteral("has_key")).toBool();
+            model.needsPrompt =
+                object.value(QStringLiteral("needs_prompt")).toBool(true);
+            model.needsInput =
+                object.value(QStringLiteral("needs_input")).toBool(false);
             models.push_back(model);
         }
         emit modelsFetched(models);
@@ -131,13 +136,15 @@ void GenerationClient::submitJob(int contextId, const GenerationRequest &request
         return;
     }
 
-    const QJsonObject payload{
+    QJsonObject payload{
         { QStringLiteral("model"), request.modelId },
         { QStringLiteral("prompt"), request.prompt },
         { QStringLiteral("width"), request.width },
         { QStringLiteral("height"), request.height },
         { QStringLiteral("seed"), request.seed },
     };
+    if (!request.inputPath.isEmpty())
+        payload.insert(QStringLiteral("input_path"), request.inputPath);
     QNetworkReply *reply = post(QStringLiteral("/jobs"),
                                 QJsonDocument(payload).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, contextId] {

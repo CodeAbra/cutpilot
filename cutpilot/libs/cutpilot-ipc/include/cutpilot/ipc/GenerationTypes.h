@@ -6,6 +6,8 @@ namespace cutpilot::ipc {
 
 // One entry of the generation service's model registry. hasKey reports whether
 // the vendor's BYOK key is currently configured — never the key itself.
+// needsPrompt and needsInput declare what the model consumes, so a run can be
+// gated before it is ever submitted.
 struct ModelInfo {
     QString id;
     QString label;
@@ -13,6 +15,8 @@ struct ModelInfo {
     double priceUsd = 0.0;
     bool needsKey = false;
     bool hasKey = false;
+    bool needsPrompt = true;
+    bool needsInput = false;
 };
 
 // A job's lifecycle as the service streams it.
@@ -24,13 +28,15 @@ enum class JobState {
     Canceled
 };
 
-// One streamed snapshot of a job.
+// One streamed snapshot of a job. resultDigest is the SHA-256 of the finished
+// result file — the result's identity for downstream cache keys.
 struct JobUpdate {
     QString jobId;
     JobState state = JobState::Queued;
     double progress = 0.0;
     QString message;
     QString resultPath;
+    QString resultDigest;
     double costUsd = -1.0;
     int width = 0;
     int height = 0;
@@ -43,13 +49,36 @@ enum class SubmitRefusal {
     Unavailable
 };
 
-// What the canvas asks a generation model for.
+// What the canvas asks a generation model for. inputPath carries the upstream
+// result an image-consuming model derives from.
 struct GenerationRequest {
     QString modelId;
     QString prompt;
+    QString inputPath;
     int width = 768;
     int height = 512;
     int seed = 0;
+};
+
+// A live snapshot of the pipeline run, for the run summary surface. spent is
+// the actual cost of finished jobs this run; committed is the estimates of
+// jobs still in flight; a cap of zero means no cap.
+struct RunSummary {
+    bool active = false;
+    bool paused = false;
+    QString pauseReason;
+    int total = 0;
+    int fresh = 0;
+    int reused = 0;
+    int running = 0;
+    int held = 0;
+    int failed = 0;
+    double spentUsd = 0.0;
+    double committedUsd = 0.0;
+    double capUsd = 0.0;
+
+    int settled() const { return fresh + reused + failed; }
+    int percent() const { return total > 0 ? settled() * 100 / total : 0; }
 };
 
 } // namespace cutpilot::ipc
