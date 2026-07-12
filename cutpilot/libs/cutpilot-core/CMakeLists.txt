@@ -2,10 +2,16 @@ add_library(cutpilot-core STATIC
     src/NodeGraph.cpp
     src/SpatialIndex.cpp
     src/AlignmentGuides.cpp
+    src/ConnectorPath.cpp
+    src/PortRules.cpp
     src/command/CommandStack.cpp
     src/command/AddNodeCommand.cpp
     src/command/MoveNodesCommand.cpp
-    src/command/DeleteNodesCommand.cpp)
+    src/command/DeleteNodesCommand.cpp
+    src/command/ConnectCommand.cpp
+    src/command/DisconnectCommand.cpp
+    src/command/CompositeCommand.cpp
+    src/command/AddConnectedNodeCommand.cpp)
 
 target_include_directories(cutpilot-core PUBLIC include)
 

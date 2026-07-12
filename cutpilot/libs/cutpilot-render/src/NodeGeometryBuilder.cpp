@@ -49,12 +49,16 @@ QColor portColorFor(core::PortType type, const theme::ThemeTable &theme)
     switch (type) {
     case core::PortType::Image:
         return theme.typeImage();
+    case core::PortType::Mask:
+        return theme.typeMask();
     case core::PortType::Video:
         return theme.typeVideo();
     case core::PortType::Audio:
         return theme.typeAudio();
     case core::PortType::Text:
         return theme.typeText();
+    case core::PortType::Number:
+        return theme.typeNumber();
     case core::PortType::Control:
         return theme.typeControl();
     case core::PortType::Any:

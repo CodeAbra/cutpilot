@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cutpilot/core/Connection.h"
 #include "cutpilot/core/Node.h"
 
 #include <QPointF>
@@ -8,12 +9,13 @@
 
 namespace cutpilot::core {
 
-// The set of nodes on the canvas and the operations the canvas performs on them:
-// add, hit-test a world point, select one or many, move, remove and restore, and
-// raise to the top of the z-order. Hit-testing returns the top-most node under a
-// point, where z-order is list order: the last node in the list wins, and touching a
-// node raises it to the top. The graph holds plain values so the model is trivially
-// testable and carries no rendering or Qt-GUI dependency beyond geometry types.
+// The nodes and connections on the canvas and the operations the canvas performs
+// on them: add, hit-test a world point, select one or many, move, remove and
+// restore, connect and disconnect, and raise to the top of the z-order.
+// Hit-testing returns the top-most node under a point, where z-order is list
+// order: the last node in the list wins, and touching a node raises it to the top.
+// The graph holds plain values so the model is trivially testable and carries no
+// rendering or Qt-GUI dependency beyond geometry types.
 class NodeGraph {
 public:
     // The sentinel indexOfId returns for an absent id.
@@ -71,9 +73,37 @@ public:
     void raiseToTop(int id);
     void raiseToTop(const QVector<int> &ids);
 
+    // Connections. addConnection assigns the id; removal and the id-preserving
+    // re-insert mirror the node operations so an undone edit restores an edge
+    // exactly as it was.
+    int addConnection(const Connection &connection);
+
+    const QVector<Connection> &connections() const { return m_connections; }
+
+    Connection *connectionById(int id);
+    const Connection *connectionById(int id) const;
+
+    // The connection's position in the list, or kNoIndex when absent.
+    int connectionIndexOfId(int id) const;
+
+    void removeConnection(int id);
+
+    // Re-insert a connection value at a given position, preserving its id, and keep
+    // the next-id counter ahead of that id so a later add never reissues it.
+    void insertConnection(int index, const Connection &connection);
+
+    // The id of the connection feeding the given input port, or -1. An input holds
+    // at most one edge; the connect command enforces this by replacement.
+    int connectionAtInput(int nodeId, int portIndex) const;
+
+    // Ids of every connection touching the node, in list order.
+    QVector<int> connectionIdsForNode(int nodeId) const;
+
 private:
     QVector<Node> m_nodes;
     int m_nextId = 1;
+    QVector<Connection> m_connections;
+    int m_nextConnectionId = 1;
 };
 
 } // namespace cutpilot::core

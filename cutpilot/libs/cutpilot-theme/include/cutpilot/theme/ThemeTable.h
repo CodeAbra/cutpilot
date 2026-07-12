@@ -62,9 +62,11 @@ public:
     // Typed-port dot colors. A port is never identified by color alone, but color is
     // the at-a-glance cue for what a connection carries.
     QColor typeImage() const { return m_typeImage; }
+    QColor typeMask() const { return m_typeMask; }
     QColor typeVideo() const { return m_typeVideo; }
     QColor typeAudio() const { return m_typeAudio; }
     QColor typeText() const { return m_typeText; }
+    QColor typeNumber() const { return m_typeNumber; }
     QColor typeControl() const { return m_typeControl; }
     QColor typeAny() const { return m_typeAny; }
 
@@ -86,9 +88,11 @@ private:
     QColor m_selectionFill;
     QColor m_emphasis;
     QColor m_typeImage;
+    QColor m_typeMask;
     QColor m_typeVideo;
     QColor m_typeAudio;
     QColor m_typeText;
+    QColor m_typeNumber;
     QColor m_typeControl;
     QColor m_typeAny;
 };

@@ -8,13 +8,15 @@
 
 namespace cutpilot::core {
 
-// The kind of data a port carries. Drives the typed-port color and, in later
-// phases, connection-compatibility rules.
+// The kind of data a port carries. Drives the typed-port color, the port's shape
+// (data ports are round, control ports square), and connection compatibility.
 enum class PortType {
     Image,
+    Mask,
     Video,
     Audio,
     Text,
+    Number,
     Control,
     Any
 };
@@ -42,6 +44,34 @@ struct Node {
 
     QRectF worldRect() const { return QRectF(worldPos, worldSize); }
     bool containsWorld(const QPointF &world) const { return worldRect().contains(world); }
+
+    // The world-space center of a port: on the left edge for an input, the right
+    // edge for an output, at the port's fractional offset along that edge.
+    QPointF portWorldPosition(int portIndex) const
+    {
+        const Port &port = ports.at(portIndex);
+        const QRectF rect = worldRect();
+        const qreal x = port.isInput ? rect.left() : rect.right();
+        const qreal y = rect.top() + rect.height() * port.edgeFraction;
+        return QPointF(x, y);
+    }
+
+    // The port whose center lies within radius of the world point, or -1. When
+    // several qualify the nearest wins.
+    int portIndexAtWorld(const QPointF &world, qreal radius) const
+    {
+        int best = -1;
+        qreal bestDistSq = radius * radius;
+        for (int i = 0; i < ports.size(); ++i) {
+            const QPointF d = portWorldPosition(i) - world;
+            const qreal distSq = d.x() * d.x() + d.y() * d.y();
+            if (distSq <= bestDistSq) {
+                bestDistSq = distSq;
+                best = i;
+            }
+        }
+        return best;
+    }
 };
 
 } // namespace cutpilot::core

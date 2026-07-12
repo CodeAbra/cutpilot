@@ -182,4 +182,74 @@ void NodeGraph::raiseToTop(const QVector<int> &ids)
     m_nodes += raised;
 }
 
+int NodeGraph::addConnection(const Connection &connection)
+{
+    Connection copy = connection;
+    copy.id = m_nextConnectionId++;
+    m_connections.push_back(copy);
+    return copy.id;
+}
+
+Connection *NodeGraph::connectionById(int id)
+{
+    for (Connection &c : m_connections) {
+        if (c.id == id)
+            return &c;
+    }
+    return nullptr;
+}
+
+const Connection *NodeGraph::connectionById(int id) const
+{
+    for (const Connection &c : m_connections) {
+        if (c.id == id)
+            return &c;
+    }
+    return nullptr;
+}
+
+int NodeGraph::connectionIndexOfId(int id) const
+{
+    for (int i = 0; i < m_connections.size(); ++i) {
+        if (m_connections[i].id == id)
+            return i;
+    }
+    return kNoIndex;
+}
+
+void NodeGraph::removeConnection(int id)
+{
+    const int index = connectionIndexOfId(id);
+    if (index != kNoIndex)
+        m_connections.removeAt(index);
+}
+
+void NodeGraph::insertConnection(int index, const Connection &connection)
+{
+    const int clamped = qBound(0, index, int(m_connections.size()));
+    m_connections.insert(clamped, connection);
+    // Keep the next-id counter past any restored id so a later add never collides.
+    if (connection.id >= m_nextConnectionId)
+        m_nextConnectionId = connection.id + 1;
+}
+
+int NodeGraph::connectionAtInput(int nodeId, int portIndex) const
+{
+    for (const Connection &c : m_connections) {
+        if (c.toNodeId == nodeId && c.toPortIndex == portIndex)
+            return c.id;
+    }
+    return -1;
+}
+
+QVector<int> NodeGraph::connectionIdsForNode(int nodeId) const
+{
+    QVector<int> ids;
+    for (const Connection &c : m_connections) {
+        if (c.touchesNode(nodeId))
+            ids.push_back(c.id);
+    }
+    return ids;
+}
+
 } // namespace cutpilot::core
