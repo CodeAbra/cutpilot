@@ -422,11 +422,15 @@ QRhiTexture *CompositorEngine::evaluate(const core::CompositePlan &plan,
         sourceStamp += QLatin1Char('|');
     }
 
-    // A device-level create failing below abandons the evaluation; the
-    // un-consumed batch must go back to the rhi rather than leak.
-    const auto fail = [&uploads]() -> QRhiTexture * {
-        if (uploads)
-            uploads->release();
+    // A device-level create failing below abandons the evaluation, but the
+    // queued source uploads must still reach the command buffer: their
+    // pendingUpload images are already consumed, so a discarded batch would
+    // leave those sources textureless with nothing left to retry.
+    const auto fail = [cb, &uploads]() -> QRhiTexture * {
+        if (uploads) {
+            cb->resourceUpdate(uploads);
+            uploads = nullptr;
+        }
         return nullptr;
     };
 
@@ -460,14 +464,23 @@ QRhiTexture *CompositorEngine::evaluate(const core::CompositePlan &plan,
             pass.target.reset(d->rhi->newTextureRenderTarget({ attachment }));
             pass.targetPass.reset(pass.target->newCompatibleRenderPassDescriptor());
             pass.target->setRenderPassDescriptor(pass.targetPass.get());
-            if (!pass.target->create())
+            if (!pass.target->create()) {
+                // A half-created pass must not be found by the next frame:
+                // the texture-size guard above would skip re-creating the
+                // target and render into a dead one.
+                pass.targetPass.reset();
+                pass.target.reset();
+                pass.texture.reset();
                 return fail();
+            }
         }
         if (!pass.uniforms) {
             pass.uniforms.reset(d->rhi->newBuffer(
                 QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUniformCapacity));
-            if (!pass.uniforms->create())
+            if (!pass.uniforms->create()) {
+                pass.uniforms.reset();
                 return fail();
+            }
         }
 
         QRhiGraphicsPipeline *pipeline =
