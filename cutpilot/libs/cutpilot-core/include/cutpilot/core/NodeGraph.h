@@ -73,7 +73,13 @@ public:
     void raiseToTop(int id);
     void raiseToTop(const QVector<int> &ids);
 
-    // Connections. addConnection assigns the id; removal and the id-preserving
+    // True when both endpoint nodes exist and both port indices land inside
+    // their node's port list. Every path that creates a connection must hold
+    // this; an edge to a missing node is silent model corruption.
+    bool connectionEndpointsValid(const Connection &connection) const;
+
+    // Connections. addConnection assigns the id, refusing (returns -1, adds
+    // nothing) when the endpoints are not valid; removal and the id-preserving
     // re-insert mirror the node operations so an undone edit restores an edge
     // exactly as it was.
     int addConnection(const Connection &connection);

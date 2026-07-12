@@ -47,6 +47,7 @@ private slots:
     void portMatchMatrix();
 
     void addConnectionAssignsIds();
+    void connectionWithAMissingEndpointIsRefused();
     void connectionLookupAndRemoval();
     void insertConnectionPreservesIdAndKeepsCounterAhead();
     void connectionAtInputAndPerNodeIds();
@@ -99,6 +100,35 @@ void TstConnections::addConnectionAssignsIds()
     QVERIFY(c1 > 0);
     QVERIFY(c2 > c1); // ids are unique and increasing
     QCOMPARE(graph.connections().size(), 2);
+}
+
+void TstConnections::connectionWithAMissingEndpointIsRefused()
+{
+    NodeGraph graph;
+    const int a = graph.addNode(makeNode(PortType::Text, PortType::Image));
+    const int b = graph.addNode(makeNode(PortType::Image, PortType::Image));
+
+    // An endpoint id absent from the graph refuses the whole add.
+    QCOMPARE(graph.addConnection(edge(a, 999)), -1);
+    QCOMPARE(graph.addConnection(edge(999, b)), -1);
+    // So does a port index outside the endpoint node's port list.
+    QCOMPARE(graph.addConnection(edge(a, b, 7, 0)), -1);
+    QCOMPARE(graph.addConnection(edge(a, b, 1, 7)), -1);
+    QCOMPARE(graph.connections().size(), 0);
+
+    // The connect command refuses the same way, and stays a no-op through
+    // undo and redo rather than corrupting the history.
+    CommandStack stack;
+    stack.push(std::make_unique<ConnectCommand>(edge(a, 999)), graph);
+    QCOMPARE(graph.connections().size(), 0);
+    stack.undo(graph);
+    QCOMPARE(graph.connections().size(), 0);
+    stack.redo(graph);
+    QCOMPARE(graph.connections().size(), 0);
+
+    // A valid edge still connects.
+    QVERIFY(graph.addConnection(edge(a, b)) > 0);
+    QCOMPARE(graph.connections().size(), 1);
 }
 
 void TstConnections::connectionLookupAndRemoval()

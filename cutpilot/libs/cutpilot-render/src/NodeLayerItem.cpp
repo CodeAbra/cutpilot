@@ -465,8 +465,20 @@ void NodeLayerItem::updateConnectTarget(const QPointF &world)
 
 void NodeLayerItem::finishConnectDrag(const QPointF &world)
 {
-    const bool hasTarget =
-        m_targetNodeId != -1 && m_targetMatch != core::PortMatch::Incompatible;
+    // The anchor and a grabbed edge are re-validated against the live graph:
+    // both must have survived the drag for the drop to reference them.
+    const core::Node *anchor = m_graph.nodeById(m_anchorNodeId);
+    if (!anchor || m_anchorPortIndex < 0
+        || m_anchorPortIndex >= anchor->ports.size()) {
+        endConnectDrag();
+        return;
+    }
+    const bool detachedAlive = m_detachedConnectionId != -1
+        && m_graph.connectionById(m_detachedConnectionId) != nullptr;
+
+    const bool hasTarget = m_targetNodeId != -1
+        && m_graph.nodeById(m_targetNodeId) != nullptr
+        && m_targetMatch != core::PortMatch::Incompatible;
 
     if (hasTarget) {
         core::Connection wire;
@@ -491,7 +503,7 @@ void NodeLayerItem::finishConnectDrag(const QPointF &world)
         if (alreadyWired) {
             // Dropping back where the edge already runs changes nothing — including
             // a grabbed edge released on its own input.
-        } else if (m_detachedConnectionId != -1) {
+        } else if (detachedAlive) {
             // Re-route as one undo step: the old edge out, the new edge in.
             auto composite = std::make_unique<core::CompositeCommand>();
             composite->add(
@@ -513,7 +525,7 @@ void NodeLayerItem::finishConnectDrag(const QPointF &world)
         return;
     }
 
-    if (m_detachedConnectionId != -1) {
+    if (detachedAlive) {
         // A grabbed edge released on empty canvas disconnects.
         m_commands.push(std::make_unique<core::DisconnectCommand>(m_detachedConnectionId),
                         m_graph);
@@ -1169,6 +1181,9 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
     }
 
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
+        // Cancel an in-flight wire first: the delete may remove its endpoints.
+        if (m_connectActive)
+            endConnectDrag();
         const QVector<int> ids = m_graph.selectedIds();
         if (!ids.isEmpty()) {
             m_commands.push(std::make_unique<core::DeleteNodesCommand>(ids), m_graph);
@@ -1181,6 +1196,9 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
     }
 
     if (control && event->key() == Qt::Key_Z) {
+        // Cancel an in-flight wire first: the history walk may remove its endpoints.
+        if (m_connectActive)
+            endConnectDrag();
         if (shift)
             m_commands.redo(m_graph);
         else

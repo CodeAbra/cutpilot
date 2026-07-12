@@ -56,6 +56,16 @@ void key(DrivableLayer &layer, Qt::Key k, Qt::KeyboardModifiers mods)
     layer.keyPressEvent(&event);
 }
 
+// True when every connection's endpoints resolve to live nodes.
+bool allEndpointsExist(const cutpilot::core::NodeGraph &graph)
+{
+    for (const cutpilot::core::Connection &c : graph.connections()) {
+        if (!graph.nodeById(c.fromNodeId) || !graph.nodeById(c.toNodeId))
+            return false;
+    }
+    return true;
+}
+
 // With the default camera (zoom 1, no pan, ratio 1 offscreen), item coordinates
 // equal world coordinates, so the default node's port positions are exact. The
 // default node is 280x200 centred on the given point, with an image input at
@@ -111,6 +121,8 @@ private slots:
     void draggingOccupiedInputOffToEmptyCanvasDisconnects();
     void reroutingToAnotherInputIsOneUndoStep();
     void emptyCanvasDropRaisesTypeFilteredPalette();
+    void deleteDuringConnectDragCannotOrphanAConnection();
+    void undoDuringConnectDragCannotOrphanAConnection();
 };
 
 void TstNodeLayerWiring::dragOutputToCompatibleInputConnects()
@@ -272,6 +284,56 @@ void TstNodeLayerWiring::emptyCanvasDropRaisesTypeFilteredPalette()
     board.layer.cancelPalette();
     QCOMPARE(graph.nodes().size(), 1);
     QCOMPARE(graph.connections().size(), 0);
+}
+
+void TstNodeLayerWiring::deleteDuringConnectDragCannotOrphanAConnection()
+{
+    Board board;
+    const QPointF a(300, 300);
+    const QPointF b(900, 500);
+    const int aId = board.addDefaultNode(a);
+    const int bId = board.addDefaultNode(b);
+
+    // Select the source node by its body, clear of every port's grab radius.
+    const QPointF grip = a + QPointF(0, 30);
+    press(board.layer, grip);
+    release(board.layer, grip);
+    QVERIFY(board.layer.graph().nodeById(aId)->selected);
+
+    // Start wiring from the selected node's output, then delete it mid-drag.
+    press(board.layer, outputPort(a));
+    move(board.layer, QPointF(600, 380));
+    key(board.layer, Qt::Key_Delete, Qt::NoModifier);
+    move(board.layer, imageInputPort(b));
+    release(board.layer, imageInputPort(b));
+
+    const core::NodeGraph &graph = board.layer.graph();
+    QVERIFY(!graph.nodeById(aId)); // the delete landed
+    QVERIFY(graph.nodeById(bId));
+    QCOMPARE(graph.connections().size(), 0); // no edge to a dead node
+    QVERIFY(allEndpointsExist(graph));
+}
+
+void TstNodeLayerWiring::undoDuringConnectDragCannotOrphanAConnection()
+{
+    Board board;
+    const QPointF a(300, 300);
+    const QPointF b(900, 500);
+    const int bId = board.addDefaultNode(b);
+    const int aId = board.addDefaultNode(a); // added last, so undo removes it
+
+    // Start wiring from the newest node's output, then undo its add mid-drag.
+    press(board.layer, outputPort(a));
+    move(board.layer, QPointF(600, 380));
+    key(board.layer, Qt::Key_Z, Qt::ControlModifier);
+    move(board.layer, imageInputPort(b));
+    release(board.layer, imageInputPort(b));
+
+    const core::NodeGraph &graph = board.layer.graph();
+    QVERIFY(!graph.nodeById(aId)); // the undo landed
+    QVERIFY(graph.nodeById(bId));
+    QCOMPARE(graph.connections().size(), 0); // no edge to a dead node
+    QVERIFY(allEndpointsExist(graph));
 }
 
 int main(int argc, char *argv[])

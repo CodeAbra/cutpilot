@@ -182,8 +182,20 @@ void NodeGraph::raiseToTop(const QVector<int> &ids)
     m_nodes += raised;
 }
 
+bool NodeGraph::connectionEndpointsValid(const Connection &connection) const
+{
+    const Node *from = nodeById(connection.fromNodeId);
+    const Node *to = nodeById(connection.toNodeId);
+    return from && to && connection.fromPortIndex >= 0
+        && connection.fromPortIndex < from->ports.size()
+        && connection.toPortIndex >= 0
+        && connection.toPortIndex < to->ports.size();
+}
+
 int NodeGraph::addConnection(const Connection &connection)
 {
+    if (!connectionEndpointsValid(connection))
+        return -1;
     Connection copy = connection;
     copy.id = m_nextConnectionId++;
     m_connections.push_back(copy);
