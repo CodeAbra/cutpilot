@@ -17,15 +17,17 @@ class ThemeTable;
 
 namespace cutpilot::render {
 
-// Builds the triangulated, vertex-colored geometry for the node layer in the item's
-// logical pixel space. Every node — body, slim header, border, typed port dots, and
-// the selection outline — is emitted as colored triangles into one shared
-// vertex/index buffer, so the whole layer is one batchable scene-graph geometry
-// rather than a widget per node.
+// Builds the triangulated, vertex-colored mesh for one node in world coordinates:
+// body, slim header, border, typed port dots, and the selection outline, all as
+// colored triangles. Vertices are world-space, so pan and zoom are applied by the
+// layer's scene-graph transform and never re-triangulate the mesh. Each node is
+// meshed on its own, so its indices are node-local (never near the 16-bit index
+// ceiling) and the layer emits one scene-graph geometry node per node — the per-node
+// batching and culling granularity a hundreds-of-nodes board depends on.
 //
-// The mesh is held as plain arrays here and copied into a QSGGeometry by the layer;
-// keeping the math out of the scene-graph node keeps this unit-checkable and free of
-// QtQuick dependencies.
+// The mesh is plain arrays here and copied into a QSGGeometry by the layer; keeping
+// the math out of the scene-graph node keeps it unit-checkable and free of QtQuick
+// dependencies.
 class NodeGeometryBuilder {
 public:
     struct Vertex {
@@ -37,31 +39,28 @@ public:
         uint8_t a;
     };
 
-    // Clear and rebuild the mesh for all nodes at the given camera. worldToScreen
-    // maps a world point to the layer's logical pixel coordinates; zoom is the
-    // world-to-screen scale (logical), used for level-of-detail and to size strokes
-    // and ports in world-proportional terms.
-    void build(const QVector<core::Node> &nodes,
-               const theme::ThemeTable &theme,
-               qreal zoom,
-               const QPointF &panLogical);
+    struct Mesh {
+        QVector<Vertex> vertices;
+        QVector<uint16_t> indices;
+    };
 
-    const QVector<Vertex> &vertices() const { return m_vertices; }
-    const QVector<uint16_t> &indices() const { return m_indices; }
+    // On-screen zoom at or above which a node draws its header and ports; below it
+    // the card drops to a single solid rounded body (the low-zoom detail tier).
+    static constexpr qreal kDetailZoom = 0.45;
+
+    // Build one node's world-space mesh. detailed selects the level-of-detail tier.
+    Mesh buildNode(const core::Node &node, const theme::ThemeTable &theme,
+                   bool detailed) const;
 
 private:
-    QPointF toScreen(const QPointF &world, qreal zoom, const QPointF &panLogical) const;
-
-    void appendRoundedRect(const QRectF &rect, qreal radius, const QColor &color);
-    void appendRoundedRectStroke(const QRectF &rect, qreal radius, qreal width,
-                                 const QColor &color);
-    void appendDisc(const QPointF &center, qreal radius, const QColor &color);
-
-    void appendTriangle(const QPointF &a, const QPointF &b, const QPointF &c,
-                        const QColor &color);
-
-    QVector<Vertex> m_vertices;
-    QVector<uint16_t> m_indices;
+    static void appendTriangle(Mesh &mesh, const QPointF &a, const QPointF &b,
+                               const QPointF &c, const QColor &color);
+    static void appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,
+                                  const QColor &color);
+    static void appendRoundedRectStroke(Mesh &mesh, const QRectF &rect, qreal radius,
+                                        qreal width, const QColor &color);
+    static void appendDisc(Mesh &mesh, const QPointF &center, qreal radius,
+                           const QColor &color);
 };
 
 } // namespace cutpilot::render

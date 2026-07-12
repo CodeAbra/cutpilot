@@ -7,13 +7,18 @@
 #include "cutpilot/render/CanvasController.h"
 #include "cutpilot/theme/ThemeTable.h"
 
+QT_BEGIN_NAMESPACE
+class QSGTransformNode;
+QT_END_NAMESPACE
+
 namespace cutpilot::render {
 
 // The node layer: a scene-graph QQuickItem stacked over the grid that draws the node
-// model as batchable vertex-colored geometry and handles node selection and drag. It
-// reads the shared camera from the controller, so nodes live in world space — they
-// pan and zoom with the canvas and scale by level-of-detail. It repaints only on a
-// model or camera change, so a static board issues no per-frame redraws.
+// model as vertex-colored geometry and handles node selection and drag. Each node is
+// one scene-graph geometry node built in world space under a single transform node
+// that carries the shared camera, so pan and zoom are a matrix change and never
+// re-triangulate any node. Geometry rebuilds only when the model or the detail tier
+// changes, so a static board — and every pan or in-tier zoom — issues no rebuild.
 //
 // Hit-testing runs in world space against the model, not via Qt item picking, so it
 // is ready to back onto a spatial index as the board grows.
@@ -51,9 +56,18 @@ private:
     QPointF worldFromLocal(const QPointF &localLogical) const;
     QPointF panLogical() const;
 
+    // Reconcile one child geometry node per model node under the camera transform,
+    // reusing existing children and their buffers where the vertex counts still fit.
+    void rebuildNodes(QSGTransformNode *root, bool detailed);
+
     CanvasController *m_controller = nullptr;
     core::NodeGraph m_graph;
     theme::ThemeTable m_theme{theme::Theme::Dark};
+
+    // Rebuild node geometry only when the model or the detail tier changes; a plain
+    // camera move just re-sets the transform matrix.
+    bool m_geometryDirty = true;
+    bool m_lastDetailed = true;
 
     bool m_dragging = false;
     int m_dragNodeId = -1;

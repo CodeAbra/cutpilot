@@ -2,10 +2,12 @@
 #include "NodeGeometryBuilder.h"
 
 #include <QKeyEvent>
+#include <QMatrix4x4>
 #include <QMouseEvent>
 #include <QQuickWindow>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
+#include <QSGTransformNode>
 #include <QSGVertexColorMaterial>
 #include <QWheelEvent>
 #include <QtMath>
@@ -53,6 +55,7 @@ void NodeLayerItem::seedStarterNode()
         { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
     };
     m_graph.addNode(node);
+    m_geometryDirty = true;
     update();
 }
 
@@ -80,41 +83,83 @@ QPointF NodeLayerItem::worldFromLocal(const QPointF &localLogical) const
 
 QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
 {
-    auto *geometryNode = static_cast<QSGGeometryNode *>(oldNode);
-    if (!geometryNode) {
-        geometryNode = new QSGGeometryNode;
-        auto *material = new QSGVertexColorMaterial;
-        geometryNode->setMaterial(material);
-        geometryNode->setFlag(QSGNode::OwnsMaterial, true);
-        geometryNode->setFlag(QSGNode::OwnsGeometry, true);
+    auto *root = static_cast<QSGTransformNode *>(oldNode);
+    if (!root) {
+        root = new QSGTransformNode;
+        m_geometryDirty = true;
     }
 
     const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
+    const QPointF pan = panLogical();
 
-    NodeGeometryBuilder builder;
-    builder.build(m_graph.nodes(), m_theme, zoom, panLogical());
+    // The camera transform maps world coordinates to the item's logical pixels, so a
+    // pan or zoom is a matrix change here and never re-triangulates any node.
+    QMatrix4x4 matrix;
+    matrix.translate(float(pan.x()), float(pan.y()));
+    matrix.scale(float(zoom), float(zoom));
+    root->setMatrix(matrix);
 
-    const auto &verts = builder.vertices();
-    const auto &idx = builder.indices();
-
-    auto *geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
-                                     verts.size(), idx.size());
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-
-    auto *vd = geometry->vertexDataAsColoredPoint2D();
-    for (int i = 0; i < verts.size(); ++i) {
-        const auto &v = verts[i];
-        vd[i].set(v.x, v.y, v.r, v.g, v.b, v.a);
+    const bool detailed = zoom >= NodeGeometryBuilder::kDetailZoom;
+    if (m_geometryDirty || detailed != m_lastDetailed) {
+        rebuildNodes(root, detailed);
+        m_lastDetailed = detailed;
+        m_geometryDirty = false;
     }
 
-    quint16 *id = geometry->indexDataAsUShort();
-    for (int i = 0; i < idx.size(); ++i)
-        id[i] = idx[i];
+    return root;
+}
 
-    geometryNode->setGeometry(geometry);
-    geometryNode->markDirty(QSGNode::DirtyGeometry);
+void NodeLayerItem::rebuildNodes(QSGTransformNode *root, bool detailed)
+{
+    NodeGeometryBuilder builder;
 
-    return geometryNode;
+    QSGNode *child = root->firstChild();
+    for (const core::Node &node : m_graph.nodes()) {
+        const NodeGeometryBuilder::Mesh mesh =
+            builder.buildNode(node, m_theme, detailed);
+
+        auto *geometryNode = static_cast<QSGGeometryNode *>(child);
+        if (!geometryNode) {
+            geometryNode = new QSGGeometryNode;
+            auto *material = new QSGVertexColorMaterial;
+            geometryNode->setMaterial(material);
+            geometryNode->setFlag(QSGNode::OwnsMaterial, true);
+            geometryNode->setFlag(QSGNode::OwnsGeometry, true);
+            root->appendChildNode(geometryNode);
+        }
+
+        // Reuse the existing buffers unless the vertex or index counts changed;
+        // OwnsGeometry frees the previous geometry when a new one is set.
+        QSGGeometry *geometry = geometryNode->geometry();
+        if (!geometry || geometry->vertexCount() != mesh.vertices.size()
+            || geometry->indexCount() != mesh.indices.size()) {
+            geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
+                                       mesh.vertices.size(), mesh.indices.size());
+            geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+            geometryNode->setGeometry(geometry);
+        }
+
+        auto *vd = geometry->vertexDataAsColoredPoint2D();
+        for (int i = 0; i < mesh.vertices.size(); ++i) {
+            const auto &v = mesh.vertices[i];
+            vd[i].set(v.x, v.y, v.r, v.g, v.b, v.a);
+        }
+        quint16 *id = geometry->indexDataAsUShort();
+        for (int i = 0; i < mesh.indices.size(); ++i)
+            id[i] = mesh.indices[i];
+
+        geometryNode->markDirty(QSGNode::DirtyGeometry);
+
+        child = geometryNode->nextSibling();
+    }
+
+    // Drop any geometry nodes left over from a larger previous board.
+    while (child) {
+        QSGNode *next = child->nextSibling();
+        root->removeChildNode(child);
+        delete child;
+        child = next;
+    }
 }
 
 void NodeLayerItem::mousePressEvent(QMouseEvent *event)
@@ -161,8 +206,10 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
         setCursor(Qt::ClosedHandCursor);
     }
 
-    if (changed)
+    if (changed) {
+        m_geometryDirty = true;
         update();
+    }
     event->accept();
 }
 
@@ -179,6 +226,7 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
     if (m_dragging && m_dragNodeId != -1) {
         const QPointF world = worldFromLocal(event->position());
         m_graph.moveNodeTo(m_dragNodeId, world - m_dragGrabWorldOffset);
+        m_geometryDirty = true;
         update();
         event->accept();
         return;

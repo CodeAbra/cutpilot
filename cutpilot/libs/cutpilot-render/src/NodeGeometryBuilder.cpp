@@ -3,6 +3,7 @@
 #include "cutpilot/core/Node.h"
 #include "cutpilot/theme/ThemeTable.h"
 
+#include <QtGlobal>
 #include <QtMath>
 
 #include <array>
@@ -11,21 +12,19 @@ namespace cutpilot::render {
 
 namespace {
 
-// Node card geometry in world units. These are the resting design proportions of a
-// content-first card: a slim header strip over a larger body, rounded corners, and
-// small typed port dots on the side edges.
+// Node card geometry in world units: a slim header strip over a larger body,
+// rounded corners, small typed port dots on the side edges, a hairline border, and
+// the selection outline and elevation halo of a selected card.
 constexpr qreal kHeaderWorldHeight = 30.0;
 constexpr qreal kBodyRadiusWorld = 10.0;
 constexpr qreal kBorderWorldWidth = 1.5;
 constexpr qreal kPortWorldRadius = 5.0;
+constexpr qreal kPortBackingWorldWidth = 1.0;
 constexpr qreal kSelectionWorldWidth = 2.0;
+constexpr qreal kHaloWorldWidth = 6.0;
 
-// Level-of-detail: below this on-screen zoom the card drops its header and ports and
-// reads as a single solid rounded card, matching the design's low-zoom tier.
-constexpr qreal kDetailZoom = 0.45;
-
-// Arc tessellation: segments per 90-degree corner. Eight reads as round at the
-// sizes a node occupies on screen without inflating the vertex count.
+// Segments per 90-degree corner. Eight reads as round at the sizes a node occupies
+// on screen without inflating the vertex count.
 constexpr int kCornerSegments = 8;
 
 uint8_t toByte(qreal channel)
@@ -66,14 +65,7 @@ QColor portColorFor(core::PortType type, const theme::ThemeTable &theme)
 
 } // namespace
 
-QPointF NodeGeometryBuilder::toScreen(const QPointF &world, qreal zoom,
-                                      const QPointF &panLogical) const
-{
-    return QPointF(world.x() * zoom + panLogical.x(),
-                   world.y() * zoom + panLogical.y());
-}
-
-void NodeGeometryBuilder::appendTriangle(const QPointF &a, const QPointF &b,
+void NodeGeometryBuilder::appendTriangle(Mesh &mesh, const QPointF &a, const QPointF &b,
                                          const QPointF &c, const QColor &color)
 {
     const uint8_t r = toByte(color.redF());
@@ -81,24 +73,24 @@ void NodeGeometryBuilder::appendTriangle(const QPointF &a, const QPointF &b,
     const uint8_t bl = toByte(color.blueF());
     const uint8_t al = toByte(color.alphaF());
 
-    const auto base = static_cast<uint16_t>(m_vertices.size());
+    const auto base = static_cast<uint16_t>(mesh.vertices.size());
     for (const QPointF &p : { a, b, c })
-        m_vertices.push_back({ float(p.x()), float(p.y()), r, g, bl, al });
-    m_indices.push_back(base);
-    m_indices.push_back(static_cast<uint16_t>(base + 1));
-    m_indices.push_back(static_cast<uint16_t>(base + 2));
+        mesh.vertices.push_back({ float(p.x()), float(p.y()), r, g, bl, al });
+    mesh.indices.push_back(base);
+    mesh.indices.push_back(static_cast<uint16_t>(base + 1));
+    mesh.indices.push_back(static_cast<uint16_t>(base + 2));
 }
 
 // A filled rounded rect, triangulated as a fan from the rect center out to a ring of
 // boundary points (straight edges plus tessellated corner arcs).
-void NodeGeometryBuilder::appendRoundedRect(const QRectF &rect, qreal radius,
+void NodeGeometryBuilder::appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,
                                             const QColor &color)
 {
     const qreal r = qMin(radius, qMin(rect.width(), rect.height()) / 2.0);
     if (r <= 0.5) {
         // Degenerate to a plain quad.
-        appendTriangle(rect.topLeft(), rect.topRight(), rect.bottomRight(), color);
-        appendTriangle(rect.topLeft(), rect.bottomRight(), rect.bottomLeft(), color);
+        appendTriangle(mesh, rect.topLeft(), rect.topRight(), rect.bottomRight(), color);
+        appendTriangle(mesh, rect.topLeft(), rect.bottomRight(), rect.bottomLeft(), color);
         return;
     }
 
@@ -111,8 +103,8 @@ void NodeGeometryBuilder::appendRoundedRect(const QRectF &rect, qreal radius,
         QPointF(rect.left() + r, rect.bottom() - r),  // bottom-left
         QPointF(rect.left() + r, rect.top() + r),     // top-left
     };
-    // Each arc sweeps 90 degrees; start angles run clockwise in screen space (y
-    // down), so the boundary is generated in a consistent winding.
+    // Each arc sweeps 90 degrees; start angles run clockwise in a y-down frame, so
+    // the boundary is generated in a consistent winding.
     const std::array<qreal, 4> startAngle = { -M_PI_2, 0.0, M_PI_2, M_PI };
 
     QVector<QPointF> boundary;
@@ -129,14 +121,15 @@ void NodeGeometryBuilder::appendRoundedRect(const QRectF &rect, qreal radius,
     for (int i = 0; i < boundary.size(); ++i) {
         const QPointF &p0 = boundary[i];
         const QPointF &p1 = boundary[(i + 1) % boundary.size()];
-        appendTriangle(center, p0, p1, color);
+        appendTriangle(mesh, center, p0, p1, color);
     }
 }
 
 // A stroked rounded-rect outline of the given width, built as the band between an
 // outer and an inner rounded rect. Emitted as quads following the boundary ring.
-void NodeGeometryBuilder::appendRoundedRectStroke(const QRectF &rect, qreal radius,
-                                                  qreal width, const QColor &color)
+void NodeGeometryBuilder::appendRoundedRectStroke(Mesh &mesh, const QRectF &rect,
+                                                  qreal radius, qreal width,
+                                                  const QColor &color)
 {
     const qreal half = width / 2.0;
     const QRectF outer = rect.adjusted(-half, -half, half, half);
@@ -172,12 +165,12 @@ void NodeGeometryBuilder::appendRoundedRectStroke(const QRectF &rect, qreal radi
 
     for (int i = 0; i < count; ++i) {
         const int j = (i + 1) % count;
-        appendTriangle(outerRing[i], outerRing[j], innerRing[i], color);
-        appendTriangle(innerRing[i], outerRing[j], innerRing[j], color);
+        appendTriangle(mesh, outerRing[i], outerRing[j], innerRing[i], color);
+        appendTriangle(mesh, innerRing[i], outerRing[j], innerRing[j], color);
     }
 }
 
-void NodeGeometryBuilder::appendDisc(const QPointF &center, qreal radius,
+void NodeGeometryBuilder::appendDisc(Mesh &mesh, const QPointF &center, qreal radius,
                                      const QColor &color)
 {
     const int segments = qMax(10, kCornerSegments * 2);
@@ -186,86 +179,74 @@ void NodeGeometryBuilder::appendDisc(const QPointF &center, qreal radius,
         const qreal a1 = (qreal(i + 1) / segments) * 2.0 * M_PI;
         const QPointF p0 = center + QPointF(radius * std::cos(a0), radius * std::sin(a0));
         const QPointF p1 = center + QPointF(radius * std::cos(a1), radius * std::sin(a1));
-        appendTriangle(center, p0, p1, color);
+        appendTriangle(mesh, center, p0, p1, color);
     }
 }
 
-void NodeGeometryBuilder::build(const QVector<core::Node> &nodes,
-                                const theme::ThemeTable &theme, qreal zoom,
-                                const QPointF &panLogical)
+NodeGeometryBuilder::Mesh
+NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &theme,
+                               bool detailed) const
 {
-    m_vertices.clear();
-    m_indices.clear();
+    Mesh mesh;
 
     const QColor canvas = theme.bgCanvas();
-    const bool detailed = zoom >= kDetailZoom;
+    const QRectF rect = node.worldRect();
+    const qreal radius = kBodyRadiusWorld;
 
-    for (const core::Node &node : nodes) {
-        const QRectF worldRect = node.worldRect();
-        const QPointF tl = toScreen(worldRect.topLeft(), zoom, panLogical);
-        const QPointF br = toScreen(worldRect.bottomRight(), zoom, panLogical);
-        const QRectF screenRect(tl, br);
+    // Resting card: a rounded body with a hairline border. The selected node first
+    // lays down a neutral halo ring just outside the card (the elevation lift), then
+    // the selection outline replaces the resting border.
+    if (node.selected) {
+        appendRoundedRectStroke(mesh, rect, radius, kHaloWorldWidth,
+                                over(theme.glowEmphasis(), canvas));
+    }
 
-        const qreal radius = kBodyRadiusWorld * zoom;
-        const qreal borderWidth = qMax(1.0, kBorderWorldWidth * zoom);
+    appendRoundedRect(mesh, rect, radius, theme.nodeBody());
 
-        // Resting card: a rounded body with a hairline border. The selected node
-        // first lays down a neutral halo ring just outside the card (the elevation
-        // lift), then the 2px selection outline replaces the resting border.
-        if (node.selected) {
-            const qreal haloWidth = qMax(3.0, 6.0 * zoom);
-            appendRoundedRectStroke(screenRect, radius, haloWidth,
-                                    over(theme.glowEmphasis(), canvas));
-        }
-
-        appendRoundedRect(screenRect, radius, theme.nodeBody());
-
-        if (detailed) {
-            // Slim header strip over the top of the body, clipped to the body's
-            // rounded top corners by reusing the body radius on its top edge only.
-            const qreal headerHeight = kHeaderWorldHeight * zoom;
-            QRectF headerRect = screenRect;
-            headerRect.setHeight(qMin(headerHeight, screenRect.height()));
-            // Square the header's bottom corners: draw a rounded rect for the strip,
-            // then a plain quad fills the seam to the body so the corner only rounds
-            // at the very top of the card.
-            appendRoundedRect(headerRect, radius, theme.nodeHeader());
-            const qreal seam = radius;
-            if (headerRect.height() > seam) {
-                const QRectF lower(headerRect.left(), headerRect.bottom() - seam,
-                                   headerRect.width(), seam);
-                appendRoundedRect(QRectF(lower.left(), lower.top(), lower.width(),
-                                         qMin(seam, headerRect.height())),
-                                  0.0, theme.nodeHeader());
-            }
-        }
-
-        // Border or selection outline.
-        if (node.selected) {
-            appendRoundedRectStroke(screenRect, radius, qMax(2.0, kSelectionWorldWidth),
-                                    theme.selection());
-        } else {
-            appendRoundedRectStroke(screenRect, radius, borderWidth,
-                                    theme.borderDefault());
-        }
-
-        // Typed port dots on the side edges, hidden at the low-detail tier.
-        if (detailed) {
-            const qreal portRadius = qMax(3.0, kPortWorldRadius * zoom);
-            for (const core::Port &port : node.ports) {
-                const qreal edgeX = port.isInput ? worldRect.left() : worldRect.right();
-                const qreal edgeY = worldRect.top()
-                    + worldRect.height() * port.edgeFraction;
-                const QPointF centerScreen =
-                    toScreen(QPointF(edgeX, edgeY), zoom, panLogical);
-                // A subtle dark backing disc separates the dot from the card edge,
-                // then the typed color on top.
-                appendDisc(centerScreen, portRadius + qMax(1.0, zoom),
-                           theme.bgCanvas());
-                appendDisc(centerScreen, portRadius, portColorFor(port.type, theme));
-            }
+    if (detailed) {
+        // Slim header strip over the top of the body, its bottom corners squared so
+        // only the top of the card rounds.
+        QRectF headerRect = rect;
+        headerRect.setHeight(qMin(kHeaderWorldHeight, rect.height()));
+        appendRoundedRect(mesh, headerRect, radius, theme.nodeHeader());
+        const qreal seam = radius;
+        if (headerRect.height() > seam) {
+            const QRectF lower(headerRect.left(), headerRect.bottom() - seam,
+                               headerRect.width(), seam);
+            appendRoundedRect(mesh,
+                              QRectF(lower.left(), lower.top(), lower.width(),
+                                     qMin(seam, headerRect.height())),
+                              0.0, theme.nodeHeader());
         }
     }
+
+    // Border or selection outline.
+    if (node.selected) {
+        appendRoundedRectStroke(mesh, rect, radius, kSelectionWorldWidth,
+                                theme.selection());
+    } else {
+        appendRoundedRectStroke(mesh, rect, radius, kBorderWorldWidth,
+                                theme.borderDefault());
+    }
+
+    // Typed port dots on the side edges, hidden at the low-detail tier.
+    if (detailed) {
+        for (const core::Port &port : node.ports) {
+            const qreal edgeX = port.isInput ? rect.left() : rect.right();
+            const qreal edgeY = rect.top() + rect.height() * port.edgeFraction;
+            const QPointF center(edgeX, edgeY);
+            // A subtle dark backing disc separates the dot from the card edge, then
+            // the typed color on top.
+            appendDisc(mesh, center, kPortWorldRadius + kPortBackingWorldWidth,
+                       theme.bgCanvas());
+            appendDisc(mesh, center, kPortWorldRadius, portColorFor(port.type, theme));
+        }
+    }
+
+    // One node's mesh stays well under the 16-bit index ceiling; a node that grew
+    // past it would need splitting into multiple geometry nodes.
+    Q_ASSERT(mesh.vertices.size() <= 0xFFFF);
+    return mesh;
 }
 
 } // namespace cutpilot::render
