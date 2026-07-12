@@ -238,12 +238,14 @@ void TstConnections::reconnectCompositeIsOneUndoStep()
     QCOMPARE(graph.connections().size(), 1);
     QCOMPARE(graph.connections().first().toNodeId, second);
 
-    // One undo returns the original wiring, id included.
+    // One undo returns the original wiring, id included, and exhausts the
+    // history: the whole re-route was a single step.
     stack.undo(graph);
     QCOMPARE(graph.connections().size(), 1);
     QCOMPARE(graph.connections().first().toNodeId, first);
     QCOMPARE(graph.connections().first().id, id);
-    QVERIFY(!stack.canUndo() || stack.canRedo()); // exactly one step was pushed
+    QVERIFY(!stack.canUndo());
+    QVERIFY(stack.canRedo());
 
     stack.redo(graph);
     QCOMPARE(graph.connections().first().toNodeId, second);
