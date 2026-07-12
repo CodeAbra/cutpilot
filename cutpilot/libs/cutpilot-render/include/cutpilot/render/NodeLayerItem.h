@@ -72,10 +72,11 @@ public:
     Q_INVOKABLE void cancelPalette();
 
     // Undoable content edits, pushed through the command stack like any other
-    // graph mutation. The chrome calls these from its prompt editor and model
-    // picker.
+    // graph mutation. The chrome calls these from its prompt editor, model
+    // picker, and gate limit dialog.
     void setNodePrompt(int nodeId, const QString &text);
     void setNodeModel(int nodeId, const QString &modelId, const QString &modelLabel);
+    void setGateLimit(int nodeId, double limitUsd);
 
     // Hand the layer a node's decoded result to display as the card's media
     // body. Images stay keyed by node id, which is never reused, so a node
@@ -109,6 +110,11 @@ signals:
     // registry-driven picker; the chrome supplies both surfaces.
     void promptEditRequested(int nodeId);
     void modelPickerRequested(int nodeId);
+
+    // A generation node was right-pressed and wants its run menu (run to
+    // here, re-run ignoring cache); a cost gate wants its limit editor.
+    void nodeMenuRequested(int nodeId);
+    void gateLimitEditRequested(int nodeId);
 
     // The graph structure or content changed through a command or history
     // walk; run bookkeeping (orphaned states, dead jobs) should reconcile.

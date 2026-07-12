@@ -78,9 +78,15 @@ StatusLine statusLine(const core::Node &node, const theme::ThemeTable &theme)
     case core::RunState::Idle:
         break;
     }
-    return { node.statusMessage.isEmpty() ? QStringLiteral("Ready")
-                                          : node.statusMessage,
-             theme.textSecondary() };
+    if (!node.statusMessage.isEmpty())
+        return { node.statusMessage, theme.textSecondary() };
+    // The estimate shows before anything is spent, so a run's cost is
+    // known up front.
+    if (node.estimatedCostUsd >= 0.0) {
+        return { QStringLiteral("Ready · ~$%1").arg(node.estimatedCostUsd, 0, 'f', 3),
+                 theme.textSecondary() };
+    }
+    return { QStringLiteral("Ready"), theme.textSecondary() };
 }
 
 } // namespace
@@ -151,6 +157,32 @@ QImage NodeContentRasterizer::rasterize(const core::Node &node,
         painter.setPen(theme.textSecondary());
         painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
                          QStringLiteral("No result yet — press run"));
+    } else if (node.kind == core::NodeKind::CostGate) {
+        // The gate card reads as policy: the limit, what its branch has
+        // spent this run, and whether it is holding work.
+        painter.setFont(numericFont(14.0));
+        painter.setPen(theme.textPrimary());
+        QRectF line(body.left(), body.top(), body.width(), 20.0);
+        painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft,
+                         QStringLiteral("Limit $%1").arg(node.gateLimitUsd, 0, 'f',
+                                                         3));
+        if (node.gateSpentUsd >= 0.0) {
+            line.translate(0.0, 22.0);
+            painter.setFont(numericFont(12.0));
+            painter.setPen(theme.textSecondary());
+            painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft,
+                             QStringLiteral("Spent $%1").arg(node.gateSpentUsd, 0,
+                                                             'f', 3));
+        }
+        if (!node.statusMessage.isEmpty()) {
+            line.translate(0.0, 22.0);
+            painter.setFont(uiFont(11.0));
+            painter.setPen(theme.statusWarning());
+            QFontMetricsF gateMetrics(painter.font());
+            painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft,
+                             gateMetrics.elidedText(node.statusMessage,
+                                                    Qt::ElideRight, line.width()));
+        }
     }
 
     // Footer: the status dot's text partner, plus the run glyph drawn by the

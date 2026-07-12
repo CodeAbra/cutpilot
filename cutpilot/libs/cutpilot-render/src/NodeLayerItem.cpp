@@ -14,6 +14,7 @@
 #include "cutpilot/core/command/DisconnectCommand.h"
 #include "cutpilot/core/command/EditPromptCommand.h"
 #include "cutpilot/core/command/MoveNodesCommand.h"
+#include "cutpilot/core/command/SetGateLimitCommand.h"
 #include "cutpilot/core/command/SetModelCommand.h"
 
 #include <QKeyEvent>
@@ -182,6 +183,8 @@ core::Node NodeLayerItem::defaultNode(const QPointF &worldCentre) const
 
 void NodeLayerItem::seedStarterNode()
 {
+    // The starter board is already a pipeline: a prompt feeding a generation
+    // whose result feeds an upscale.
     core::Node prompt;
     prompt.kind = core::NodeKind::Prompt;
     prompt.title = QStringLiteral("Prompt");
@@ -196,12 +199,33 @@ void NodeLayerItem::seedStarterNode()
 
     const int generateId = m_graph.addNode(defaultNode(QPointF(720.0, 250.0)));
 
-    core::Connection wire;
-    wire.fromNodeId = promptId;
-    wire.fromPortIndex = 0;
-    wire.toNodeId = generateId;
-    wire.toPortIndex = 1;
-    m_graph.addConnection(wire);
+    core::Node upscale;
+    upscale.kind = core::NodeKind::Generate;
+    upscale.title = QStringLiteral("Upscale Image");
+    upscale.modelId = QStringLiteral("local/procedural-upscale-v1");
+    upscale.modelLabel = QStringLiteral("Procedural Upscale (local)");
+    upscale.worldSize = QSizeF(240.0, 160.0);
+    upscale.worldPos = QPointF(1180.0, 190.0);
+    upscale.ports = {
+        { QStringLiteral("image"), core::PortType::Image, true, 0.4 },
+        { QStringLiteral("run"), core::PortType::Control, true, 0.7 },
+        { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
+    };
+    const int upscaleId = m_graph.addNode(upscale);
+
+    core::Connection promptWire;
+    promptWire.fromNodeId = promptId;
+    promptWire.fromPortIndex = 0;
+    promptWire.toNodeId = generateId;
+    promptWire.toPortIndex = 1;
+    m_graph.addConnection(promptWire);
+
+    core::Connection resultWire;
+    resultWire.fromNodeId = generateId;
+    resultWire.fromPortIndex = 3;
+    resultWire.toNodeId = upscaleId;
+    resultWire.toPortIndex = 0;
+    m_graph.addConnection(resultWire);
 
     syncSpatialIndex();
     m_geometryDirty = true;
@@ -283,6 +307,19 @@ void NodeLayerItem::setNodeModel(int nodeId, const QString &modelId,
     emit graphMutated();
 }
 
+void NodeLayerItem::setGateLimit(int nodeId, double limitUsd)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || node->kind != core::NodeKind::CostGate
+        || node->gateLimitUsd == limitUsd || limitUsd < 0.0)
+        return;
+    m_commands.push(std::make_unique<core::SetGateLimitCommand>(nodeId, limitUsd),
+                    m_graph);
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
 void NodeLayerItem::setNodeMedia(int nodeId, const QImage &image)
 {
     if (image.isNull())
@@ -337,17 +374,22 @@ namespace {
 
 // The stand-in node library the palette offers until the real taxonomy lands. Each
 // prototype carries real typed ports, so the type filter and the auto-connect are
-// exact even while the list itself is a stub.
+// exact even while the list itself is a stub. The generation entries are live:
+// edit and upscale carry their local model so they run without a pick.
 QVector<core::Node> paletteCatalog()
 {
     auto entry = [](const QString &title, const QSizeF &size,
                     const QVector<core::Port> &ports,
-                    core::NodeKind kind = core::NodeKind::Blank) {
+                    core::NodeKind kind = core::NodeKind::Blank,
+                    const QString &modelId = QString(),
+                    const QString &modelLabel = QString()) {
         core::Node node;
         node.kind = kind;
         node.title = title;
         node.worldSize = size;
         node.ports = ports;
+        node.modelId = modelId;
+        node.modelLabel = modelLabel;
         return node;
     };
 
@@ -363,15 +405,26 @@ QVector<core::Node> paletteCatalog()
               core::NodeKind::Generate),
         entry(QStringLiteral("Edit Image"), QSizeF(280, 200),
               { { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
-                { QStringLiteral("mask"), core::PortType::Mask, true, 0.55 },
-                { QStringLiteral("prompt"), core::PortType::Text, true, 0.8 },
-                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } }),
+                { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
+                { QStringLiteral("run"), core::PortType::Control, true, 0.8 },
+                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } },
+              core::NodeKind::Generate,
+              QStringLiteral("local/procedural-edit-v1"),
+              QStringLiteral("Procedural Edit (local)")),
+        entry(QStringLiteral("Upscale Image"), QSizeF(240, 160),
+              { { QStringLiteral("image"), core::PortType::Image, true, 0.4 },
+                { QStringLiteral("run"), core::PortType::Control, true, 0.7 },
+                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } },
+              core::NodeKind::Generate,
+              QStringLiteral("local/procedural-upscale-v1"),
+              QStringLiteral("Procedural Upscale (local)")),
+        entry(QStringLiteral("Cost Gate"), QSizeF(200, 130),
+              { { QStringLiteral("run"), core::PortType::Control, true, 0.5 },
+                { QStringLiteral("pass"), core::PortType::Control, false, 0.5 } },
+              core::NodeKind::CostGate),
         entry(QStringLiteral("Extract Mask"), QSizeF(240, 160),
               { { QStringLiteral("image"), core::PortType::Image, true, 0.5 },
                 { QStringLiteral("mask"), core::PortType::Mask, false, 0.5 } }),
-        entry(QStringLiteral("Upscale Image"), QSizeF(240, 160),
-              { { QStringLiteral("image"), core::PortType::Image, true, 0.5 },
-                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } }),
         entry(QStringLiteral("Generate Video"), QSizeF(300, 210),
               { { QStringLiteral("prompt"), core::PortType::Text, true, 0.35 },
                 { QStringLiteral("image"), core::PortType::Image, true, 0.6 },
@@ -381,9 +434,6 @@ QVector<core::Node> paletteCatalog()
                 { QStringLiteral("voice"), core::PortType::Audio, false, 0.5 } }),
         entry(QStringLiteral("Batch Count"), QSizeF(200, 130),
               { { QStringLiteral("count"), core::PortType::Number, false, 0.5 } }),
-        entry(QStringLiteral("Run Gate"), QSizeF(200, 130),
-              { { QStringLiteral("run"), core::PortType::Control, true, 0.5 },
-                { QStringLiteral("pass"), core::PortType::Control, false, 0.5 } }),
     };
 }
 
@@ -1170,6 +1220,25 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
         return;
     }
 
+    // A right press on a generation node raises its run menu (run to here,
+    // re-run ignoring cache); the node becomes the selection so the menu
+    // clearly targets it.
+    if (event->button() == Qt::RightButton) {
+        const int menuId = pickTopMost(worldFromLocal(event->position()));
+        const core::Node *menuNode = menuId != -1 ? m_graph.nodeById(menuId) : nullptr;
+        if (menuNode && menuNode->kind == core::NodeKind::Generate) {
+            m_graph.selectOnly(menuId);
+            m_graph.raiseToTop(menuId);
+            m_geometryDirty = true;
+            update();
+            emit nodeMenuRequested(menuId);
+            event->accept();
+            return;
+        }
+        event->ignore();
+        return;
+    }
+
     if (event->button() != Qt::LeftButton) {
         event->ignore();
         return;
@@ -1385,6 +1454,14 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
         m_geometryDirty = true;
         update();
         emit promptEditRequested(hitId);
+        event->accept();
+        return;
+    }
+    if (hitNode->kind == core::NodeKind::CostGate) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        emit gateLimitEditRequested(hitId);
         event->accept();
         return;
     }

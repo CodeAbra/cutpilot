@@ -16,6 +16,7 @@ namespace {
 class DrivableLayer : public render::NodeLayerItem {
 public:
     using render::NodeLayerItem::keyPressEvent;
+    using render::NodeLayerItem::mouseDoubleClickEvent;
     using render::NodeLayerItem::mouseMoveEvent;
     using render::NodeLayerItem::mousePressEvent;
     using render::NodeLayerItem::mouseReleaseEvent;
@@ -54,6 +55,20 @@ void key(DrivableLayer &layer, Qt::Key k, Qt::KeyboardModifiers mods)
 {
     QKeyEvent event(QEvent::KeyPress, k, mods);
     layer.keyPressEvent(&event);
+}
+
+void rightPress(DrivableLayer &layer, const QPointF &pos)
+{
+    QMouseEvent event(QEvent::MouseButtonPress, pos, pos, Qt::RightButton,
+                      Qt::RightButton, Qt::NoModifier);
+    layer.mousePressEvent(&event);
+}
+
+void doubleClick(DrivableLayer &layer, const QPointF &pos)
+{
+    QMouseEvent event(QEvent::MouseButtonDblClick, pos, pos, Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    layer.mouseDoubleClickEvent(&event);
 }
 
 // Button-explicit variants for gestures that mix mouse buttons.
@@ -149,6 +164,8 @@ private slots:
     void undoDuringConnectDragCannotOrphanAConnection();
     void flickReleaseWithoutTrailingMoveStillConnects();
     void leftReleaseDuringMiddlePanEndsTheWireNotThePan();
+    void rightPressOnAGenerationNodeRaisesItsRunMenu();
+    void controlDropOffersTheCostGateAndItsLimitIsEditable();
 };
 
 void TstNodeLayerWiring::dragOutputToCompatibleInputConnects()
@@ -419,6 +436,62 @@ void TstNodeLayerWiring::leftReleaseDuringMiddlePanEndsTheWireNotThePan()
     moveButtons(board.layer, imageInputPort(b) + QPointF(60, 60), Qt::NoButton);
     QCOMPARE(board.controller.panPixels(), panAfter);
     QCOMPARE(graph.connections().size(), 1);
+}
+
+void TstNodeLayerWiring::rightPressOnAGenerationNodeRaisesItsRunMenu()
+{
+    Board board;
+    const QPointF centre(500, 400);
+    const int id = board.addDefaultNode(centre);
+
+    QSignalSpy menuSpy(&board.layer, &render::NodeLayerItem::nodeMenuRequested);
+    rightPress(board.layer, centre);
+    QCOMPARE(menuSpy.count(), 1);
+    QCOMPARE(menuSpy.first().first().toInt(), id);
+    QVERIFY(board.layer.graph().nodeById(id)->selected);
+
+    // Empty canvas offers no run menu.
+    rightPress(board.layer, QPointF(1200, 900));
+    QCOMPARE(menuSpy.count(), 1);
+}
+
+void TstNodeLayerWiring::controlDropOffersTheCostGateAndItsLimitIsEditable()
+{
+    Board board;
+    const QPointF centre(900, 500);
+    const int nodeId = board.addDefaultNode(centre);
+
+    // Dragging a fresh wire off the run control input to empty canvas offers
+    // only nodes with a control output — the cost gate.
+    QSignalSpy paletteSpy(&board.layer, &render::NodeLayerItem::paletteRequested);
+    const QPointF drop(300, 500);
+    drag(board.layer, controlInputPort(centre), drop);
+    QCOMPARE(paletteSpy.count(), 1);
+    const QStringList titles = board.layer.paletteEntryTitles();
+    QVERIFY(titles.contains(QStringLiteral("Cost Gate")));
+    QVERIFY(!titles.contains(QStringLiteral("Upscale Image")));
+
+    board.layer.placePaletteEntry(titles.indexOf(QStringLiteral("Cost Gate")));
+    const core::NodeGraph &graph = board.layer.graph();
+    QCOMPARE(graph.nodes().size(), 2);
+    QCOMPARE(graph.connections().size(), 1);
+    const core::Node &gate = graph.nodes().last();
+    QCOMPARE(gate.kind, core::NodeKind::CostGate);
+    QCOMPARE(graph.connections().first().fromNodeId, gate.id);
+    QCOMPARE(graph.connections().first().toNodeId, nodeId);
+
+    // Double-clicking the gate asks the chrome for its limit editor.
+    QSignalSpy limitSpy(&board.layer, &render::NodeLayerItem::gateLimitEditRequested);
+    doubleClick(board.layer, gate.worldRect().center());
+    QCOMPARE(limitSpy.count(), 1);
+    QCOMPARE(limitSpy.first().first().toInt(), gate.id);
+
+    // The limit is a real undoable parameter.
+    const double initial = gate.gateLimitUsd;
+    board.layer.setGateLimit(gate.id, 0.25);
+    QCOMPARE(graph.nodeById(gate.id)->gateLimitUsd, 0.25);
+    key(board.layer, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(graph.nodeById(gate.id)->gateLimitUsd, initial);
 }
 
 int main(int argc, char *argv[])
