@@ -53,6 +53,12 @@ public:
     QColor selection() const { return m_selection; }
     QColor glowEmphasis() const { return m_glowEmphasis; }
 
+    // The neutral low-alpha band fill under the marquee and the multi-select wash.
+    QColor selectionFill() const { return m_selectionFill; }
+
+    // The light-neutral hairline colour drawn for alignment guides.
+    QColor emphasis() const { return m_emphasis; }
+
     // Typed-port dot colors. A port is never identified by color alone, but color is
     // the at-a-glance cue for what a connection carries.
     QColor typeImage() const { return m_typeImage; }
@@ -77,6 +83,8 @@ private:
     QColor m_nodeHeader;
     QColor m_selection;
     QColor m_glowEmphasis;
+    QColor m_selectionFill;
+    QColor m_emphasis;
     QColor m_typeImage;
     QColor m_typeVideo;
     QColor m_typeAudio;
