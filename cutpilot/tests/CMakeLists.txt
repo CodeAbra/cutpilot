@@ -44,6 +44,13 @@ qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
 
+# The GPU compositor on a real windowless device: per-op pixel math against
+# reference formulas, matte conventions, and cache-driven pass counts. Skips
+# only when the platform has no headless GPU backend.
+qt_add_executable(tst_compositor tst_compositor.cpp)
+target_link_libraries(tst_compositor PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.compositor COMMAND tst_compositor)
+
 # The full generation flow: a live sidecar process, the coordinator, and a
 # prompt-feeds-generate graph, driven end to end on the offscreen platform.
 qt_add_executable(tst_generationflow tst_generationflow.cpp)

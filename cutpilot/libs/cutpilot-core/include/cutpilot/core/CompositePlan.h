@@ -19,11 +19,14 @@ struct CompositeInput {
 
 // One compositor pass: evaluate the node's operation over the outputs of its
 // wired inputs. inputs holds one entry per input port, in port order.
+// signature is the node's composite signature at plan-build time — the
+// compositor's cache key, so an unchanged subtree is never re-rendered.
 struct CompositePass {
     int nodeId = 0;
     NodeKind kind = NodeKind::Blank;
     CompositeParams params;
     QVector<CompositeInput> inputs;
+    QString signature;
 };
 
 // The evaluation recipe for one target node: the sources whose pixels arrive

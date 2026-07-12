@@ -58,6 +58,7 @@ bool collect(const NodeGraph &graph, int nodeId, QSet<int> &visiting,
     pass.kind = node->kind;
     pass.params = node->comp;
     pass.inputs = wiredInputs(graph, *node);
+    pass.signature = compositeSignature(graph, nodeId);
     for (const CompositeInput &input : pass.inputs) {
         if (input.nodeId != -1
             && !collect(graph, input.nodeId, visiting, done, plan))
