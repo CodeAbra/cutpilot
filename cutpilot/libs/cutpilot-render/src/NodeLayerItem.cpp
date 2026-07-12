@@ -476,7 +476,12 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
         const QPointF delta = world - m_dragLastWorld;
         m_dragLastWorld = world;
         m_graph.moveNodesBy(m_dragIds, delta); // live 1:1 feedback
-        syncSpatialIndex();
+        // Only the dragged nodes moved, so update just their index entries rather than
+        // rebuilding the whole index on every move.
+        for (int id : m_dragIds) {
+            if (const core::Node *n = m_graph.nodeById(id))
+                m_index.update(id, n->worldRect());
+        }
         updateDragGuides();
         m_geometryDirty = true;
         update();

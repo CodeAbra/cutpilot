@@ -40,6 +40,7 @@ private slots:
     void viewportWorldRectMapsKnownCamera();
     void visibleIdsEqualsBruteForceAtScale();
     void visibleCountStaysBoundedAsCameraSweeps();
+    void incrementalUpdatesMatchBruteForce();
 };
 
 void TstSpatialIndex::rectQueryExactNoFalsePositives()
@@ -181,6 +182,44 @@ void TstSpatialIndex::visibleCountStaysBoundedAsCameraSweeps()
         QCOMPARE(toSet(visible), bruteForce(nodes, worldRect));
         QVERIFY(visible.size() < 60); // viewport-bounded, far under 900
     }
+}
+
+void TstSpatialIndex::incrementalUpdatesMatchBruteForce()
+{
+    // A wide grid; ids run 1..400 in the same order they are pushed.
+    QVector<Node> nodes;
+    SpatialIndex index;
+    int id = 1;
+    for (int gx = 0; gx < 20; ++gx) {
+        for (int gy = 0; gy < 20; ++gy) {
+            Node n;
+            n.id = id++;
+            n.worldPos = QPointF(gx * 400.0, gy * 400.0);
+            n.worldSize = QSizeF(200, 150);
+            nodes.push_back(n);
+            index.insert(n.id, n.worldRect());
+        }
+    }
+
+    const qreal scale = 1.0;
+    const QPointF translation(0, 0);
+    const QSizeF viewport(1280, 800);
+
+    // Drag a handful of nodes across many steps, updating only the moved ids each step
+    // exactly as the live drag does, and confirm culling still matches brute force.
+    const QVector<int> dragged = { 1, 2, 21, 22 };
+    const QPointF stepDelta(37.0, -19.0);
+    for (int step = 0; step < 25; ++step) {
+        for (int d : dragged) {
+            Node &n = nodes[d - 1];
+            n.worldPos += stepDelta;
+            index.update(n.id, n.worldRect());
+        }
+        const QRectF worldRect = viewportWorldRect(scale, translation, viewport);
+        QCOMPARE(toSet(visibleIds(index, scale, translation, viewport)),
+                 bruteForce(nodes, worldRect));
+    }
+    QCOMPARE(index.count(), nodes.size()); // no leaked or duplicated entries
 }
 
 QTEST_APPLESS_MAIN(TstSpatialIndex)
