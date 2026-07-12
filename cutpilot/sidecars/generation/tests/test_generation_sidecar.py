@@ -94,6 +94,33 @@ class SidecarTestCase(unittest.TestCase):
             self.assertEqual(status, 401)
             self.assertEqual(data["error"], "unauthorized")
 
+    def test_unauthorized_post_body_does_not_poison_the_connection(self):
+        # The rejected request's body must be drained: with keep-alive, unread
+        # bytes would be parsed as the start of the next request on this
+        # same connection.
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        payload = json.dumps({"model": "local/procedural-v1", "prompt": "x" * 512})
+        connection.request(
+            "POST",
+            "/jobs",
+            body=payload,
+            headers={
+                "Authorization": "Bearer wrong-token",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 401)
+        response.read()
+
+        connection.request(
+            "GET", "/health", headers={"Authorization": f"Bearer {TOKEN}"}
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read())["status"], "serving")
+        connection.close()
+
     def test_health_reports_serving(self):
         status, data = self.request("GET", "/health")
         self.assertEqual(status, 200)

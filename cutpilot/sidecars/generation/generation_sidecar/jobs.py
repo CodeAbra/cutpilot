@@ -9,7 +9,9 @@ is cooperative: the flag is checked between progress steps.
 from __future__ import annotations
 
 import os
+import sys
 import threading
+import traceback
 import uuid
 from dataclasses import asdict, dataclass
 
@@ -135,6 +137,7 @@ class JobManager:
             job.update(state="error", message=str(exc))
             return
         except Exception as exc:  # surface any vendor failure as a job error
+            traceback.print_exc(file=sys.stderr)
             job.update(state="error", message=str(exc))
             return
 

@@ -402,6 +402,11 @@ int main(int argc, char *argv[])
 
     const ThemeTable theme(cutpilot::theme::Theme::Dark);
 
+    // Declared before the window so they outlive the coordinator and chrome
+    // parented into its widget tree, which hold pointers to them.
+    SidecarHost host;
+    GenerationClient client;
+
     QMainWindow window;
     window.setWindowTitle(QStringLiteral("CutPilot"));
 
@@ -415,8 +420,6 @@ int main(int argc, char *argv[])
     // The generation stack: the service process, its client, and the
     // coordinator that runs nodes against it. The canvas layer raises the
     // gestures; the chrome supplies the picker, editor, and key dialogs.
-    SidecarHost host;
-    GenerationClient client;
     NodeLayerItem *layer = view->layer();
     GenerationCoordinator *coordinator = nullptr;
     GenerationChrome *chrome = nullptr;
@@ -425,8 +428,9 @@ int main(int argc, char *argv[])
         chrome = new GenerationChrome(view, coordinator);
 
         QObject::connect(&host, &SidecarHost::ready, coordinator,
-                         [&client, coordinator](quint16 port, const QByteArray &token) {
-                             client.setEndpoint(port, token);
+                         [clientPtr = &client, coordinator](quint16 port,
+                                                            const QByteArray &token) {
+                             clientPtr->setEndpoint(port, token);
                              coordinator->serviceBecameReady();
                          });
         QObject::connect(&host, &SidecarHost::failed, coordinator,

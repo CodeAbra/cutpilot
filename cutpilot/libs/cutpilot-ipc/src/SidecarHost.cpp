@@ -20,6 +20,7 @@ namespace {
 
 constexpr int kHealthAttempts = 60;
 constexpr int kHealthIntervalMs = 150;
+constexpr int kMaxAnnounceBufferBytes = 64 * 1024;
 const char kListeningPrefix[] = "CUTPILOT_LISTENING ";
 
 QByteArray freshToken()
@@ -139,6 +140,12 @@ void SidecarHost::stop()
 void SidecarHost::onStandardOutput()
 {
     m_stdoutBuffer += m_process->readAllStandardOutput();
+    if (m_port == 0 && m_stdoutBuffer.size() > kMaxAnnounceBufferBytes) {
+        m_stdoutBuffer.clear();
+        fail(QStringLiteral(
+            "Generation service produced no port announcement"));
+        return;
+    }
     int newline = -1;
     while ((newline = m_stdoutBuffer.indexOf('\n')) != -1) {
         const QByteArray line = m_stdoutBuffer.left(newline).trimmed();

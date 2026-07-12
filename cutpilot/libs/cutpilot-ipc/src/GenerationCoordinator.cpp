@@ -34,6 +34,12 @@ void GenerationCoordinator::serviceBecameReady()
     m_client->fetchModels();
 }
 
+void GenerationCoordinator::refreshModels()
+{
+    if (m_serviceReady)
+        m_client->fetchModels();
+}
+
 void GenerationCoordinator::serviceBecameUnavailable(const QString &reason)
 {
     m_serviceReady = false;
@@ -151,24 +157,38 @@ void GenerationCoordinator::stopNode(int nodeId)
 void GenerationCoordinator::reconcile()
 {
     // Nodes claiming to run without a live job (restored by undo, or edited
-    // while a submission was refused mid-flight) fall back to idle.
-    for (core::Node &node : m_graph->nodes()) {
+    // while a submission was refused mid-flight) fall back to idle. Ids are
+    // collected first: touching a node emits synchronously, and a slot that
+    // edits the graph would invalidate an iterator held across the emit.
+    QVector<int> orphaned;
+    for (const core::Node &node : m_graph->nodes()) {
         if (node.kind != core::NodeKind::Generate)
             continue;
         const bool claimsLive = node.runState == core::RunState::Queued
             || node.runState == core::RunState::Running;
-        if (claimsLive && !m_jobByNode.contains(node.id)) {
-            node.runState = core::RunState::Idle;
-            node.runProgress = 0.0;
-            node.statusMessage.clear();
-            touchNode(&node);
-        }
+        if (claimsLive && !m_jobByNode.contains(node.id))
+            orphaned.push_back(node.id);
+    }
+    for (int nodeId : orphaned) {
+        core::Node *node = m_graph->nodeById(nodeId);
+        if (!node)
+            continue;
+        node->runState = core::RunState::Idle;
+        node->runProgress = 0.0;
+        node->statusMessage.clear();
+        touchNode(node);
     }
 
-    // Jobs whose node vanished keep spending; cancel them.
-    for (auto it = m_jobByNode.constBegin(); it != m_jobByNode.constEnd(); ++it) {
-        if (!m_graph->nodeById(it.key()))
+    // Jobs whose node vanished keep spending; cancel them and drop their
+    // bookkeeping so a later stream close cannot touch another run.
+    for (auto it = m_jobByNode.begin(); it != m_jobByNode.end();) {
+        if (!m_graph->nodeById(it.key())) {
             m_client->cancelJob(it.value());
+            m_nodeByJob.remove(it.value());
+            it = m_jobByNode.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 
@@ -176,12 +196,20 @@ void GenerationCoordinator::onModelsFetched(const QVector<ModelInfo> &models)
 {
     m_models = models;
     if (!m_models.isEmpty()) {
-        for (core::Node &node : m_graph->nodes()) {
-            if (node.kind == core::NodeKind::Generate && node.modelId.isEmpty()) {
-                node.modelId = m_models.first().id;
-                node.modelLabel = m_models.first().label;
-                touchNode(&node);
-            }
+        // Ids first, then per-id touches: the synchronous emit inside
+        // touchNode must never run against a live iterator over the graph.
+        QVector<int> modelless;
+        for (const core::Node &node : m_graph->nodes()) {
+            if (node.kind == core::NodeKind::Generate && node.modelId.isEmpty())
+                modelless.push_back(node.id);
+        }
+        for (int nodeId : modelless) {
+            core::Node *node = m_graph->nodeById(nodeId);
+            if (!node)
+                continue;
+            node->modelId = m_models.first().id;
+            node->modelLabel = m_models.first().label;
+            touchNode(node);
         }
     }
     emit modelsReady();
@@ -277,7 +305,16 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
 
 void GenerationCoordinator::onStreamClosed(const QString &jobId)
 {
-    const int nodeId = m_nodeByJob.take(jobId);
+    const auto mapping = m_nodeByJob.constFind(jobId);
+    if (mapping == m_nodeByJob.constEnd())
+        return;
+    const int nodeId = mapping.value();
+    m_nodeByJob.erase(mapping);
+
+    // Only the node's current job may clear its bookkeeping: a stale
+    // stream closing late must not clobber a newer run on the same node.
+    if (m_jobByNode.value(nodeId) != jobId)
+        return;
     m_jobByNode.remove(nodeId);
 
     // A stream that closed without reaching a terminal state means the

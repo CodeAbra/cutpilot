@@ -182,7 +182,11 @@ void GenerationClient::subscribeJob(const QString &jobId)
             [this, reply, jobId] { consumeStream(reply, jobId); });
     connect(reply, &QNetworkReply::finished, this, [this, reply, jobId] {
         consumeStream(reply, jobId);
-        m_streamBuffers.remove(reply);
+        const QByteArray leftover = m_streamBuffers.take(reply).trimmed();
+        if (!leftover.isEmpty())
+            qWarning("generation client: job %s stream ended mid-frame (%d bytes "
+                     "dropped)",
+                     qPrintable(jobId), int(leftover.size()));
         reply->deleteLater();
         emit streamClosed(jobId);
     });

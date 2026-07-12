@@ -41,6 +41,10 @@ public:
     bool serviceReady() const { return m_serviceReady; }
     const QVector<ModelInfo> &models() const { return m_models; }
 
+    // Re-pull the registry, e.g. after a key was added so per-provider key
+    // presence is current.
+    void refreshModels();
+
     void runNode(int nodeId);
     void stopNode(int nodeId);
 

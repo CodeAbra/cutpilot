@@ -28,6 +28,7 @@ from .registry import list_models, model_by_id
 
 MIN_DIMENSION = 64
 MAX_DIMENSION = 2048
+MAX_BODY_BYTES = 1 << 20
 DEFAULT_WIDTH = 768
 DEFAULT_HEIGHT = 512
 EVENT_WAIT_S = 0.25
@@ -91,35 +92,53 @@ class GenerationHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
+        # The body is drained on every path — auth rejections included —
+        # because unread bytes would corrupt the next request on this
+        # kept-alive connection.
+        payload = self._read_body()
         if self._reject_unauthorized():
             return
         if self.path == "/jobs":
-            self._submit_job()
+            self._submit_job(payload)
             return
         match = _JOB_PATH.match(self.path)
         if match and match.group(2) == "cancel":
-            # The body is unused but must be drained: leaving it unread would
-            # corrupt the next request on this kept-alive connection.
-            self._read_body()
             if self.manager.cancel(match.group(1)):
                 self._send_json(200, {"ok": True})
             else:
                 self._send_json(404, {"error": "not_found"})
             return
-        self._read_body()
         self._send_json(404, {"error": "not_found"})
 
     def _read_body(self) -> dict | None:
+        """Read the request body fully off the wire, however large; parse it
+        as a JSON object only when it fits the size cap."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length > 0 else b"{}"
-            payload = json.loads(raw)
-        except (ValueError, json.JSONDecodeError):
+        except ValueError:
+            return None
+        if length <= 0:
+            return {}
+        remaining = length
+        kept: list[bytes] = []
+        kept_bytes = 0
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                return None
+            remaining -= len(chunk)
+            if kept_bytes <= MAX_BODY_BYTES:
+                kept.append(chunk)
+                kept_bytes += len(chunk)
+        if length > MAX_BODY_BYTES:
+            return None
+        try:
+            payload = json.loads(b"".join(kept))
+        except json.JSONDecodeError:
             return None
         return payload if isinstance(payload, dict) else None
 
-    def _submit_job(self) -> None:
-        payload = self._read_body()
+    def _submit_job(self, payload: dict | None) -> None:
         if payload is None:
             self._send_json(400, {"error": "invalid_body"})
             return
