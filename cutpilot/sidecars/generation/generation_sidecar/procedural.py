@@ -22,6 +22,11 @@ from collections.abc import Callable
 
 BAND_ROWS = 16
 
+# Decoded input images are bounded so a crafted PNG cannot exhaust memory:
+# the largest side is capped, and decompression is limited to the exact size
+# the header declares, so a small file can never expand without bound.
+MAX_INPUT_DIMENSION = 8192
+
 
 class RenderCanceled(Exception):
     """Raised inside render_png when the caller's cancel check turns true."""
@@ -180,6 +185,12 @@ def decode_png(data: bytes) -> tuple[int, int, list[bytes]]:
                     "Unsupported PNG: only 8-bit RGB/RGBA non-interlaced "
                     "images can be used as inputs"
                 )
+            if not (1 <= width <= MAX_INPUT_DIMENSION
+                    and 1 <= height <= MAX_INPUT_DIMENSION):
+                raise ValueError(
+                    "Input image is too large: each side must be at most "
+                    f"{MAX_INPUT_DIMENSION} pixels"
+                )
             channels = 3 if color == 2 else 4
         elif kind == b"IDAT":
             idat += payload
@@ -188,13 +199,19 @@ def decode_png(data: bytes) -> tuple[int, int, list[bytes]]:
     if width <= 0 or height <= 0 or channels == 0 or not idat:
         raise ValueError("Corrupt PNG image")
 
+    stride = width * channels
+    expected = (stride + 1) * height
+
+    # The header fully determines how many bytes a valid image decompresses
+    # to, so the output is bounded to that size (plus one, to catch a payload
+    # that claims more). A decompression bomb hits the ceiling and is refused
+    # having expanded no further than a real image of the same dimensions.
+    decompressor = zlib.decompressobj()
     try:
-        raw = zlib.decompress(bytes(idat))
+        raw = decompressor.decompress(bytes(idat), expected + 1)
     except zlib.error as exc:
         raise ValueError("Corrupt PNG image data") from exc
-
-    stride = width * channels
-    if len(raw) != (stride + 1) * height:
+    if len(raw) != expected:
         raise ValueError("Corrupt PNG image data")
 
     rows: list[bytes] = []

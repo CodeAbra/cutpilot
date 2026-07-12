@@ -168,12 +168,20 @@ class OpenAiImagesProvider:
         )
 
 
+# A valid input PNG at the largest accepted dimensions still compresses well
+# under this, so the raw read is bounded before the file ever reaches the
+# decoder — a truly huge file on disk is refused without loading it whole.
+MAX_INPUT_FILE_BYTES = 64 * 1024 * 1024
+
+
 def _decode_input(request: GenerationRequest) -> tuple[int, int, list[bytes]]:
     try:
         with open(request.input_path, "rb") as handle:
-            data = handle.read()
+            data = handle.read(MAX_INPUT_FILE_BYTES + 1)
     except OSError as exc:
         raise RuntimeError(f"Input image could not be read: {exc}") from exc
+    if len(data) > MAX_INPUT_FILE_BYTES:
+        raise RuntimeError("Input image is too large to process")
     try:
         return decode_png(data)
     except ValueError as exc:

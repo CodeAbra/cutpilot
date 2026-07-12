@@ -4,15 +4,44 @@ import hashlib
 import json
 import http.client
 import os
+import struct
 import sys
 import tempfile
 import threading
+import tracemalloc
 import unittest
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from generation_sidecar.procedural import decode_png, render_png  # noqa: E402
+from generation_sidecar.procedural import (  # noqa: E402
+    MAX_INPUT_DIMENSION,
+    decode_png,
+    render_png,
+)
 from generation_sidecar.server import build_server  # noqa: E402
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _png_with_idat(width: int, height: int, raw: bytes, color: int = 2) -> bytes:
+    """A structurally valid PNG whose IHDR declares width x height and whose
+    IDAT carries the given decompressed payload — used to build inputs whose
+    declared size and real payload deliberately disagree."""
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(raw, 9))
+        + _png_chunk(b"IEND", b"")
+    )
 
 TOKEN = "test-token"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -328,6 +357,41 @@ class SidecarTestCase(unittest.TestCase):
         )
         self.assertEqual(final["state"], "error")
         self.assertIn("PNG", final["message"])
+
+    def test_decode_png_refuses_a_decompression_bomb(self):
+        # A tiny file declaring an 8x8 image but hiding a 128 MB IDAT payload
+        # must be refused without expanding it — the decoder decompresses no
+        # more than the declared image would occupy.
+        bomb = _png_with_idat(8, 8, b"\x00" * (128 * 1024 * 1024))
+        self.assertLess(len(bomb), 512 * 1024)
+
+        tracemalloc.start()
+        try:
+            with self.assertRaises(ValueError):
+                decode_png(bomb)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        # A real 8x8 image needs a couple hundred bytes; the bomb's payload is
+        # 128 MB. A generous ceiling proves the expansion never happened.
+        self.assertLess(peak, 16 * 1024 * 1024)
+
+    def test_decode_png_refuses_oversized_dimensions(self):
+        oversize = MAX_INPUT_DIMENSION + 1
+        # A one-row payload keeps the file tiny; the dimensions are rejected
+        # from the header before any decompression is attempted.
+        png = _png_with_idat(oversize, 1, b"\x00" * (oversize * 3 + 1))
+        with self.assertRaises(ValueError):
+            decode_png(png)
+
+    def test_input_bomb_surfaces_a_job_error_not_a_crash(self):
+        bomb_path = os.path.join(self.gen_dir, "bomb.png")
+        with open(bomb_path, "wb") as handle:
+            handle.write(_png_with_idat(8, 8, b"\x00" * (128 * 1024 * 1024)))
+        final = self.run_to_done(
+            model="local/procedural-upscale-v1", prompt="", input_path=bomb_path
+        )
+        self.assertEqual(final["state"], "error")
 
 
 if __name__ == "__main__":
