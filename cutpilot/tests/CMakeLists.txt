@@ -31,3 +31,15 @@ add_test(NAME core.connectorpath COMMAND tst_connectorpath)
 qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
+
+# The generation sidecar's own suite, run against a live loopback server.
+# Keychain lookups are disabled so key-presence checks are driven by the
+# test environment alone.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME sidecar.generation
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -t .
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/sidecars/generation)
+    set_tests_properties(sidecar.generation PROPERTIES
+        ENVIRONMENT "CUTPILOT_DISABLE_KEYCHAIN=1")
+endif()
