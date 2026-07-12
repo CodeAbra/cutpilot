@@ -1010,17 +1010,21 @@ int main(int argc, char *argv[])
                          &GenerationCoordinator::stopNode);
         QObject::connect(layer, &NodeLayerItem::graphMutated, coordinator,
                          &GenerationCoordinator::reconcile);
+        // The preview follows the run. One connection per signal stores the
+        // layer's state and then refreshes, so the refresh can never read
+        // media the layer has not stored yet — the ordering is structural,
+        // not an artifact of connection registration order.
         QObject::connect(coordinator, &GenerationCoordinator::nodeContentChanged,
-                         layer, &NodeLayerItem::refreshNode);
-        QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady, layer,
-                         &NodeLayerItem::setNodeMedia);
-
-        // The preview follows the run: these land after the layer's own
-        // slots above, so a refresh always reads the just-stored media.
-        QObject::connect(coordinator, &GenerationCoordinator::nodeContentChanged,
-                         previews, &PreviewController::refresh);
+                         layer, [layer, previews](int nodeId) {
+                             layer->refreshNode(nodeId);
+                             previews->refresh();
+                         });
         QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady,
-                         previews, &PreviewController::refresh);
+                         layer,
+                         [layer, previews](int nodeId, const QImage &image) {
+                             layer->setNodeMedia(nodeId, image);
+                             previews->refresh();
+                         });
 
         QObject::connect(layer, &NodeLayerItem::modelPickerRequested, chrome,
                          [chrome](int nodeId) { chrome->showModelPicker(nodeId); },
