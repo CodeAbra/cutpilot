@@ -463,10 +463,21 @@ void GenerationCoordinator::advanceRun()
                 continue;
             }
 
-            // Nothing more is submitted once the run cap pauses the run;
-            // in-flight work keeps streaming.
-            if (m_run.capPaused)
+            // Once the run cap pauses the run nothing more is submitted;
+            // in-flight work keeps streaming and cache hits above are still
+            // served for free. Every other ready node is blocked by the same
+            // pause, so it is held too — not left silently pending — and the
+            // held count reflects everything the cap is actually stopping.
+            if (m_run.capPaused) {
+                m_run.pending.remove(nodeId);
+                m_run.held.insert(nodeId);
+                node->runState = core::RunState::Held;
+                node->statusMessage =
+                    QStringLiteral("Held · run cap %1").arg(money(m_runCapUsd));
+                touchNode(node);
+                progressed = true;
                 continue;
+            }
 
             if (m_runCapUsd > 0.0
                 && m_run.spentUsd + committedTotal + model->priceUsd > m_runCapUsd) {

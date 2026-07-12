@@ -133,6 +133,7 @@ private slots:
     void cyclesAreRefused();
     void costGateHoldsItsBranchAndResumes();
     void runCapPausesAndResumesAfterARaise();
+    void runCapHoldsEveryBlockedNodeNotJustTheFirst();
     void abortSettlesTheBoard();
     void abortDuringSubmitNeverAdoptsTheStaleJob();
     void forcedRerunIgnoresCache();
@@ -471,6 +472,50 @@ void PipelineFlowTest::runCapPausesAndResumesAfterARaise()
     waitRunFinished(coordinator, 10000);
     QCOMPARE(submissions.count(), 2);
     QCOMPARE(coordinator.summary().spentUsd, 0.004);
+}
+
+void PipelineFlowTest::runCapHoldsEveryBlockedNodeNotJustTheFirst()
+{
+    core::NodeGraph graph;
+    const int prompt = addPrompt(graph, QStringLiteral("a capped trio"));
+    const int first = addGenerate(graph);
+    const int second = addGenerate(graph);
+    const int third = addGenerate(graph);
+    wire(graph, prompt, QStringLiteral("text"), first, QStringLiteral("prompt"));
+    wire(graph, prompt, QStringLiteral("text"), second, QStringLiteral("prompt"));
+    wire(graph, prompt, QStringLiteral("text"), third, QStringLiteral("prompt"));
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    makeReady(coordinator);
+    QSignalSpy submissions(&m_client, &ipc::GenerationClient::jobSubmitted);
+
+    // Room for one $0.002 job; the other two are both blocked by the cap and
+    // both must read as Held, not one Held and one silently pending.
+    coordinator.setRunCapUsd(0.003);
+    coordinator.runGraph();
+
+    const ipc::RunSummary summary = coordinator.summary();
+    QVERIFY(summary.paused);
+    QCOMPARE(summary.held, 2);
+    int heldNodes = 0;
+    for (int id : { first, second, third }) {
+        if (graph.nodeById(id)->runState == core::RunState::Held) {
+            ++heldNodes;
+            QVERIFY(graph.nodeById(id)->statusMessage.contains(
+                QStringLiteral("run cap")));
+        }
+    }
+    QCOMPARE(heldNodes, 2);
+    QTRY_COMPARE_WITH_TIMEOUT(submissions.count(), 1, 10000);
+
+    // Raising the cap and resuming lets both held nodes through.
+    coordinator.setRunCapUsd(0.01);
+    coordinator.resumeRun();
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(third)->runState,
+                              core::RunState::Done, 60000);
+    waitRunFinished(coordinator, 10000);
+    QCOMPARE(submissions.count(), 3);
+    QCOMPARE(coordinator.summary().spentUsd, 0.006);
 }
 
 void PipelineFlowTest::abortSettlesTheBoard()
