@@ -29,7 +29,8 @@ protected:
     void render(QRhiCommandBuffer *cb) override;
 
 private:
-    // Uniform block matching grid.frag's std140 layout.
+    // Uniform block matching grid.frag's std140 layout. The float scalars pack ahead
+    // of the vec4 block; _pad restores the 16-byte alignment std140 gives bgCanvas.
     struct alignas(16) Uniforms {
         float viewportSize[2];
         float panPixels[2];
@@ -37,6 +38,8 @@ private:
         float dpr;
         float minorPitch;
         float majorEvery;
+        float yUp;
+        float _pad[3];
         float bgCanvas[4];
         float gridDot[4];
         float gridDotMajor[4];
@@ -49,6 +52,11 @@ private:
 
     Uniforms m_uniforms{};
     bool m_uniformsDirty = true;
+
+    // Whether this backend's framebuffer has a bottom-left (y-up) origin, so the grid
+    // fragment shader flips gl_FragCoord to the camera's top-left frame only when it
+    // must. Set from the live QRhi backend.
+    bool m_yUpInFramebuffer = false;
 };
 
 } // namespace cutpilot::render

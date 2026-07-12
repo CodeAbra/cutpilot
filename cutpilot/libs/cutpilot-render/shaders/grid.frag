@@ -11,6 +11,7 @@ layout(std140, binding = 0) uniform Block {
     float dpr;           // device pixel ratio
     float minorPitch;    // grid minor pitch in logical world units (e.g. 24)
     float majorEvery;    // a major dot every N minor cells (e.g. 4 -> 96px)
+    float yUp;           // 1.0 if gl_FragCoord's origin is bottom-left, else 0.0
     vec4 bgCanvas;       // canvas surface color
     vec4 gridDot;        // minor dot tint
     vec4 gridDotMajor;   // major dot tint
@@ -25,8 +26,12 @@ float disc(float dist, float radius)
 
 void main()
 {
-    // Fragment position with origin at the canvas's bottom-left, in physical pixels.
-    vec2 fragPx = vec2(gl_FragCoord.x, u.viewportSize.y - gl_FragCoord.y);
+    // Fragment position in the top-left-origin, y-down physical-pixel frame the
+    // camera and the node layer work in. gl_FragCoord's origin is backend-dependent
+    // (bottom-left on OpenGL, top-left on Metal/Vulkan/D3D), so the vertical flip is
+    // driven by yUp rather than hard-coded to one convention.
+    float fragY = (u.yUp > 0.5) ? (u.viewportSize.y - gl_FragCoord.y) : gl_FragCoord.y;
+    vec2 fragPx = vec2(gl_FragCoord.x, fragY);
 
     // Convert to world coordinates. Screen = world * zoom * dpr + pan.
     float scale = u.zoom * u.dpr;

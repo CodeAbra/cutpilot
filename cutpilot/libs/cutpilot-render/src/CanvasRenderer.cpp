@@ -37,6 +37,7 @@ void CanvasRenderer::initialize(QRhiCommandBuffer *)
 {
     if (m_rhi != rhi()) {
         m_rhi = rhi();
+        m_yUpInFramebuffer = m_rhi->isYUpInFramebuffer();
         m_pipeline.reset();
         m_srb.reset();
         m_uniformBuffer.reset();
@@ -98,6 +99,7 @@ void CanvasRenderer::synchronize(QQuickRhiItem *rhiItem)
     u.dpr = float(dpr);
     u.minorPitch = 24.0f;
     u.majorEvery = 4.0f;
+    u.yUp = m_yUpInFramebuffer ? 1.0f : 0.0f;
     fillColor(u.bgCanvas, theme.bgCanvas());
     fillColor(u.gridDot, theme.gridDot());
     fillColor(u.gridDotMajor, theme.gridDotMajor());
