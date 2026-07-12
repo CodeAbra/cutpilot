@@ -465,6 +465,10 @@ void NodeLayerItem::updateConnectTarget(const QPointF &world)
 
 void NodeLayerItem::finishConnectDrag(const QPointF &world)
 {
+    // The drop target keys off the actual release position: a fast flick can
+    // release without a trailing move there, so the hover pick may be stale.
+    updateConnectTarget(world);
+
     // The anchor and a grabbed edge are re-validated against the live graph:
     // both must have survived the drag for the drop to reference them.
     const core::Node *anchor = m_graph.nodeById(m_anchorNodeId);

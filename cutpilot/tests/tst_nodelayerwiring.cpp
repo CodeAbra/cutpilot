@@ -123,6 +123,7 @@ private slots:
     void emptyCanvasDropRaisesTypeFilteredPalette();
     void deleteDuringConnectDragCannotOrphanAConnection();
     void undoDuringConnectDragCannotOrphanAConnection();
+    void flickReleaseWithoutTrailingMoveStillConnects();
 };
 
 void TstNodeLayerWiring::dragOutputToCompatibleInputConnects()
@@ -334,6 +335,29 @@ void TstNodeLayerWiring::undoDuringConnectDragCannotOrphanAConnection()
     QVERIFY(graph.nodeById(bId));
     QCOMPARE(graph.connections().size(), 0); // no edge to a dead node
     QVERIFY(allEndpointsExist(graph));
+}
+
+void TstNodeLayerWiring::flickReleaseWithoutTrailingMoveStillConnects()
+{
+    Board board;
+    const QPointF a(300, 300);
+    const QPointF b(900, 500);
+    const int aId = board.addDefaultNode(a);
+    const int bId = board.addDefaultNode(b);
+
+    // A fast flick: the pointer's last move lands mid-canvas and the release
+    // arrives straight at the target port with no move event there.
+    press(board.layer, outputPort(a));
+    move(board.layer, QPointF(600, 380));
+    release(board.layer, imageInputPort(b));
+
+    const core::NodeGraph &graph = board.layer.graph();
+    QCOMPARE(graph.connections().size(), 1);
+    const core::Connection wire = graph.connections().first();
+    QCOMPARE(wire.fromNodeId, aId);
+    QCOMPARE(wire.fromPortIndex, 3);
+    QCOMPARE(wire.toNodeId, bId);
+    QCOMPARE(wire.toPortIndex, 0);
 }
 
 int main(int argc, char *argv[])
