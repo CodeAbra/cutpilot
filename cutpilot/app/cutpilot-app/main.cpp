@@ -645,28 +645,41 @@ int main(int argc, char *argv[])
     if (statsActive)
         runFrameStats(view, statsFrames);
 
-    // CUTPILOT_AUTORUN=1 runs the whole board as a pipeline as soon as the
-    // model registry lands; with CUTPILOT_SCREENSHOT the capture then waits
-    // for that run to settle instead of firing on a fixed delay.
-    const bool autorun =
-        qEnvironmentVariableIntValue("CUTPILOT_AUTORUN") > 0 && coordinator;
+    // CUTPILOT_AUTORUN=<n> runs the whole board as a pipeline n times, back
+    // to back, as soon as the model registry lands — a second pass shows the
+    // cache serving reused results. With CUTPILOT_SCREENSHOT the capture
+    // waits for the last run to settle instead of firing on a fixed delay.
+    const int autorunPasses =
+        coordinator ? qMax(0, qEnvironmentVariableIntValue("CUTPILOT_AUTORUN")) : 0;
     const QString shotPath = qEnvironmentVariable("CUTPILOT_SCREENSHOT");
 
-    if (autorun) {
+    auto passesLeft = std::make_shared<int>(autorunPasses);
+    if (autorunPasses > 0) {
         QObject::connect(
             coordinator, &GenerationCoordinator::modelsReady, view,
             [coordinator] { coordinator->runGraph(); },
             static_cast<Qt::ConnectionType>(Qt::AutoConnection
                                             | Qt::SingleShotConnection));
+        QObject::connect(
+            coordinator, &GenerationCoordinator::runSummaryChanged, view,
+            [coordinator, passesLeft](const cutpilot::ipc::RunSummary &summary) {
+                if (summary.active || summary.total == 0 || *passesLeft <= 0)
+                    return;
+                if (--*passesLeft > 0) {
+                    QTimer::singleShot(400, coordinator,
+                                       [coordinator] { coordinator->runGraph(); });
+                }
+            });
     }
 
-    if (!shotPath.isEmpty() && autorun) {
+    if (!shotPath.isEmpty() && autorunPasses > 0) {
         auto captured = std::make_shared<bool>(false);
         QObject::connect(
             coordinator, &GenerationCoordinator::runSummaryChanged, &window,
-            [&window, shotPath, statsActive,
-             captured](const cutpilot::ipc::RunSummary &summary) {
-                if (*captured || summary.active || summary.total == 0)
+            [&window, shotPath, statsActive, captured,
+             passesLeft](const cutpilot::ipc::RunSummary &summary) {
+                if (*captured || summary.active || summary.total == 0
+                    || *passesLeft > 0)
                     return;
                 *captured = true;
                 QTimer::singleShot(700, &window, [&window, shotPath, statsActive] {
