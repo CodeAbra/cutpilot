@@ -14,6 +14,8 @@ qt_add_resources(cutpilot-app "cutpilot_app_qml"
 target_link_libraries(cutpilot-app PRIVATE
     cutpilot-render
     cutpilot-theme
+    cutpilot-ipc
+    otf-secrets
     Qt6::Widgets
     Qt6::QuickWidgets
     Qt6::Quick)
