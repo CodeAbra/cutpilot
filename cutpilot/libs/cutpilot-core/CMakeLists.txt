@@ -15,6 +15,10 @@ add_library(cutpilot-core STATIC
     src/command/EditPromptCommand.cpp
     src/command/SetModelCommand.cpp
     src/command/SetGateLimitCommand.cpp
+    src/command/SetCompositeParamsCommand.cpp
+    src/command/SetMediaPathCommand.cpp
+    src/CompositeNodes.cpp
+    src/CompositePlan.cpp
     src/PipelineOrder.cpp)
 
 target_include_directories(cutpilot-core PUBLIC include)

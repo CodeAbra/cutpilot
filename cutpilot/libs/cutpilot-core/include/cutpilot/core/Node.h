@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QPointF>
 #include <QRectF>
 #include <QSizeF>
@@ -33,13 +34,63 @@ struct Port {
 
 // What a node's body is made of: a plain content card, editable prompt text
 // that feeds downstream generation, a model-backed generation whose body
-// becomes the produced media, or a cost gate that holds its downstream
-// branch once a run's spend would cross the gate's limit.
+// becomes the produced media, a cost gate that holds its downstream branch
+// once a run's spend would cross the gate's limit, a still image loaded from
+// a local file, or one of the local compositing operations (blend, mask,
+// key, transform) evaluated on the GPU without any vendor call.
 enum class NodeKind {
     Blank,
     Prompt,
     Generate,
-    CostGate
+    CostGate,
+    Still,
+    Blend,
+    Mask,
+    Key,
+    Transform
+};
+
+// How a blend node combines its over layer with its base. The separable
+// standard formulas (as specified for PDF and W3C compositing): Normal is
+// plain source-over; the others mix the blended color by the base's alpha
+// before compositing.
+enum class BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Add
+};
+
+// Parameters of the local compositing operations. One value struct covers
+// every op — each node kind reads only its own fields — so a single undoable
+// command and a single inspector seam serve all of them.
+struct CompositeParams {
+    // Blend: how the over layer combines, and its opacity applied on top of
+    // the layer's own alpha.
+    BlendMode blendMode = BlendMode::Normal;
+    double opacity = 1.0;
+
+    // Mask: multiply the image's alpha by the mask's luminance, optionally
+    // inverted so the mask cuts instead of keeps.
+    bool invertMask = false;
+
+    // Key: with lumaKey false the key color is removed within tolerance,
+    // fading over the softness band; with lumaKey true dark pixels are
+    // removed by luminance instead.
+    bool lumaKey = false;
+    QColor keyColor{ 0, 177, 64 };
+    double keyTolerance = 0.30;
+    double keySoftness = 0.10;
+
+    // Transform: translation as a fraction of the image's own size, a scale
+    // factor, and a rotation about the image center.
+    double translateX = 0.0;
+    double translateY = 0.0;
+    double scale = 1.0;
+    double rotationDeg = 0.0;
+
+    bool operator==(const CompositeParams &other) const = default;
 };
 
 // A generation node's run lifecycle. NeedsKey marks a run refused because the
@@ -81,6 +132,15 @@ struct Node {
     // A cost gate's user-set spend limit for its downstream branch, in USD.
     // A real parameter, edited through an undoable command.
     double gateLimitUsd = 0.05;
+
+    // A still node's source file. A document parameter edited through an
+    // undoable command, unlike the transient resultPath a run writes.
+    QString mediaPath;
+
+    // The local compositing parameters. Scrubbing writes them directly for
+    // live feedback and records one coalesced command on release, mirroring
+    // how a drag moves nodes.
+    CompositeParams comp;
 
     // Live run status, written directly (not through commands): status is
     // transient job state, not an undoable edit.
