@@ -107,6 +107,7 @@ private slots:
     void dragOutputToCompatibleInputConnects();
     void incompatibleDropIsRefused();
     void connectGestureUndoesAndRedoes();
+    void movingAConnectedNodeKeepsTheEdgeAndMovesItsPort();
     void draggingOccupiedInputOffToEmptyCanvasDisconnects();
     void reroutingToAnotherInputIsOneUndoStep();
     void emptyCanvasDropRaisesTypeFilteredPalette();
@@ -165,6 +166,29 @@ void TstNodeLayerWiring::connectGestureUndoesAndRedoes()
     key(board.layer, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
     QCOMPARE(board.layer.graph().connections().size(), 1);
     QCOMPARE(board.layer.graph().connections().first().id, wireId);
+}
+
+void TstNodeLayerWiring::movingAConnectedNodeKeepsTheEdgeAndMovesItsPort()
+{
+    Board board;
+    const QPointF a(300, 300);
+    const QPointF b(900, 500);
+    const int bId = board.addDefaultNode(b);
+    board.addDefaultNode(a); // added second so the drag below grabs a clear body spot
+    drag(board.layer, outputPort(a), imageInputPort(b));
+    QCOMPARE(board.layer.graph().connections().size(), 1);
+
+    // Drag the target node by its body. The edge must survive, and the port the
+    // connector re-derives from must land exactly where the node moved.
+    const QPointF grip = b + QPointF(0, 30); // clear of every port's grab radius
+    drag(board.layer, grip, grip + QPointF(150, -120));
+
+    const core::NodeGraph &graph = board.layer.graph();
+    QCOMPARE(graph.connections().size(), 1);
+    QCOMPARE(graph.connections().first().toNodeId, bId);
+    const core::Node *moved = graph.nodeById(bId);
+    QCOMPARE(moved->portWorldPosition(0),
+             imageInputPort(b) + QPointF(150, -120));
 }
 
 void TstNodeLayerWiring::draggingOccupiedInputOffToEmptyCanvasDisconnects()
