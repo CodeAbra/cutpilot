@@ -233,12 +233,21 @@ void NodeLayerItem::updateDragGuides()
     // bounding box for a multi-node drag.
     const QSet<int> moving(m_dragIds.cbegin(), m_dragIds.cend());
     QRectF movingRect;
+    for (int id : m_dragIds) {
+        if (const core::Node *n = m_graph.nodeById(id))
+            movingRect = movingRect.isNull() ? n->worldRect()
+                                             : movingRect.united(n->worldRect());
+    }
+
+    // Guides key only off nodes the user can see: the culled visible set minus the
+    // moving nodes. Snapping to off-screen geometry would draw a guide "for no reason",
+    // and scoping to the viewport also bounds the per-move cost.
     QVector<QRectF> neighbours;
-    for (const core::Node &n : m_graph.nodes()) {
-        if (moving.contains(n.id))
-            movingRect = movingRect.isNull() ? n.worldRect() : movingRect.united(n.worldRect());
-        else
-            neighbours.push_back(n.worldRect());
+    for (int id : visibleForViewport()) {
+        if (moving.contains(id))
+            continue;
+        if (const core::Node *n = m_graph.nodeById(id))
+            neighbours.push_back(n->worldRect());
     }
 
     m_guideLinesLogical.clear();
