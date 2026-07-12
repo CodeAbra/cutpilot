@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QHash>
+#include <QImage>
 #include <QLineF>
 #include <QPointF>
 #include <QSet>
@@ -17,6 +19,7 @@
 QT_BEGIN_NAMESPACE
 class QSGNode;
 class QSGTransformNode;
+class QTimer;
 QT_END_NAMESPACE
 
 namespace cutpilot::render {
@@ -68,12 +71,48 @@ public:
     Q_INVOKABLE void placePaletteEntry(int index);
     Q_INVOKABLE void cancelPalette();
 
+    // Undoable content edits, pushed through the command stack like any other
+    // graph mutation. The chrome calls these from its prompt editor and model
+    // picker.
+    void setNodePrompt(int nodeId, const QString &text);
+    void setNodeModel(int nodeId, const QString &modelId, const QString &modelLabel);
+
+    // Hand the layer a node's decoded result to display as the card's media
+    // body. Images stay keyed by node id, which is never reused, so a node
+    // restored by undo finds its media again.
+    void setNodeMedia(int nodeId, const QImage &image);
+
+    // A node's content or status changed outside a canvas gesture (a run
+    // progressing, a model registry landing); refresh its card.
+    void refreshNode(int nodeId);
+
+    // A node's body region in the item's logical pixels, for the chrome to
+    // place an overlay editor over it. Empty when the node is gone.
+    QRectF nodeBodyScreenRect(int nodeId) const;
+
+    // Whether the connector pulse that accompanies an in-flight generation is
+    // ticking.
+    bool generationPulseActive() const;
+
 signals:
     void controllerChanged();
 
     // A fresh connector was dropped on empty canvas; the chrome should present the
     // palette (paletteEntryTitles) and answer with placePaletteEntry or cancelPalette.
     void paletteRequested();
+
+    // The run control on a generation node was pressed.
+    void runRequested(int nodeId);
+    void stopRequested(int nodeId);
+
+    // The node's prompt body wants an editor, or its model chip wants the
+    // registry-driven picker; the chrome supplies both surfaces.
+    void promptEditRequested(int nodeId);
+    void modelPickerRequested(int nodeId);
+
+    // The graph structure or content changed through a command or history
+    // walk; run bookkeeping (orphaned states, dead jobs) should reconcile.
+    void graphMutated();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
@@ -155,6 +194,10 @@ private:
     QVector<int> visibleConnections() const;
     void rebuildConnectors(QSGNode *connectorRoot, const QVector<int> &ids);
 
+    // Start or stop the connector pulse depending on whether any generation
+    // is in flight.
+    void updatePulseTimer();
+
     // Refresh the live wiring overlay: the in-flight curve and the target-port cue.
     void updateLive(QSGNode *liveRoot);
 
@@ -167,6 +210,17 @@ private:
     core::SpatialIndex m_index;
     core::CommandStack m_commands;
     theme::ThemeTable m_theme{theme::Theme::Dark};
+
+    // Decoded result images by node id, with a version that invalidates the
+    // uploaded texture when a new result replaces an old one.
+    QHash<int, QImage> m_mediaImages;
+    QHash<int, int> m_mediaVersions;
+
+    // Connectors feeding an in-flight generation shimmer; the timer advances
+    // the phase only while at least one job runs.
+    QTimer *m_pulseTimer = nullptr;
+    int m_pulseFrame = 0;
+    int m_lastPulseFrame = -1;
 
     // Rebuild node geometry only when the model or the detail tier changes; a plain
     // camera move just re-sets the transform matrix. Overlay dirtiness is tracked

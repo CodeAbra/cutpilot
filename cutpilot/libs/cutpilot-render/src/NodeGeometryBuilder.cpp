@@ -1,4 +1,5 @@
 #include "NodeGeometryBuilder.h"
+#include "NodeCardLayout.h"
 
 #include "cutpilot/core/Node.h"
 #include "cutpilot/theme/ThemeTable.h"
@@ -16,7 +17,6 @@ namespace {
 // rounded corners, small typed ports on the side edges (round for data, square for
 // control), a hairline border, and the selection outline and elevation halo of a
 // selected card.
-constexpr qreal kHeaderWorldHeight = 30.0;
 constexpr qreal kBodyRadiusWorld = 10.0;
 constexpr qreal kBorderWorldWidth = 1.5;
 constexpr qreal kPortBackingWorldWidth = 1.0;
@@ -231,7 +231,7 @@ NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &
         // Slim header strip over the top of the body, its bottom corners squared so
         // only the top of the card rounds.
         QRectF headerRect = rect;
-        headerRect.setHeight(qMin(kHeaderWorldHeight, rect.height()));
+        headerRect.setHeight(qMin(NodeCardLayout::kHeaderHeight, rect.height()));
         appendRoundedRect(mesh, headerRect, radius, theme.nodeHeader());
         const qreal seam = radius;
         if (headerRect.height() > seam) {
@@ -241,6 +241,76 @@ NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &
                               QRectF(lower.left(), lower.top(), lower.width(),
                                      qMin(seam, headerRect.height())),
                               0.0, theme.nodeHeader());
+        }
+
+        // A generation node adds a media well and a footer: progress band,
+        // status dot, and the run control. The well sits between header and
+        // footer, so its corners are square and safe to fill edge to edge.
+        const QRectF footer = NodeCardLayout::footerRect(node);
+        if (!footer.isEmpty()) {
+            appendQuad(mesh, NodeCardLayout::bodyRect(node), theme.bgCanvas());
+
+            // Footer strip mirrors the header: rounded at the card's bottom,
+            // squared along its top seam.
+            appendRoundedRect(mesh, footer, radius, theme.nodeHeader());
+            if (footer.height() > seam)
+                appendQuad(mesh,
+                           QRectF(footer.left(), footer.top(), footer.width(), seam),
+                           theme.nodeHeader());
+
+            const bool inFlight = node.runState == core::RunState::Queued
+                || node.runState == core::RunState::Running;
+            if (inFlight) {
+                const QRectF track = NodeCardLayout::progressRect(node);
+                appendQuad(mesh, track, theme.borderSubtle());
+                if (node.runProgress > 0.0) {
+                    QRectF fill = track;
+                    fill.setWidth(track.width()
+                                  * qBound(0.0, node.runProgress, 1.0));
+                    appendQuad(mesh, fill, theme.statusRunning());
+                }
+            }
+
+            QColor dot = theme.borderDefault();
+            switch (node.runState) {
+            case core::RunState::Queued:
+            case core::RunState::Running:
+                dot = theme.statusRunning();
+                break;
+            case core::RunState::Done:
+                dot = theme.statusDone();
+                break;
+            case core::RunState::Error:
+                dot = theme.statusError();
+                break;
+            case core::RunState::NeedsKey:
+                dot = theme.statusWarning();
+                break;
+            case core::RunState::Idle:
+                break;
+            }
+            const qreal dotY =
+                (footer.top() + NodeCardLayout::kProgressHeight + footer.bottom())
+                / 2.0;
+            appendDisc(mesh, QPointF(footer.left() + 16.0, dotY), 4.0, dot);
+
+            // The run control: a resting pill with a play triangle, swapped
+            // for a stop square while a job is in flight.
+            const QRectF button = NodeCardLayout::runButtonRect(node);
+            appendRoundedRect(mesh, button, 6.0,
+                              over(theme.glowEmphasis(), theme.nodeHeader()));
+            const QPointF centre = button.center();
+            if (inFlight) {
+                const qreal half = 5.0;
+                appendQuad(mesh,
+                           QRectF(centre - QPointF(half, half),
+                                  QSizeF(half * 2.0, half * 2.0)),
+                           theme.statusError());
+            } else {
+                appendTriangle(mesh, centre + QPointF(-4.0, -6.5),
+                               centre + QPointF(-4.0, 6.5), centre + QPointF(7.5, 0.0),
+                               theme.statusRunning());
+            }
         }
     }
 

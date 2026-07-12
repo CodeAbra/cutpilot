@@ -1,5 +1,7 @@
 #include "cutpilot/render/NodeLayerItem.h"
 #include "ConnectorGeometryBuilder.h"
+#include "NodeCardLayout.h"
+#include "NodeContentRasterizer.h"
 #include "NodeGeometryBuilder.h"
 
 #include "cutpilot/core/AlignmentGuides.h"
@@ -10,7 +12,9 @@
 #include "cutpilot/core/command/ConnectCommand.h"
 #include "cutpilot/core/command/DeleteNodesCommand.h"
 #include "cutpilot/core/command/DisconnectCommand.h"
+#include "cutpilot/core/command/EditPromptCommand.h"
 #include "cutpilot/core/command/MoveNodesCommand.h"
+#include "cutpilot/core/command/SetModelCommand.h"
 
 #include <QKeyEvent>
 #include <QMatrix4x4>
@@ -19,8 +23,10 @@
 #include <QSGGeometry>
 #include <QSGGeometryNode>
 #include <QSGNode>
+#include <QSGSimpleTextureNode>
 #include <QSGTransformNode>
 #include <QSGVertexColorMaterial>
+#include <QTimer>
 #include <QWheelEvent>
 #include <QtMath>
 
@@ -50,6 +56,11 @@ constexpr qreal kPortMinScreenHitRadius = 5.5;
 
 // The halo drawn around a compatible target port while wiring hovers it.
 constexpr qreal kPortHighlightWorldWidth = 3.5;
+
+// The connector pulse accompanying an in-flight generation: frame period of
+// one shimmer cycle at the timer's tick rate.
+constexpr int kPulseIntervalMs = 33;
+constexpr int kPulsePeriodFrames = 36;
 
 // Copy a built mesh into a geometry node, reusing the existing buffers unless the
 // vertex or index counts changed.
@@ -86,6 +97,33 @@ QSGGeometryNode *makeGeometryNode()
     return node;
 }
 
+// One node card's scene-graph slice: the vertex-colored mesh, an optional
+// media texture (the generated result, aspect-fit in the body), and an
+// optional content texture (title, prompt, status text). The group remembers
+// which node and revisions its textures were built from, so reconciliation
+// re-uploads only what actually changed.
+class NodeCardGroup : public QSGNode {
+public:
+    QSGGeometryNode *mesh = nullptr;
+    QSGSimpleTextureNode *media = nullptr;
+    QSGSimpleTextureNode *content = nullptr;
+    int nodeId = -1;
+    int contentRevision = -1;
+    int mediaVersion = -1;
+};
+
+// The generated image sized to fit the node's media well without distortion.
+QRectF aspectFitRect(const QRectF &well, const QSizeF &imageSize)
+{
+    if (imageSize.isEmpty() || well.isEmpty())
+        return well;
+    const qreal scale = qMin(well.width() / imageSize.width(),
+                             well.height() / imageSize.height());
+    const QSizeF fitted = imageSize * scale;
+    return QRectF(well.center() - QPointF(fitted.width() / 2.0, fitted.height() / 2.0),
+                  fitted);
+}
+
 } // namespace
 
 NodeLayerItem::NodeLayerItem(QQuickItem *parent)
@@ -94,6 +132,13 @@ NodeLayerItem::NodeLayerItem(QQuickItem *parent)
     setFlag(ItemHasContents, true);
     setAcceptedMouseButtons(Qt::AllButtons);
     setFocus(true);
+
+    m_pulseTimer = new QTimer(this);
+    m_pulseTimer->setInterval(kPulseIntervalMs);
+    connect(m_pulseTimer, &QTimer::timeout, this, [this] {
+        ++m_pulseFrame;
+        update();
+    });
 }
 
 void NodeLayerItem::setController(CanvasController *controller)
@@ -120,6 +165,7 @@ void NodeLayerItem::setController(CanvasController *controller)
 core::Node NodeLayerItem::defaultNode(const QPointF &worldCentre) const
 {
     core::Node node;
+    node.kind = core::NodeKind::Generate;
     node.title = QStringLiteral("Generate Image");
     const QSizeF size(280.0, 200.0);
     node.worldSize = size;
@@ -137,7 +183,10 @@ core::Node NodeLayerItem::defaultNode(const QPointF &worldCentre) const
 void NodeLayerItem::seedStarterNode()
 {
     core::Node prompt;
+    prompt.kind = core::NodeKind::Prompt;
     prompt.title = QStringLiteral("Prompt");
+    prompt.promptText =
+        QStringLiteral("A lighthouse on a stormy cliff at dusk, cinematic");
     prompt.worldPos = QPointF(140.0, 160.0);
     prompt.worldSize = QSizeF(260.0, 170.0);
     prompt.ports = {
@@ -207,6 +256,81 @@ void NodeLayerItem::addNodeAtCursor(const QPointF &worldPoint)
     syncSpatialIndex();
     m_geometryDirty = true;
     update();
+    emit graphMutated();
+}
+
+void NodeLayerItem::setNodePrompt(int nodeId, const QString &text)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || node->promptText == text)
+        return;
+    m_commands.push(std::make_unique<core::EditPromptCommand>(nodeId, text), m_graph);
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+void NodeLayerItem::setNodeModel(int nodeId, const QString &modelId,
+                                 const QString &modelLabel)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || (node->modelId == modelId && node->modelLabel == modelLabel))
+        return;
+    m_commands.push(std::make_unique<core::SetModelCommand>(nodeId, modelId, modelLabel),
+                    m_graph);
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+void NodeLayerItem::setNodeMedia(int nodeId, const QImage &image)
+{
+    if (image.isNull())
+        return;
+    m_mediaImages.insert(nodeId, image);
+    m_mediaVersions[nodeId] = m_mediaVersions.value(nodeId, 0) + 1;
+    m_geometryDirty = true;
+    update();
+}
+
+void NodeLayerItem::refreshNode(int nodeId)
+{
+    if (!m_graph.nodeById(nodeId))
+        return;
+    m_geometryDirty = true;
+    updatePulseTimer();
+    update();
+}
+
+QRectF NodeLayerItem::nodeBodyScreenRect(int nodeId) const
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node)
+        return QRectF();
+    const QRectF body = NodeCardLayout::bodyRect(*node);
+    const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
+    return QRectF(localFromWorld(body.topLeft()), body.size() * zoom);
+}
+
+bool NodeLayerItem::generationPulseActive() const
+{
+    return m_pulseTimer->isActive();
+}
+
+void NodeLayerItem::updatePulseTimer()
+{
+    bool anyInFlight = false;
+    for (const core::Node &node : m_graph.nodes()) {
+        if (node.runState == core::RunState::Queued
+            || node.runState == core::RunState::Running) {
+            anyInFlight = true;
+            break;
+        }
+    }
+    if (anyInFlight && !m_pulseTimer->isActive())
+        m_pulseTimer->start();
+    else if (!anyInFlight && m_pulseTimer->isActive())
+        m_pulseTimer->stop();
 }
 
 namespace {
@@ -217,8 +341,10 @@ namespace {
 QVector<core::Node> paletteCatalog()
 {
     auto entry = [](const QString &title, const QSizeF &size,
-                    const QVector<core::Port> &ports) {
+                    const QVector<core::Port> &ports,
+                    core::NodeKind kind = core::NodeKind::Blank) {
         core::Node node;
+        node.kind = kind;
         node.title = title;
         node.worldSize = size;
         node.ports = ports;
@@ -227,12 +353,14 @@ QVector<core::Node> paletteCatalog()
 
     return {
         entry(QStringLiteral("Prompt"), QSizeF(260, 170),
-              { { QStringLiteral("text"), core::PortType::Text, false, 0.5 } }),
+              { { QStringLiteral("text"), core::PortType::Text, false, 0.5 } },
+              core::NodeKind::Prompt),
         entry(QStringLiteral("Generate Image"), QSizeF(280, 200),
               { { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
                 { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
                 { QStringLiteral("run"), core::PortType::Control, true, 0.8 },
-                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } }),
+                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } },
+              core::NodeKind::Generate),
         entry(QStringLiteral("Edit Image"), QSizeF(280, 200),
               { { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
                 { QStringLiteral("mask"), core::PortType::Mask, true, 0.55 },
@@ -321,6 +449,7 @@ void NodeLayerItem::placePaletteEntry(int index)
     syncSpatialIndex();
     m_geometryDirty = true;
     update();
+    emit graphMutated();
 }
 
 void NodeLayerItem::cancelPalette()
@@ -514,8 +643,10 @@ void NodeLayerItem::finishConnectDrag(const QPointF &world)
                 std::make_unique<core::DisconnectCommand>(m_detachedConnectionId));
             composite->add(std::make_unique<core::ConnectCommand>(wire));
             m_commands.push(std::move(composite), m_graph);
+            emit graphMutated();
         } else {
             m_commands.push(std::make_unique<core::ConnectCommand>(wire), m_graph);
+            emit graphMutated();
         }
         m_geometryDirty = true;
         endConnectDrag();
@@ -535,6 +666,7 @@ void NodeLayerItem::finishConnectDrag(const QPointF &world)
                         m_graph);
         m_geometryDirty = true;
         endConnectDrag();
+        emit graphMutated();
         return;
     }
 
@@ -697,10 +829,12 @@ QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
     const qreal connectorWidth = connectorWorldWidth(zoom);
     const QVector<int> visibleWires = visibleConnections();
     if (modelDirty || connectorWidth != m_lastConnectorWidth
-        || visibleWires != m_lastVisibleConnections) {
+        || visibleWires != m_lastVisibleConnections
+        || m_pulseFrame != m_lastPulseFrame) {
         rebuildConnectors(connectorRoot, visibleWires);
         m_lastVisibleConnections = visibleWires;
         m_lastConnectorWidth = connectorWidth;
+        m_lastPulseFrame = m_pulseFrame;
     }
 
     const bool detailed = zoom >= NodeGeometryBuilder::kDetailZoom;
@@ -719,26 +853,79 @@ void NodeLayerItem::rebuildNodes(QSGNode *nodeRoot, bool detailed,
                                  const QSet<int> &visible)
 {
     NodeGeometryBuilder builder;
+    NodeContentRasterizer rasterizer;
 
     QSGNode *child = nodeRoot->firstChild();
     for (const core::Node &node : m_graph.nodes()) {
         if (!visible.contains(node.id))
             continue; // off-screen nodes are not drawn
 
-        const NodeGeometryBuilder::Mesh mesh =
-            builder.buildNode(node, m_theme, detailed);
+        auto *group = static_cast<NodeCardGroup *>(child);
+        if (!group) {
+            group = new NodeCardGroup;
+            group->mesh = makeGeometryNode();
+            group->appendChildNode(group->mesh);
+            nodeRoot->appendChildNode(group);
+        }
+        const bool reassigned = group->nodeId != node.id;
+        group->nodeId = node.id;
 
-        auto *geometryNode = static_cast<QSGGeometryNode *>(child);
-        if (!geometryNode) {
-            geometryNode = makeGeometryNode();
-            nodeRoot->appendChildNode(geometryNode);
+        uploadMesh(group->mesh, builder.buildNode(node, m_theme, detailed));
+
+        // The media texture: the decoded result, aspect-fit into the media
+        // well, re-uploaded only when a new result replaces the old.
+        const QImage mediaImage =
+            detailed ? m_mediaImages.value(node.id) : QImage();
+        if (!mediaImage.isNull()) {
+            if (!group->media) {
+                group->media = new QSGSimpleTextureNode;
+                group->media->setOwnsTexture(true);
+                group->media->setFiltering(QSGTexture::Linear);
+                // Media sits over the mesh and under the text content.
+                group->insertChildNodeAfter(group->media, group->mesh);
+            }
+            const int mediaVersion = m_mediaVersions.value(node.id, 0);
+            if (reassigned || group->mediaVersion != mediaVersion) {
+                group->media->setTexture(
+                    window()->createTextureFromImage(mediaImage));
+                group->mediaVersion = mediaVersion;
+            }
+            group->media->setRect(
+                aspectFitRect(NodeCardLayout::bodyRect(node), mediaImage.size()));
+        } else if (group->media) {
+            group->removeChildNode(group->media);
+            delete group->media;
+            group->media = nullptr;
+            group->mediaVersion = -1;
         }
 
-        uploadMesh(geometryNode, mesh);
-        child = geometryNode->nextSibling();
+        // The content texture: the card's text layer, re-rasterized only when
+        // the node's content revision moved. The scene-graph sync blocks the
+        // GUI thread, so reading the node and painting a QImage here is safe.
+        if (detailed) {
+            if (!group->content) {
+                group->content = new QSGSimpleTextureNode;
+                group->content->setOwnsTexture(true);
+                group->content->setFiltering(QSGTexture::Linear);
+                group->appendChildNode(group->content);
+            }
+            if (reassigned || group->contentRevision != node.contentRevision) {
+                group->content->setTexture(window()->createTextureFromImage(
+                    rasterizer.rasterize(node, m_theme)));
+                group->contentRevision = node.contentRevision;
+            }
+            group->content->setRect(node.worldRect());
+        } else if (group->content) {
+            group->removeChildNode(group->content);
+            delete group->content;
+            group->content = nullptr;
+            group->contentRevision = -1;
+        }
+
+        child = group->nextSibling();
     }
 
-    // Drop any geometry nodes left over from a larger previous board.
+    // Drop any card groups left over from a larger previous board.
     while (child) {
         QSGNode *next = child->nextSibling();
         nodeRoot->removeChildNode(child);
@@ -802,6 +989,21 @@ void NodeLayerItem::rebuildConnectors(QSGNode *connectorRoot, const QVector<int>
         draw.color = NodeGeometryBuilder::portColor(fromType, m_theme);
         draw.dashedTail =
             core::portMatch(fromType, toType) == core::PortMatch::Converted;
+
+        // Wires into an in-flight generation shimmer toward the running
+        // color, making the active path readable at a glance.
+        if (to->runState == core::RunState::Queued
+            || to->runState == core::RunState::Running) {
+            const qreal phase =
+                qreal(m_pulseFrame % kPulsePeriodFrames) / kPulsePeriodFrames;
+            const qreal wave = 0.5 + 0.5 * qSin(phase * 2.0 * M_PI);
+            const QColor target = m_theme.statusRunning();
+            const qreal mix = 0.25 + 0.55 * wave;
+            draw.color = QColor::fromRgbF(
+                draw.color.redF() + (target.redF() - draw.color.redF()) * mix,
+                draw.color.greenF() + (target.greenF() - draw.color.greenF()) * mix,
+                draw.color.blueF() + (target.blueF() - draw.color.blueF()) * mix);
+        }
         draws.push_back(draw);
     }
 
@@ -991,6 +1193,35 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
 
     const int hitId = pickTopMost(world);
 
+    if (hitId != -1 && !shift && zoom >= NodeGeometryBuilder::kDetailZoom) {
+        const core::Node *hitNode = m_graph.nodeById(hitId);
+        if (hitNode->kind == core::NodeKind::Generate) {
+            const bool inFlight = hitNode->runState == core::RunState::Queued
+                || hitNode->runState == core::RunState::Running;
+            if (NodeCardLayout::runButtonRect(*hitNode).contains(world)) {
+                m_graph.selectOnly(hitId);
+                m_graph.raiseToTop(hitId);
+                m_geometryDirty = true;
+                update();
+                if (inFlight)
+                    emit stopRequested(hitId);
+                else
+                    emit runRequested(hitId);
+                event->accept();
+                return;
+            }
+            if (NodeCardLayout::modelChipRect(*hitNode).contains(world)) {
+                m_graph.selectOnly(hitId);
+                m_graph.raiseToTop(hitId);
+                m_geometryDirty = true;
+                update();
+                emit modelPickerRequested(hitId);
+                event->accept();
+                return;
+            }
+        }
+    }
+
     if (hitId != -1) {
         if (shift) {
             m_graph.toggleSelected(hitId);
@@ -1141,12 +1372,23 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
     }
 
     const QPointF world = worldFromLocal(event->position());
-    if (pickTopMost(world) == -1) {
+    const int hitId = pickTopMost(world);
+    if (hitId == -1) {
         addNodeAtCursor(world); // empty canvas: add a node at the cursor
         event->accept();
         return;
     }
-    event->ignore(); // on a node, a double-click does not add
+
+    const core::Node *hitNode = m_graph.nodeById(hitId);
+    if (hitNode->kind == core::NodeKind::Prompt) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        emit promptEditRequested(hitId);
+        event->accept();
+        return;
+    }
+    event->ignore(); // on other nodes, a double-click does not add
 }
 
 void NodeLayerItem::wheelEvent(QWheelEvent *event)
@@ -1207,6 +1449,7 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
             syncSpatialIndex();
             m_geometryDirty = true;
             update();
+            emit graphMutated();
         }
         event->accept();
         return;
@@ -1223,6 +1466,7 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
         syncSpatialIndex();
         m_geometryDirty = true;
         update();
+        emit graphMutated();
         event->accept();
         return;
     }

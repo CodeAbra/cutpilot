@@ -59,6 +59,14 @@ public:
     // The light-neutral hairline colour drawn for alignment guides.
     QColor emphasis() const { return m_emphasis; }
 
+    // Run-state colors: the progress fill and status text of a generating node,
+    // the settled done tick, a failed run, and the add-a-key warning. Paired with
+    // a status word in the node's status line, never color alone.
+    QColor statusRunning() const { return m_statusRunning; }
+    QColor statusDone() const { return m_statusDone; }
+    QColor statusError() const { return m_statusError; }
+    QColor statusWarning() const { return m_statusWarning; }
+
     // Typed-port dot colors. A port is never identified by color alone, but color is
     // the at-a-glance cue for what a connection carries.
     QColor typeImage() const { return m_typeImage; }
@@ -87,6 +95,10 @@ private:
     QColor m_glowEmphasis;
     QColor m_selectionFill;
     QColor m_emphasis;
+    QColor m_statusRunning;
+    QColor m_statusDone;
+    QColor m_statusError;
+    QColor m_statusWarning;
     QColor m_typeImage;
     QColor m_typeMask;
     QColor m_typeVideo;

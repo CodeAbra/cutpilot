@@ -36,6 +36,12 @@ qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
 
+# The full generation flow: a live sidecar process, the coordinator, and a
+# prompt-feeds-generate graph, driven end to end on the offscreen platform.
+qt_add_executable(tst_generationflow tst_generationflow.cpp)
+target_link_libraries(tst_generationflow PRIVATE Qt6::Test cutpilot-ipc cutpilot-render)
+add_test(NAME ipc.generationflow COMMAND tst_generationflow)
+
 # The generation sidecar's own suite, run against a live loopback server.
 # Keychain lookups are disabled so key-presence checks are driven by the
 # test environment alone.
