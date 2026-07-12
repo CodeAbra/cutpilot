@@ -1,5 +1,6 @@
 add_library(cutpilot-core STATIC
-    src/NodeGraph.cpp)
+    src/NodeGraph.cpp
+    src/SpatialIndex.cpp)
 
 target_include_directories(cutpilot-core PUBLIC include)
 
