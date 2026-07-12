@@ -15,6 +15,7 @@ find_package(Qt6 ${CUTPILOT_QT_VERSION} EXACT REQUIRED COMPONENTS
     Quick
     Widgets
     QuickWidgets
-    ShaderTools)
+    ShaderTools
+    Test)
 
 qt_standard_project_setup()
