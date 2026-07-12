@@ -23,7 +23,9 @@ void AddNodeCommand::apply(NodeGraph &graph)
 
 void AddNodeCommand::revert(NodeGraph &graph)
 {
-    m_index = graph.indexOfId(m_node.id);
+    // Leave m_index at the position captured on the first apply. Re-deriving it here
+    // would read whatever z the node currently sits at, so an intervening raise-to-top
+    // would make redo restore the node at the wrong z.
     graph.removeNode(m_node.id);
 }
 

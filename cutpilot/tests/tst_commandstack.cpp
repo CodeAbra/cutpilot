@@ -62,6 +62,7 @@ private slots:
     void boundedDepthDropsOldest();
 
     void addUndoRedoPreservesId();
+    void addRaiseUndoRedoKeepsAddZOrder();
     void deleteUndoRestoresIdAndZOrder();
     void moveDoUndoRedoRoundTrip();
     void recordedDragLandsAtNetDeltaNotDouble();
@@ -181,6 +182,38 @@ void TstCommandStack::addUndoRedoPreservesId()
     stack.redo(graph);
     QVERIFY(graph.nodeById(id) != nullptr);
     QCOMPARE(graph.nodeById(id)->id, id); // same id, not a fresh one
+}
+
+void TstCommandStack::addRaiseUndoRedoKeepsAddZOrder()
+{
+    NodeGraph graph;
+    CommandStack stack;
+
+    auto addA = std::make_unique<AddNodeCommand>(makeNode(QPointF(0, 0)));
+    AddNodeCommand *aPtr = addA.get();
+    stack.push(std::move(addA), graph);
+    const int a = aPtr->nodeId();
+
+    auto addB = std::make_unique<AddNodeCommand>(makeNode(QPointF(200, 0)));
+    AddNodeCommand *bPtr = addB.get();
+    stack.push(std::move(addB), graph);
+    const int b = bPtr->nodeId();
+
+    // B was added last, so it sits on top of A.
+    QCOMPARE(graph.indexOfId(a), 0);
+    QCOMPARE(graph.indexOfId(b), 1);
+
+    // A raise-on-touch of A reorders z outside the command stack.
+    graph.raiseToTop(QVector<int>{ a });
+    QCOMPARE(graph.indexOfId(b), 0);
+    QCOMPARE(graph.indexOfId(a), 1);
+
+    // Undo then redo the add of B. Redo must restore B at the z it was added at (top),
+    // not wherever the intervening raise left it.
+    stack.undo(graph);
+    QCOMPARE(graph.nodeById(b), nullptr);
+    stack.redo(graph);
+    QCOMPARE(graph.indexOfId(b), 1); // back on top, its original add index
 }
 
 void TstCommandStack::deleteUndoRestoresIdAndZOrder()

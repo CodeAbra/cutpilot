@@ -417,7 +417,9 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
 
         if (m_graph.nodeById(hitId) && m_graph.nodeById(hitId)->selected) {
             const QVector<int> ids = m_graph.selectedIds();
-            m_graph.raiseToTop(ids); // selecting or dragging raises to the top
+            // Raise-on-touch is a deliberate, non-undoable z reorder: it is not routed
+            // through the command stack, so add/move/delete undo never restores a prior z.
+            m_graph.raiseToTop(ids);
             m_dragging = true;
             m_dragIds = m_graph.selectedIds();
             m_dragPressWorld = world;
