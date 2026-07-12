@@ -1,10 +1,14 @@
 # Locates the Qt 6 modules the platform depends on.
 #
-# The GPU canvas renders through QRhi, which is a semi-private Qt API: it is
-# reached via the GuiPrivate component and pinned to one Qt version. ShaderTools
-# provides qt_add_shaders to bake .qsb shader packs at build time.
+# The GPU canvas renders through QRhi, a semi-private Qt API reached via the
+# GuiPrivate component: it carries no source or binary compatibility guarantee
+# across Qt minor releases, so the version is pinned exactly rather than floored.
+# QQuickRhiItem, which the grid layer subclasses, also requires 6.7 or newer.
+# ShaderTools provides qt_add_shaders to bake .qsb shader packs at build time.
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS
+set(CUTPILOT_QT_VERSION 6.11.1 CACHE STRING "Exact Qt version the renderer is pinned to")
+
+find_package(Qt6 ${CUTPILOT_QT_VERSION} EXACT REQUIRED COMPONENTS
     Core
     Gui
     GuiPrivate

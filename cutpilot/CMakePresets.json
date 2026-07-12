@@ -16,7 +16,7 @@
       "displayName": "macOS (Metal)",
       "inherits": "base",
       "cacheVariables": {
-        "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/qt"
+        "CMAKE_PREFIX_PATH": "/opt/homebrew/Cellar/qt/6.11.1"
       },
       "condition": {
         "type": "equals",
