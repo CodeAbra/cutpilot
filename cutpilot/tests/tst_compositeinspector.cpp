@@ -140,6 +140,11 @@ void CompositeInspectorTest::controlsFollowAnUndoneValue()
     rotation = rig.slider(-180, 180);
     QVERIFY(rotation);
     QCOMPARE(rotation->value(), 0);
+
+    // Layout-added children are shown through a queued event; after the
+    // loop spins, the rebuilt controls must be visible in the open panel.
+    QCoreApplication::processEvents();
+    QVERIFY(rotation->isVisible());
 }
 
 int main(int argc, char *argv[])

@@ -166,17 +166,19 @@ QSlider *CompositeInspector::addSlider(const QString &label, int min, int max,
 
 void CompositeInspector::rebuildControls(core::NodeKind kind)
 {
-    // Rebuild the control set for the node being edited.
-    qDeleteAll(m_controls->findChildren<QWidget *>(
-        Qt::FindDirectChildrenOnly));
-    QLayout *box = m_controls->layout();
-    while (QLayoutItem *item = box->takeAt(0)) {
-        if (QLayout *nested = item->layout()) {
-            while (QLayoutItem *inner = nested->takeAt(0))
-                delete inner;
-        }
-        delete item;
-    }
+    // Rebuild the control set for the node being edited: replace the whole
+    // controls widget so the old subtree — widgets, rows, layout items —
+    // tears down through one Qt ownership path.
+    auto *column = static_cast<QVBoxLayout *>(layout());
+    const int slot = column->indexOf(m_controls);
+    delete m_controls;
+    m_controls = new QWidget(this);
+    auto *box = new QVBoxLayout(m_controls);
+    box->setContentsMargins(0, 0, 0, 0);
+    column->insertWidget(slot, m_controls);
+    // A child created while its parent is already visible stays hidden
+    // until shown; a rebuild with the panel open must not blank it.
+    m_controls->show();
 
     switch (kind) {
     case core::NodeKind::Blend: {
