@@ -32,6 +32,10 @@ qt_add_executable(tst_generationcommands tst_generationcommands.cpp)
 target_link_libraries(tst_generationcommands PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.generationcommands COMMAND tst_generationcommands)
 
+qt_add_executable(tst_pipelineorder tst_pipelineorder.cpp)
+target_link_libraries(tst_pipelineorder PRIVATE Qt6::Test cutpilot-core)
+add_test(NAME core.pipelineorder COMMAND tst_pipelineorder)
+
 qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)

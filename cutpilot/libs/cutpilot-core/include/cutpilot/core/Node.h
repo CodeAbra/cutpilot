@@ -32,24 +32,29 @@ struct Port {
 };
 
 // What a node's body is made of: a plain content card, editable prompt text
-// that feeds downstream generation, or a model-backed generation whose body
-// becomes the produced media.
+// that feeds downstream generation, a model-backed generation whose body
+// becomes the produced media, or a cost gate that holds its downstream
+// branch once a run's spend would cross the gate's limit.
 enum class NodeKind {
     Blank,
     Prompt,
-    Generate
+    Generate,
+    CostGate
 };
 
 // A generation node's run lifecycle. NeedsKey marks a run refused because the
 // picked model's vendor has no API key configured; the node surfaces the
-// add-a-key affordance instead of failing silently.
+// add-a-key affordance instead of failing silently. Held marks a node stopped
+// by a cost gate or the run cap — nothing is queued in the service, and the
+// run can resume it once the limit allows.
 enum class RunState {
     Idle,
     Queued,
     Running,
     Done,
     Error,
-    NeedsKey
+    NeedsKey,
+    Held
 };
 
 // A node on the canvas, expressed entirely in world coordinates. The body is the
@@ -73,15 +78,29 @@ struct Node {
     QString modelId;
     QString modelLabel;
 
+    // A cost gate's user-set spend limit for its downstream branch, in USD.
+    // A real parameter, edited through an undoable command.
+    double gateLimitUsd = 0.05;
+
     // Live run status, written directly (not through commands): status is
     // transient job state, not an undoable edit.
     RunState runState = RunState::Idle;
     qreal runProgress = 0.0;
     QString statusMessage;
 
-    // The finished result: media path, final cost (negative until known), and
-    // the produced resolution.
+    // The model's price for one run, shown before anything is spent.
+    // Transient display state fed from the registry; negative until known.
+    double estimatedCostUsd = -1.0;
+
+    // What a gate's branch has spent during the current run. Transient
+    // display state; negative when no run has touched the gate.
+    double gateSpentUsd = -1.0;
+
+    // The finished result: media path, the result file's SHA-256 (its
+    // identity for downstream cache keys), final cost (negative until
+    // known), and the produced resolution.
     QString resultPath;
+    QString resultDigest;
     double costUsd = -1.0;
     int resultWidth = 0;
     int resultHeight = 0;

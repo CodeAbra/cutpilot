@@ -284,6 +284,7 @@ NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &
                 dot = theme.statusError();
                 break;
             case core::RunState::NeedsKey:
+            case core::RunState::Held:
                 dot = theme.statusWarning();
                 break;
             case core::RunState::Idle:

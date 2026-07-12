@@ -71,6 +71,10 @@ StatusLine statusLine(const core::Node &node, const theme::ThemeTable &theme)
         return { node.statusMessage.isEmpty() ? QStringLiteral("Add a key")
                                               : node.statusMessage,
                  theme.statusWarning() };
+    case core::RunState::Held:
+        return { node.statusMessage.isEmpty() ? QStringLiteral("Held")
+                                              : node.statusMessage,
+                 theme.statusWarning() };
     case core::RunState::Idle:
         break;
     }
