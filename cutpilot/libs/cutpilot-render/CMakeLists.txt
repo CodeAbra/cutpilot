@@ -3,11 +3,15 @@ qt_add_library(cutpilot-render STATIC
     include/cutpilot/render/CanvasItem.h
     include/cutpilot/render/CompositorEngine.h
     include/cutpilot/render/NodeLayerItem.h
+    include/cutpilot/render/PreviewController.h
+    include/cutpilot/render/PreviewItem.h
     src/CanvasController.cpp
     src/CanvasItem.cpp
     src/CanvasRenderer.cpp
     src/CompositorEngine.cpp
     src/NodeLayerItem.cpp
+    src/PreviewController.cpp
+    src/PreviewItem.cpp
     src/NodeGeometryBuilder.cpp
     src/NodeContentRasterizer.cpp
     src/ConnectorGeometryBuilder.cpp)
@@ -36,4 +40,5 @@ qt_add_shaders(cutpilot-render "cutpilot_render_shaders"
         shaders/blend.frag
         shaders/mask.frag
         shaders/key.frag
-        shaders/transform.frag)
+        shaders/transform.frag
+        shaders/preview.frag)

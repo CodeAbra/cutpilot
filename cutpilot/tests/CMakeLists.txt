@@ -51,6 +51,10 @@ qt_add_executable(tst_compositor tst_compositor.cpp)
 target_link_libraries(tst_compositor PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.compositor COMMAND tst_compositor)
 
+qt_add_executable(tst_previewwiring tst_previewwiring.cpp)
+target_link_libraries(tst_previewwiring PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.previewwiring COMMAND tst_previewwiring)
+
 # The full generation flow: a live sidecar process, the coordinator, and a
 # prompt-feeds-generate graph, driven end to end on the offscreen platform.
 qt_add_executable(tst_generationflow tst_generationflow.cpp)

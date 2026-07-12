@@ -83,6 +83,14 @@ public:
     // restored by undo finds its media again.
     void setNodeMedia(int nodeId, const QImage &image);
 
+    // The node's current media image and its upload version — the preview
+    // and the thumbnail compositor read their source pixels from here.
+    QImage nodeMediaImage(int nodeId) const { return m_mediaImages.value(nodeId); }
+    int nodeMediaVersion(int nodeId) const
+    {
+        return m_mediaVersions.value(nodeId, -1);
+    }
+
     // A node's content or status changed outside a canvas gesture (a run
     // progressing, a model registry landing); refresh its card.
     void refreshNode(int nodeId);

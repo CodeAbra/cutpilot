@@ -1,3 +1,4 @@
+#include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/NodeGraph.h"
 #include "cutpilot/ipc/GenerationClient.h"
 #include "cutpilot/ipc/GenerationCoordinator.h"
@@ -5,10 +6,13 @@
 #include "cutpilot/render/CanvasController.h"
 #include "cutpilot/render/CanvasItem.h"
 #include "cutpilot/render/NodeLayerItem.h"
+#include "cutpilot/render/PreviewController.h"
+#include "cutpilot/render/PreviewItem.h"
 #include "cutpilot/secrets/KeychainStore.h"
 #include "cutpilot/theme/ThemeTable.h"
 
 #include <QApplication>
+#include <QButtonGroup>
 #include <QCursor>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -27,6 +31,7 @@
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QResizeEvent>
+#include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -43,6 +48,8 @@ using cutpilot::ipc::SidecarHost;
 using cutpilot::render::CanvasController;
 using cutpilot::render::CanvasItem;
 using cutpilot::render::NodeLayerItem;
+using cutpilot::render::PreviewController;
+using cutpilot::render::PreviewItem;
 using cutpilot::secrets::KeychainStore;
 using cutpilot::theme::ThemeTable;
 
@@ -194,6 +201,185 @@ public:
     }
 };
 
+// The preview panel floated over the canvas's top-right corner: the GPU
+// preview surface, the compare-mode strip, the wipe and overlay controls,
+// and the pinned-source readout. Pinning any node summons it; closing hides
+// it without dropping the pins.
+class PreviewPanel : public QWidget {
+public:
+    PreviewPanel(const ThemeTable &theme, PreviewController *previews,
+                 NodeLayerItem *layer, QWidget *parent)
+        : QWidget(parent)
+        , m_previews(previews)
+        , m_layer(layer)
+    {
+        const QColor surface = theme.bgCanvas().lighter(125);
+        setStyleSheet(QStringLiteral(
+                          "QWidget { color: %1; }"
+                          "QLabel { color: %1; background: transparent; "
+                          "border: none; }"
+                          "QPushButton {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px;"
+                          "  padding: 2px 8px;"
+                          "}"
+                          "QPushButton:checked { border-color: %6; color: %6; }"
+                          "QSlider { background: transparent; }")
+                          .arg(theme.textPrimary().name())
+                          .arg(surface.red())
+                          .arg(surface.green())
+                          .arg(surface.blue())
+                          .arg(theme.borderSubtle().name(),
+                               theme.textPrimary().name()));
+
+        auto *column = new QVBoxLayout(this);
+        column->setContentsMargins(6, 6, 6, 6);
+        column->setSpacing(6);
+
+        auto *header = new QHBoxLayout;
+        m_sources = new QLabel(QStringLiteral("Preview"), this);
+        auto *close = new QPushButton(QStringLiteral("✕"), this);
+        close->setFixedWidth(26);
+        header->addWidget(m_sources, 1);
+        header->addWidget(close);
+        column->addLayout(header);
+
+        m_quick = new QQuickWidget(this);
+        m_quick->setResizeMode(QQuickWidget::SizeRootObjectToView);
+        m_quick->setSource(QUrl(QStringLiteral("qrc:/cutpilot/app/Preview.qml")));
+        m_preview = qobject_cast<PreviewItem *>(m_quick->rootObject());
+        if (m_preview) {
+            m_preview->setSurroundColor(theme.bgCanvas());
+            m_preview->setDividerColor(theme.emphasis());
+        }
+        column->addWidget(m_quick, 1);
+
+        auto *controls = new QHBoxLayout;
+        controls->setSpacing(6);
+        auto *modes = new QButtonGroup(this);
+        const struct {
+            const char *label;
+            PreviewItem::CompareMode mode;
+        } entries[] = {
+            { "A", PreviewItem::CompareMode::Single },
+            { "Wipe", PreviewItem::CompareMode::Wipe },
+            { "Split", PreviewItem::CompareMode::SideBySide },
+            { "Diff", PreviewItem::CompareMode::Difference },
+            { "Over", PreviewItem::CompareMode::Overlay },
+        };
+        for (const auto &entry : entries) {
+            auto *button = new QPushButton(QString::fromLatin1(entry.label), this);
+            button->setCheckable(true);
+            modes->addButton(button, int(entry.mode));
+            controls->addWidget(button);
+        }
+        modes->button(0)->setChecked(true);
+
+        m_wipe = new QSlider(Qt::Horizontal, this);
+        m_wipe->setRange(0, 100);
+        m_wipe->setValue(50);
+        m_wipe->setToolTip(QStringLiteral("Wipe position"));
+        m_wipe->hide();
+        controls->addWidget(m_wipe, 1);
+
+        m_opacity = new QSlider(Qt::Horizontal, this);
+        m_opacity->setRange(0, 100);
+        m_opacity->setValue(50);
+        m_opacity->setToolTip(QStringLiteral("Overlay opacity"));
+        m_opacity->hide();
+        controls->addWidget(m_opacity, 1);
+
+        controls->addStretch(0);
+        m_fit = new QPushButton(QStringLiteral("Fit"), this);
+        m_fit->setCheckable(true);
+        m_fit->setChecked(true);
+        m_fit->setToolTip(QStringLiteral("Fit the view, or show 1:1 texels"));
+        controls->addWidget(m_fit);
+        column->addLayout(controls);
+
+        connect(close, &QPushButton::clicked, this, &QWidget::hide);
+        connect(modes, &QButtonGroup::idClicked, this, [this](int id) {
+            const auto mode = PreviewItem::CompareMode(id);
+            if (m_preview)
+                m_preview->setCompareMode(mode);
+            m_wipe->setVisible(mode == PreviewItem::CompareMode::Wipe);
+            m_opacity->setVisible(mode == PreviewItem::CompareMode::Overlay);
+        });
+        connect(m_wipe, &QSlider::valueChanged, this, [this](int value) {
+            if (m_preview)
+                m_preview->setWipePosition(value / 100.0);
+        });
+        connect(m_opacity, &QSlider::valueChanged, this, [this](int value) {
+            if (m_preview)
+                m_preview->setOverlayOpacity(value / 100.0);
+        });
+        connect(m_fit, &QPushButton::toggled, this, [this](bool fit) {
+            if (m_preview)
+                m_preview->setFitToView(fit);
+        });
+        connect(m_previews, &PreviewController::pinsChanged, this, [this] {
+            refreshSources();
+            if (m_previews->anyPinned()) {
+                show();
+                raise();
+            }
+        });
+
+        if (parent)
+            parent->installEventFilter(this);
+        resize(520, 400);
+        hide();
+    }
+
+    PreviewItem *previewItem() const { return m_preview; }
+
+    void refreshSources()
+    {
+        const auto title = [this](PreviewController::Buffer buffer) {
+            const int nodeId = m_previews->pinnedNode(buffer);
+            const cutpilot::core::Node *node =
+                nodeId != -1 ? m_layer->graph().nodeById(nodeId) : nullptr;
+            return node ? node->title : QStringLiteral("—");
+        };
+        m_sources->setText(QStringLiteral("A: %1 · B: %2")
+                               .arg(title(PreviewController::Buffer::A),
+                                    title(PreviewController::Buffer::B)));
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == parentWidget() && event->type() == QEvent::Resize)
+            reanchor();
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void showEvent(QShowEvent *event) override
+    {
+        QWidget::showEvent(event);
+        reanchor();
+    }
+
+private:
+    void reanchor()
+    {
+        if (!parentWidget())
+            return;
+        const int margin = 12;
+        move(parentWidget()->width() - width() - margin, margin);
+        raise();
+    }
+
+    PreviewController *m_previews = nullptr;
+    NodeLayerItem *m_layer = nullptr;
+    QQuickWidget *m_quick = nullptr;
+    PreviewItem *m_preview = nullptr;
+    QLabel *m_sources = nullptr;
+    QSlider *m_wipe = nullptr;
+    QSlider *m_opacity = nullptr;
+    QPushButton *m_fit = nullptr;
+};
+
 // Hosts the GPU canvas (grid + node layers, sharing one camera) and overlays the
 // zoom readout in the bottom-left corner.
 class CanvasView : public QWidget {
@@ -205,6 +391,7 @@ public:
         qmlRegisterType<CanvasController>("CutPilot.Render", 1, 0, "CanvasController");
         qmlRegisterType<CanvasItem>("CutPilot.Render", 1, 0, "CanvasItem");
         qmlRegisterType<NodeLayerItem>("CutPilot.Render", 1, 0, "NodeLayerItem");
+        qmlRegisterType<PreviewItem>("CutPilot.Render", 1, 0, "PreviewItem");
 
         m_quick = new QQuickWidget(this);
         m_quick->setResizeMode(QQuickWidget::SizeRootObjectToView);
@@ -360,15 +547,18 @@ private:
     int m_nodeId = -1;
 };
 
-// The chrome surfaces generation asks for: the registry-driven model picker,
-// the inline prompt editor, and the add-a-key flow that stores the user's own
-// vendor key in the system keychain.
+// The chrome surfaces the canvas asks for: the registry-driven model picker,
+// the inline prompt editor, the add-a-key flow that stores the user's own
+// vendor key in the system keychain, and the per-node menu carrying run and
+// preview-pin actions.
 class GenerationChrome : public QObject {
 public:
-    GenerationChrome(CanvasView *view, GenerationCoordinator *coordinator)
+    GenerationChrome(CanvasView *view, GenerationCoordinator *coordinator,
+                     PreviewController *previews)
         : QObject(view)
         , m_view(view)
         , m_coordinator(coordinator)
+        , m_previews(previews)
         , m_editor(new PromptEditor(ThemeTable(cutpilot::theme::Theme::Dark), view))
     {
         NodeLayerItem *layer = view->layer();
@@ -414,19 +604,55 @@ public:
         }
     }
 
-    void showNodeRunMenu(int nodeId)
+    void showNodeMenu(int nodeId)
     {
         NodeLayerItem *layer = m_view->layer();
-        if (!layer->graph().nodeById(nodeId))
+        const core::Node *node = layer->graph().nodeById(nodeId);
+        if (!node)
             return;
+
         QMenu menu(m_view);
-        QAction *runHere = menu.addAction(QStringLiteral("Run to here"));
-        QAction *rerun = menu.addAction(QStringLiteral("Re-run ignoring cache"));
+        QAction *runHere = nullptr;
+        QAction *rerun = nullptr;
+        if (node->kind == core::NodeKind::Generate) {
+            runHere = menu.addAction(QStringLiteral("Run to here"));
+            rerun = menu.addAction(QStringLiteral("Re-run ignoring cache"));
+        }
+
+        QAction *pinA = nullptr;
+        QAction *pinB = nullptr;
+        QAction *unpin = nullptr;
+        if (m_previews && core::producesImage(node->kind)) {
+            if (!menu.isEmpty())
+                menu.addSeparator();
+            pinA = menu.addAction(QStringLiteral("Preview in A"));
+            pinB = menu.addAction(QStringLiteral("Preview in B"));
+            const bool pinned =
+                m_previews->pinnedNode(PreviewController::Buffer::A) == nodeId
+                || m_previews->pinnedNode(PreviewController::Buffer::B) == nodeId;
+            if (pinned)
+                unpin = menu.addAction(QStringLiteral("Unpin from preview"));
+        }
+        if (menu.isEmpty())
+            return;
+
         QAction *chosen = menu.exec(QCursor::pos());
-        if (chosen == runHere)
+        if (!chosen)
+            return;
+        if (chosen == runHere) {
             m_coordinator->runTo(nodeId);
-        else if (chosen == rerun)
+        } else if (chosen == rerun) {
             m_coordinator->rerunNode(nodeId);
+        } else if (chosen == pinA) {
+            m_previews->pin(PreviewController::Buffer::A, nodeId);
+        } else if (chosen == pinB) {
+            m_previews->pin(PreviewController::Buffer::B, nodeId);
+        } else if (chosen == unpin) {
+            if (m_previews->pinnedNode(PreviewController::Buffer::A) == nodeId)
+                m_previews->unpin(PreviewController::Buffer::A);
+            if (m_previews->pinnedNode(PreviewController::Buffer::B) == nodeId)
+                m_previews->unpin(PreviewController::Buffer::B);
+        }
     }
 
     void editGateLimit(int nodeId)
@@ -474,6 +700,7 @@ public:
 private:
     CanvasView *m_view = nullptr;
     GenerationCoordinator *m_coordinator = nullptr;
+    PreviewController *m_previews = nullptr;
     PromptEditor *m_editor = nullptr;
 };
 
@@ -560,13 +787,20 @@ int main(int argc, char *argv[])
 
     // The generation stack: the service process, its client, and the
     // coordinator that runs nodes against it. The canvas layer raises the
-    // gestures; the chrome supplies the picker, editor, and key dialogs.
+    // gestures; the chrome supplies the picker, editor, and key dialogs; the
+    // preview controller keeps the pinned buffers in step with the graph.
     NodeLayerItem *layer = view->layer();
     GenerationCoordinator *coordinator = nullptr;
     GenerationChrome *chrome = nullptr;
+    PreviewController *previews = nullptr;
+    PreviewPanel *previewPanel = nullptr;
     if (layer) {
         coordinator = new GenerationCoordinator(&layer->graph(), &client, view);
-        chrome = new GenerationChrome(view, coordinator);
+        previews = new PreviewController(view);
+        previews->setLayer(layer);
+        previewPanel = new PreviewPanel(theme, previews, layer, view);
+        previews->setPreviewItem(previewPanel->previewItem());
+        chrome = new GenerationChrome(view, coordinator, previews);
 
         QObject::connect(&host, &SidecarHost::ready, coordinator,
                          [clientPtr = &client, coordinator](quint16 port,
@@ -591,6 +825,13 @@ int main(int argc, char *argv[])
         QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady, layer,
                          &NodeLayerItem::setNodeMedia);
 
+        // The preview follows the run: these land after the layer's own
+        // slots above, so a refresh always reads the just-stored media.
+        QObject::connect(coordinator, &GenerationCoordinator::nodeContentChanged,
+                         previews, &PreviewController::refresh);
+        QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady,
+                         previews, &PreviewController::refresh);
+
         QObject::connect(layer, &NodeLayerItem::modelPickerRequested, chrome,
                          [chrome](int nodeId) { chrome->showModelPicker(nodeId); },
                          Qt::QueuedConnection);
@@ -598,7 +839,7 @@ int main(int argc, char *argv[])
                          [chrome](int nodeId) { chrome->openPromptEditor(nodeId); },
                          Qt::QueuedConnection);
         QObject::connect(layer, &NodeLayerItem::nodeMenuRequested, chrome,
-                         [chrome](int nodeId) { chrome->showNodeRunMenu(nodeId); },
+                         [chrome](int nodeId) { chrome->showNodeMenu(nodeId); },
                          Qt::QueuedConnection);
         QObject::connect(layer, &NodeLayerItem::gateLimitEditRequested, chrome,
                          [chrome](int nodeId) { chrome->editGateLimit(nodeId); },

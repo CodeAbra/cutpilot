@@ -1220,13 +1220,13 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
         return;
     }
 
-    // A right press on a generation node raises its run menu (run to here,
-    // re-run ignoring cache); the node becomes the selection so the menu
-    // clearly targets it.
+    // A right press on a node raises its menu — run entries on a generation
+    // node, preview pinning on anything that produces an image; the chrome
+    // assembles the entries by kind. The node becomes the selection so the
+    // menu clearly targets it.
     if (event->button() == Qt::RightButton) {
         const int menuId = pickTopMost(worldFromLocal(event->position()));
-        const core::Node *menuNode = menuId != -1 ? m_graph.nodeById(menuId) : nullptr;
-        if (menuNode && menuNode->kind == core::NodeKind::Generate) {
+        if (menuId != -1 && m_graph.nodeById(menuId)) {
             m_graph.selectOnly(menuId);
             m_graph.raiseToTop(menuId);
             m_geometryDirty = true;
