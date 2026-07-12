@@ -20,6 +20,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/QtSetup.cmake)
 add_subdirectory(libs/cutpilot-core)
 add_subdirectory(libs/cutpilot-theme)
 add_subdirectory(libs/cutpilot-render)
+add_subdirectory(libs/cutpilot-ipc)
 add_subdirectory(app/cutpilot-app)
 
 option(BUILD_TESTING "Build the test targets" ON)
