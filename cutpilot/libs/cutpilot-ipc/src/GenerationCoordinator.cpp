@@ -227,7 +227,7 @@ void GenerationCoordinator::startRun(const QVector<int> &subset,
         return;
     }
     for (int nodeId : subset) {
-        if (m_jobByNode.contains(nodeId)) {
+        if (m_jobByNode.contains(nodeId) || m_awaitingSubmit.contains(nodeId)) {
             emit runRefused(QStringLiteral("Still stopping the previous run"));
             return;
         }
@@ -328,6 +328,7 @@ void GenerationCoordinator::submitNode(core::Node *node, const ModelInfo &model,
     m_run.committedUsd.insert(node->id, model.priceUsd);
     m_run.pending.remove(node->id);
     m_run.inFlight.insert(node->id);
+    m_awaitingSubmit.insert(node->id);
 
     node->runState = core::RunState::Queued;
     node->runProgress = 0.0;
@@ -611,11 +612,14 @@ void GenerationCoordinator::abortRun()
         return;
 
     // Deactivate first: the cancellations below stream terminal states back,
-    // and those must be plain node updates, not run bookkeeping.
+    // and those must be plain node updates, not run bookkeeping. Submissions
+    // still on the wire stop being awaited, so their acknowledgements are
+    // cancelled on arrival instead of adopted.
     m_run.active = false;
     const QSet<int> inFlight = m_run.inFlight;
     const QSet<int> parked = m_run.pending + m_run.held;
     m_run = PipelineRun();
+    m_awaitingSubmit.clear();
 
     for (int nodeId : inFlight) {
         const QString jobId = m_jobByNode.value(nodeId);
@@ -689,7 +693,8 @@ void GenerationCoordinator::reconcile()
         const bool claimsLive = node.runState == core::RunState::Queued
             || node.runState == core::RunState::Running;
         const bool claimsHeld = node.runState == core::RunState::Held;
-        if (claimsLive && !m_jobByNode.contains(node.id))
+        if (claimsLive && !m_jobByNode.contains(node.id)
+            && !m_awaitingSubmit.contains(node.id))
             orphaned.push_back(node.id);
         else if (claimsHeld && !(m_run.active && m_run.held.contains(node.id)))
             orphaned.push_back(node.id);
@@ -714,6 +719,12 @@ void GenerationCoordinator::reconcile()
         } else {
             ++it;
         }
+    }
+    for (auto it = m_awaitingSubmit.begin(); it != m_awaitingSubmit.end();) {
+        if (!m_graph->nodeById(*it))
+            it = m_awaitingSubmit.erase(it);
+        else
+            ++it;
     }
 
     refreshEstimates();
@@ -770,6 +781,10 @@ void GenerationCoordinator::onJobSubmitted(int nodeId, const QString &jobId,
                                            double estimatedCostUsd)
 {
     Q_UNUSED(estimatedCostUsd);
+    if (!m_awaitingSubmit.remove(nodeId)) {
+        m_client->cancelJob(jobId);
+        return;
+    }
     core::Node *node = generateNode(nodeId);
     if (!node) {
         m_client->cancelJob(jobId);
@@ -783,6 +798,8 @@ void GenerationCoordinator::onJobSubmitted(int nodeId, const QString &jobId,
 void GenerationCoordinator::onSubmitRefused(int nodeId, SubmitRefusal refusal,
                                             const QString &detail)
 {
+    if (!m_awaitingSubmit.remove(nodeId))
+        return;
     const bool inRun = m_run.active && m_run.inFlight.contains(nodeId);
     if (inRun) {
         m_run.inFlight.remove(nodeId);

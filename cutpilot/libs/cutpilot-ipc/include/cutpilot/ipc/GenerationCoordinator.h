@@ -163,6 +163,11 @@ private:
     QHash<QString, int> m_nodeByJob;
     QHash<int, QString> m_jobByNode;
 
+    // Nodes whose submission is on the wire but not yet acknowledged. An
+    // acknowledgement nobody awaits — the run was aborted, or the context is
+    // stale — is cancelled instead of adopted, so no job spends unowned.
+    QSet<int> m_awaitingSubmit;
+
     ResultCache m_cache;
     PipelineRun m_run;
     double m_runCapUsd = 0.0;

@@ -46,6 +46,13 @@ qt_add_executable(tst_generationflow tst_generationflow.cpp)
 target_link_libraries(tst_generationflow PRIVATE Qt6::Test cutpilot-ipc cutpilot-render)
 add_test(NAME ipc.generationflow COMMAND tst_generationflow)
 
+# The pipeline over a live sidecar: evaluation order, dirty tracking and
+# cache hits asserted by submission counts, cost gates and the run cap,
+# forced re-runs, and mid-run edits.
+qt_add_executable(tst_pipelineflow tst_pipelineflow.cpp)
+target_link_libraries(tst_pipelineflow PRIVATE Qt6::Test cutpilot-ipc)
+add_test(NAME ipc.pipelineflow COMMAND tst_pipelineflow)
+
 # The generation sidecar's own suite, run against a live loopback server.
 # Keychain lookups are disabled so key-presence checks are driven by the
 # test environment alone.
