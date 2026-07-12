@@ -72,6 +72,26 @@ QRectF placeContent(const QSize &textureSize, const QRectF &bounds, bool fit)
 
 } // namespace
 
+PreviewPlacement previewPlacement(const QSize &sizeA, const QSize &sizeB,
+                                  const QSize &viewSize,
+                                  PreviewItem::CompareMode mode, bool fit)
+{
+    PreviewPlacement placement;
+    const QRectF full(QPointF(0, 0), QSizeF(viewSize));
+    const QRectF halfA(0, 0, viewSize.width() / 2.0, viewSize.height());
+    const QRectF halfB(viewSize.width() / 2.0, 0, viewSize.width() / 2.0,
+                       viewSize.height());
+    if (mode == PreviewItem::CompareMode::SideBySide) {
+        placement.rectA = placeContent(sizeA, halfA, fit);
+        placement.rectB = placeContent(sizeB, halfB, fit);
+        return placement;
+    }
+    // The shared rect is placed from whichever buffer is active, so a lone
+    // B pin still lands on screen instead of sampling into an empty rect.
+    placement.rectA = placeContent(sizeA.isEmpty() ? sizeB : sizeA, full, fit);
+    return placement;
+}
+
 // The GPU half of the preview: evaluates both buffers' plans through the
 // compositor engine on the scene graph's device, then records the present
 // pass into the item's render target. Part of the QRhi boundary reviewed on
@@ -188,21 +208,13 @@ void PreviewRenderer::render(QRhiCommandBuffer *cb)
         ? m_engine.evaluate(m_buffers[1].plan, cb)
         : nullptr;
 
-    const bool sideBySide = m_mode == PreviewItem::CompareMode::SideBySide;
-    const QRectF full(QPointF(0, 0), QSizeF(outputSize));
-    const QRectF halfA(0, 0, outputSize.width() / 2.0, outputSize.height());
-    const QRectF halfB(outputSize.width() / 2.0, 0, outputSize.width() / 2.0,
-                       outputSize.height());
-    const QRectF rectA = texA
-        ? placeContent(texA->pixelSize(), sideBySide ? halfA : full, m_fit)
-        : QRectF();
-    const QRectF rectB = (texB && sideBySide)
-        ? placeContent(texB->pixelSize(), halfB, m_fit)
-        : QRectF();
+    const PreviewPlacement placement = previewPlacement(
+        texA ? texA->pixelSize() : QSize(), texB ? texB->pixelSize() : QSize(),
+        outputSize, m_mode, m_fit);
 
     PreviewUniforms u{};
-    fillRect(u.rectA, rectA);
-    fillRect(u.rectB, rectB);
+    fillRect(u.rectA, placement.rectA);
+    fillRect(u.rectB, placement.rectB);
     fillColor(u.surround, m_surround);
     fillColor(u.divider, m_divider);
     u.viewSize[0] = float(outputSize.width());

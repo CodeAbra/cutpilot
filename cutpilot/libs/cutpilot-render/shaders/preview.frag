@@ -88,7 +88,9 @@ void main()
                 : vec3(0.0);
             content = vec4(co, ao);
         } else {
-            content = a;
+            // Single mode presents A; with A unpinned it shows B rather
+            // than an empty view.
+            content = hasA == 1 ? a : b;
         }
     }
 

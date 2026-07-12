@@ -90,4 +90,16 @@ private:
     QColor m_divider{ 232, 232, 235, 220 };
 };
 
+// Where the compare surfaces land in the view for the given buffer texture
+// sizes (empty size: that buffer is inactive). Every mode except
+// side-by-side presents both buffers through the one shared rect.
+struct PreviewPlacement {
+    QRectF rectA; // the shared content rect; A's own half in side-by-side
+    QRectF rectB; // B's own half, side-by-side only
+};
+
+PreviewPlacement previewPlacement(const QSize &sizeA, const QSize &sizeB,
+                                  const QSize &viewSize,
+                                  PreviewItem::CompareMode mode, bool fit);
+
 } // namespace cutpilot::render

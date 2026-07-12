@@ -79,6 +79,7 @@ private slots:
     void unpinningQueuesTheBuffersNodesForRelease();
     void aRewiredPlanQueuesTheNodesItDropped();
     void compareStateLandsInTheItem();
+    void placementFollowsTheActiveBuffer();
 };
 
 void PreviewWiringTest::pinningBuildsThePlanAndSources()
@@ -254,6 +255,33 @@ void PreviewWiringTest::compareStateLandsInTheItem()
     // Out-of-range values clamp instead of leaking into the shader.
     rig.item.setWipePosition(1.7);
     QCOMPARE(rig.item.wipePosition(), 1.0);
+}
+
+void PreviewWiringTest::placementFollowsTheActiveBuffer()
+{
+    using Mode = PreviewItem::CompareMode;
+    const QSize view(400, 200);
+    const QSize tex(100, 100);
+
+    // With A active, the shared rect is A's aspect-fit placement.
+    const auto both = render::previewPlacement(tex, tex, view, Mode::Wipe, true);
+    QCOMPARE(both.rectA, QRectF(100, 0, 200, 200));
+
+    // With only B pinned, the shared modes must still place B's content —
+    // an empty rect would render the whole preview as blank surround.
+    for (Mode mode : { Mode::Single, Mode::Wipe, Mode::Difference,
+                       Mode::Overlay }) {
+        const auto placement =
+            render::previewPlacement(QSize(), tex, view, mode, true);
+        QVERIFY2(!placement.rectA.isEmpty(),
+                 "a lone B pin left the shared content rect empty");
+    }
+
+    // Side-by-side keeps B in its own half whether or not A is active.
+    const auto sbs =
+        render::previewPlacement(QSize(), tex, view, Mode::SideBySide, true);
+    QVERIFY(sbs.rectA.isEmpty());
+    QCOMPARE(sbs.rectB, QRectF(200, 0, 200, 200));
 }
 
 int main(int argc, char *argv[])
