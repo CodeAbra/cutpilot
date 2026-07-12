@@ -188,12 +188,18 @@ QImage NodeContentRasterizer::rasterize(const core::Node &node,
         painter.setPen(theme.textSecondary());
         painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
                          QStringLiteral("No result yet — press run"));
-    } else if (node.kind == core::NodeKind::Still && !hasMedia) {
+    } else if ((node.kind == core::NodeKind::Still
+                || node.kind == core::NodeKind::Video)
+               && !hasMedia) {
         painter.setFont(uiFont(12.0));
         painter.setPen(theme.textSecondary());
         if (node.mediaPath.isEmpty()) {
             painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
-                             QStringLiteral("Double-click to choose an image"));
+                             node.kind == core::NodeKind::Video
+                                 ? QStringLiteral(
+                                       "Double-click to choose a video")
+                                 : QStringLiteral(
+                                       "Double-click to choose an image"));
         } else if (!node.statusMessage.isEmpty()) {
             painter.setPen(theme.statusWarning());
             painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,

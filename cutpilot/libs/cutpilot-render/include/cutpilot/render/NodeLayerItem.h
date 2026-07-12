@@ -139,10 +139,12 @@ signals:
     void nodeMenuRequested(int nodeId);
     void gateLimitEditRequested(int nodeId);
 
-    // A still node wants the file picker; a compositing node wants the
-    // parameter inspector. The chrome supplies both surfaces.
+    // A still or video node wants the file picker; a compositing node wants
+    // the parameter inspector; a loaded video wants its transport. The
+    // chrome supplies these surfaces.
     void mediaPickRequested(int nodeId);
     void compositeEditRequested(int nodeId);
+    void videoTransportRequested(int nodeId);
 
     // The graph structure or content changed through a command or history
     // walk; run bookkeeping (orphaned states, dead jobs) should reconcile.

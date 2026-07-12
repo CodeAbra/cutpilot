@@ -22,11 +22,12 @@ inline bool isCompositeKind(NodeKind kind)
 }
 
 // Whether the node can feed the compositor or the preview with pixels: a
-// local source, a compositing op, or a generation result.
+// local source (a still, or a video's current frame), a compositing op, or a
+// generation result.
 inline bool producesImage(NodeKind kind)
 {
-    return kind == NodeKind::Still || kind == NodeKind::Generate
-        || isCompositeKind(kind);
+    return kind == NodeKind::Still || kind == NodeKind::Video
+        || kind == NodeKind::Generate || isCompositeKind(kind);
 }
 
 // A ready-to-place node of the given kind with its title, size, typed ports,

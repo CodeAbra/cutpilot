@@ -35,15 +35,18 @@ struct Port {
 // What a node's body is made of: a plain content card, editable prompt text
 // that feeds downstream generation, a model-backed generation whose body
 // becomes the produced media, a cost gate that holds its downstream branch
-// once a run's spend would cross the gate's limit, a still image loaded from
-// a local file, or one of the local compositing operations (blend, mask,
-// key, transform) evaluated on the GPU without any vendor call.
+// once a run's spend would cross the gate's limit, a still image or video
+// loaded from a local file, or one of the local compositing operations
+// (blend, mask, key, transform) evaluated on the GPU without any vendor
+// call. A video feeds its current frame downstream; its transport scrubs at
+// proxy resolution.
 enum class NodeKind {
     Blank,
     Prompt,
     Generate,
     CostGate,
     Still,
+    Video,
     Blend,
     Mask,
     Key,

@@ -8,7 +8,10 @@
 #include <QFutureWatcher>
 #include <QImage>
 #include <QImageReader>
+#include <QMediaPlayer>
 #include <QTimer>
+#include <QVideoFrame>
+#include <QVideoSink>
 #include <QtConcurrent/QtConcurrentRun>
 
 namespace cutpilot::render {
@@ -21,6 +24,10 @@ constexpr int kDebounceMs = 150;
 // large still never costs full-resolution passes twice.
 constexpr int kThumbnailSourceDim = 512;
 
+// Video frames land at proxy resolution: enough for the preview and the
+// cards, small enough that per-frame conversion never taxes the UI thread.
+constexpr int kVideoProxyDim = 640;
+
 QImage decodeBounded(const QString &path)
 {
     QImageReader reader(path);
@@ -29,6 +36,18 @@ QImage decodeBounded(const QString &path)
 }
 
 } // namespace
+
+// One video node's playback: the media stack decodes on its own threads and
+// hands frames to the sink; only the proxy-scale conversion of the delivered
+// frame runs here. Loading pre-rolls one frame so the card and preview show
+// the video before the transport is ever touched.
+struct CompositorService::VideoPlayback {
+    std::unique_ptr<QMediaPlayer> player = std::make_unique<QMediaPlayer>();
+    std::unique_ptr<QVideoSink> sink = std::make_unique<QVideoSink>();
+    QString path;
+    bool userPlaying = false;
+    bool preRolling = false;
+};
 
 CompositorService::CompositorService(QObject *parent)
     : QObject(parent)
@@ -39,7 +58,10 @@ CompositorService::CompositorService(QObject *parent)
     connect(m_timer, &QTimer::timeout, this, &CompositorService::refreshNow);
 }
 
-CompositorService::~CompositorService() = default;
+CompositorService::~CompositorService()
+{
+    qDeleteAll(m_videos);
+}
 
 void CompositorService::setLayer(NodeLayerItem *layer)
 {
@@ -80,9 +102,147 @@ void CompositorService::refreshNow()
     };
     prune(m_decodedPaths);
     prune(m_thumbnailKeys);
+    for (auto it = m_videos.begin(); it != m_videos.end();) {
+        if (!m_layer->graph().nodeById(it.key())) {
+            if (m_engine)
+                m_engine->releaseNode(it.key());
+            delete it.value();
+            it = m_videos.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     reconcileStills();
+    reconcileVideos();
     renderThumbnails();
+}
+
+void CompositorService::reconcileVideos()
+{
+    QVector<int> videoIds;
+    for (const core::Node &node : m_layer->graph().nodes()) {
+        if (node.kind == core::NodeKind::Video)
+            videoIds.push_back(node.id);
+    }
+
+    for (int nodeId : videoIds) {
+        core::Node *node = m_layer->graph().nodeById(nodeId);
+        VideoPlayback *playback = m_videos.value(nodeId);
+        if (playback && playback->path == node->mediaPath)
+            continue;
+
+        if (!playback) {
+            playback = new VideoPlayback;
+            m_videos.insert(nodeId, playback);
+            playback->player->setVideoSink(playback->sink.get());
+
+            connect(playback->sink.get(), &QVideoSink::videoFrameChanged, this,
+                    [this, nodeId, playback](const QVideoFrame &frame) {
+                        if (!frame.isValid())
+                            return;
+                        QImage image = frame.toImage();
+                        if (image.isNull())
+                            return;
+                        if (image.width() > kVideoProxyDim
+                            || image.height() > kVideoProxyDim) {
+                            image = image.scaled(kVideoProxyDim, kVideoProxyDim,
+                                                 Qt::KeepAspectRatio,
+                                                 Qt::SmoothTransformation);
+                        }
+                        if (m_layer->graph().nodeById(nodeId)) {
+                            m_layer->setNodeMedia(nodeId, image);
+                            emit mediaUpdated();
+                            scheduleRefresh(); // downstream thumbnails follow
+                        }
+                        if (playback->preRolling) {
+                            playback->preRolling = false;
+                            if (!playback->userPlaying)
+                                playback->player->pause();
+                        }
+                    });
+            connect(playback->player.get(), &QMediaPlayer::mediaStatusChanged,
+                    this, [this, nodeId, playback](QMediaPlayer::MediaStatus s) {
+                        if (s == QMediaPlayer::LoadedMedia) {
+                            // Pre-roll one frame so the video shows itself.
+                            playback->preRolling = true;
+                            playback->player->play();
+                        }
+                        if (s == QMediaPlayer::EndOfMedia) {
+                            playback->userPlaying = false;
+                            emit videoStateChanged(nodeId);
+                        }
+                    });
+            connect(playback->player.get(), &QMediaPlayer::positionChanged, this,
+                    [this, nodeId](qint64) { emit videoStateChanged(nodeId); });
+            connect(playback->player.get(), &QMediaPlayer::errorOccurred, this,
+                    [this, nodeId](QMediaPlayer::Error, const QString &message) {
+                        core::Node *node = m_layer->graph().nodeById(nodeId);
+                        if (!node)
+                            return;
+                        node->statusMessage = message.isEmpty()
+                            ? QStringLiteral("Could not play the video")
+                            : message;
+                        node->bumpContent();
+                        m_layer->refreshNode(nodeId);
+                    });
+        }
+
+        playback->path = node->mediaPath;
+        playback->userPlaying = false;
+        playback->preRolling = false;
+        if (node->mediaPath.isEmpty()) {
+            playback->player->setSource(QUrl());
+            m_layer->clearNodeMedia(nodeId);
+        } else {
+            playback->player->setSource(
+                QUrl::fromLocalFile(node->mediaPath));
+        }
+        emit videoStateChanged(nodeId);
+    }
+}
+
+void CompositorService::setVideoPlaying(int nodeId, bool playing)
+{
+    VideoPlayback *playback = m_videos.value(nodeId);
+    if (!playback)
+        return;
+    playback->userPlaying = playing;
+    if (playing)
+        playback->player->play();
+    else
+        playback->player->pause();
+    emit videoStateChanged(nodeId);
+}
+
+void CompositorService::scrubVideo(int nodeId, qreal fraction)
+{
+    VideoPlayback *playback = m_videos.value(nodeId);
+    if (!playback)
+        return;
+    const qint64 duration = playback->player->duration();
+    if (duration <= 0)
+        return;
+    playback->player->setPosition(
+        qBound<qint64>(0, qint64(fraction * duration), duration));
+}
+
+bool CompositorService::videoPlaying(int nodeId) const
+{
+    const VideoPlayback *playback = m_videos.value(nodeId);
+    return playback && playback->userPlaying;
+}
+
+qint64 CompositorService::videoDurationMs(int nodeId) const
+{
+    const VideoPlayback *playback = m_videos.value(nodeId);
+    return playback ? playback->player->duration() : 0;
+}
+
+qint64 CompositorService::videoPositionMs(int nodeId) const
+{
+    const VideoPlayback *playback = m_videos.value(nodeId);
+    return playback ? playback->player->position() : 0;
 }
 
 void CompositorService::reconcileStills()

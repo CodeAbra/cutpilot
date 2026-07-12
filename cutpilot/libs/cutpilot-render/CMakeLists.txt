@@ -29,7 +29,8 @@ target_link_libraries(cutpilot-render
         Qt6::Quick
     PRIVATE
         Qt6::Concurrent
-        Qt6::GuiPrivate)
+        Qt6::GuiPrivate
+        Qt6::Multimedia)
 
 # Bake the grid and compositor shaders to .qsb and embed them under the
 # resource prefix the renderers load from.

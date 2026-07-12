@@ -100,6 +100,13 @@ QByteArray canonicalForm(const NodeGraph &graph, int nodeId, QSet<int> &visiting
         appendField(canonical, node->mediaPath.toUtf8());
         appendField(canonical, QByteArray::number(node->contentRevision));
         return canonical;
+    case NodeKind::Video:
+        // The frame pixels themselves invalidate through the source version
+        // stamp as the transport moves; the identity here is the file.
+        appendField(canonical, QByteArrayLiteral("video"));
+        appendField(canonical, node->mediaPath.toUtf8());
+        appendField(canonical, QByteArray::number(node->contentRevision));
+        return canonical;
     case NodeKind::Generate:
         appendField(canonical, QByteArrayLiteral("generate"));
         appendField(canonical, node->resultDigest.toUtf8());

@@ -55,6 +55,12 @@ qt_add_executable(tst_previewwiring tst_previewwiring.cpp)
 target_link_libraries(tst_previewwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.previewwiring COMMAND tst_previewwiring)
 
+# The video source over a generated two-color asset: proxy frame delivery,
+# non-blocking scrubs, self-advancing playback. Skips without ffmpeg.
+qt_add_executable(tst_videosource tst_videosource.cpp)
+target_link_libraries(tst_videosource PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.videosource COMMAND tst_videosource)
+
 # The full generation flow: a live sidecar process, the coordinator, and a
 # prompt-feeds-generate graph, driven end to end on the offscreen platform.
 qt_add_executable(tst_generationflow tst_generationflow.cpp)

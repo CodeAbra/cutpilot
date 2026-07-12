@@ -423,7 +423,9 @@ void NodeLayerItem::setGateLimit(int nodeId, double limitUsd)
 void NodeLayerItem::setNodeMediaPath(int nodeId, const QString &mediaPath)
 {
     const core::Node *node = m_graph.nodeById(nodeId);
-    if (!node || node->kind != core::NodeKind::Still
+    if (!node
+        || (node->kind != core::NodeKind::Still
+            && node->kind != core::NodeKind::Video)
         || node->mediaPath == mediaPath)
         return;
     m_commands.push(std::make_unique<core::SetMediaPathCommand>(nodeId, mediaPath),
@@ -577,6 +579,7 @@ QVector<core::Node> paletteCatalog()
               { { QStringLiteral("image"), core::PortType::Image, true, 0.5 },
                 { QStringLiteral("mask"), core::PortType::Mask, false, 0.5 } }),
         core::compositeNodePrototype(core::NodeKind::Still),
+        core::compositeNodePrototype(core::NodeKind::Video),
         core::compositeNodePrototype(core::NodeKind::Blend),
         core::compositeNodePrototype(core::NodeKind::Mask),
         core::compositeNodePrototype(core::NodeKind::Key),
@@ -1631,6 +1634,17 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
         m_geometryDirty = true;
         update();
         emit mediaPickRequested(hitId);
+        event->accept();
+        return;
+    }
+    if (hitNode->kind == core::NodeKind::Video) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        if (hitNode->mediaPath.isEmpty())
+            emit mediaPickRequested(hitId);
+        else
+            emit videoTransportRequested(hitId);
         event->accept();
         return;
     }

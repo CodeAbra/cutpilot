@@ -18,6 +18,7 @@ find_package(Qt6 ${CUTPILOT_QT_VERSION} EXACT REQUIRED COMPONENTS
     ShaderTools
     Network
     Concurrent
+    Multimedia
     Test)
 
 qt_standard_project_setup()

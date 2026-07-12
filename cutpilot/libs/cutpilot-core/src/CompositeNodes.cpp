@@ -15,6 +15,13 @@ Node compositeNodePrototype(NodeKind kind)
             { QStringLiteral("image"), PortType::Image, false, 0.5 },
         };
         break;
+    case NodeKind::Video:
+        node.title = QStringLiteral("Video");
+        node.worldSize = QSizeF(280.0, 190.0);
+        node.ports = {
+            { QStringLiteral("frame"), PortType::Image, false, 0.5 },
+        };
+        break;
     case NodeKind::Blend:
         node.title = QStringLiteral("Blend");
         node.worldSize = QSizeF(260.0, 190.0);

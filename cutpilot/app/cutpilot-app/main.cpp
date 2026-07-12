@@ -565,6 +565,136 @@ private:
     int m_nodeId = -1;
 };
 
+// A video node's transport, floated over the canvas's bottom edge: play or
+// pause, the scrub bar, and the position readout. Scrubbing asks the media
+// stack to seek and returns immediately; the sought frame arrives on its own
+// and flows into the card and the preview.
+class VideoTransport : public QWidget {
+public:
+    VideoTransport(const ThemeTable &theme, NodeLayerItem *layer,
+                   CompositorService *media, QWidget *parent)
+        : QWidget(parent)
+        , m_layer(layer)
+        , m_media(media)
+    {
+        const QColor surface = theme.bgCanvas().lighter(125);
+        setStyleSheet(QStringLiteral(
+                          "QWidget { color: %1; }"
+                          "QLabel { color: %1; background: transparent; "
+                          "border: none; }"
+                          "QPushButton {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px;"
+                          "  padding: 2px 10px;"
+                          "}"
+                          "QSlider { background: transparent; }")
+                          .arg(theme.textPrimary().name())
+                          .arg(surface.red())
+                          .arg(surface.green())
+                          .arg(surface.blue())
+                          .arg(theme.borderSubtle().name()));
+
+        auto *row = new QHBoxLayout(this);
+        row->setContentsMargins(8, 6, 8, 6);
+        row->setSpacing(8);
+
+        m_title = new QLabel(this);
+        m_play = new QPushButton(QStringLiteral("▶"), this);
+        m_play->setFixedWidth(34);
+        m_scrub = new QSlider(Qt::Horizontal, this);
+        m_scrub->setRange(0, 1000);
+        m_time = new QLabel(this);
+        auto *close = new QPushButton(QStringLiteral("✕"), this);
+        close->setFixedWidth(26);
+
+        row->addWidget(m_title);
+        row->addWidget(m_play);
+        row->addWidget(m_scrub, 1);
+        row->addWidget(m_time);
+        row->addWidget(close);
+
+        connect(close, &QPushButton::clicked, this, &QWidget::hide);
+        connect(m_play, &QPushButton::clicked, this, [this] {
+            m_media->setVideoPlaying(m_nodeId, !m_media->videoPlaying(m_nodeId));
+        });
+        connect(m_scrub, &QSlider::sliderMoved, this, [this](int value) {
+            m_media->scrubVideo(m_nodeId, value / 1000.0);
+        });
+        connect(m_media, &CompositorService::videoStateChanged, this,
+                [this](int nodeId) {
+                    if (nodeId == m_nodeId && isVisible())
+                        readState();
+                });
+        connect(layer, &NodeLayerItem::graphMutated, this, [this] {
+            if (isVisible() && m_nodeId != -1
+                && !m_layer->graph().nodeById(m_nodeId))
+                hide();
+        });
+
+        if (parent)
+            parent->installEventFilter(this);
+        setFixedWidth(520);
+        hide();
+    }
+
+    void openFor(int nodeId)
+    {
+        const core::Node *node = m_layer->graph().nodeById(nodeId);
+        if (!node || node->kind != core::NodeKind::Video)
+            return;
+        m_nodeId = nodeId;
+        m_title->setText(node->title);
+        readState();
+        show();
+        raise();
+        reanchor();
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == parentWidget() && event->type() == QEvent::Resize)
+            reanchor();
+        return QWidget::eventFilter(watched, event);
+    }
+
+private:
+    void reanchor()
+    {
+        if (!parentWidget())
+            return;
+        move((parentWidget()->width() - width()) / 2,
+             parentWidget()->height() - height() - 52);
+        raise();
+    }
+
+    void readState()
+    {
+        const qint64 duration = m_media->videoDurationMs(m_nodeId);
+        const qint64 position = m_media->videoPositionMs(m_nodeId);
+        m_play->setText(m_media->videoPlaying(m_nodeId) ? QStringLiteral("⏸")
+                                                        : QStringLiteral("▶"));
+        if (!m_scrub->isSliderDown() && duration > 0)
+            m_scrub->setValue(int(position * 1000 / duration));
+        const auto stamp = [](qint64 ms) {
+            return QStringLiteral("%1:%2.%3")
+                .arg(ms / 60000)
+                .arg((ms / 1000) % 60, 2, 10, QLatin1Char('0'))
+                .arg((ms / 100) % 10);
+        };
+        m_time->setText(
+            QStringLiteral("%1 / %2").arg(stamp(position), stamp(duration)));
+    }
+
+    NodeLayerItem *m_layer = nullptr;
+    CompositorService *m_media = nullptr;
+    QLabel *m_title = nullptr;
+    QPushButton *m_play = nullptr;
+    QSlider *m_scrub = nullptr;
+    QLabel *m_time = nullptr;
+    int m_nodeId = -1;
+};
+
 // The parameter inspector for a compositing node, floated over the canvas's
 // right edge. Sliders write parameters live — the preview follows in real
 // time — and each finished gesture lands as one undoable step; discrete
@@ -1071,19 +1201,34 @@ int main(int argc, char *argv[])
         QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady,
                          media, &CompositorService::scheduleRefresh);
 
-        // The compositing inspector and the still-image file picker.
+        // The compositing inspector, the media file picker, and the video
+        // transport.
         auto *inspector = new CompositeInspector(theme, layer, previews, view);
+        auto *transport = new VideoTransport(theme, layer, media, view);
         QObject::connect(
             layer, &NodeLayerItem::compositeEditRequested, inspector,
             [inspector](int nodeId) { inspector->openFor(nodeId); },
             Qt::QueuedConnection);
         QObject::connect(
+            layer, &NodeLayerItem::videoTransportRequested, transport,
+            [transport](int nodeId) { transport->openFor(nodeId); },
+            Qt::QueuedConnection);
+        QObject::connect(
             layer, &NodeLayerItem::mediaPickRequested, view,
             [view, layer](int nodeId) {
+                const core::Node *node = layer->graph().nodeById(nodeId);
+                if (!node)
+                    return;
+                const bool video = node->kind == core::NodeKind::Video;
                 const QString path = QFileDialog::getOpenFileName(
-                    view, QStringLiteral("Choose an image"), QString(),
-                    QStringLiteral(
-                        "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"));
+                    view,
+                    video ? QStringLiteral("Choose a video")
+                          : QStringLiteral("Choose an image"),
+                    QString(),
+                    video
+                        ? QStringLiteral("Videos (*.mp4 *.mov *.m4v *.webm)")
+                        : QStringLiteral("Images (*.png *.jpg *.jpeg *.webp "
+                                         "*.bmp *.tif *.tiff)"));
                 if (!path.isEmpty())
                     layer->setNodeMediaPath(nodeId, path);
             },
