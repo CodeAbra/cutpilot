@@ -9,9 +9,10 @@ namespace cutpilot::core {
 
 // The set of nodes on the canvas and the operations the canvas performs on them:
 // add, hit-test a world point, select, and move. Hit-testing returns the top-most
-// node under a point (last added wins, matching last-touched z-order). The graph
-// holds plain values so the model is trivially testable and carries no rendering
-// or Qt-GUI dependency beyond geometry types.
+// node under a point, where z-order is insertion order: the last-added node wins and
+// selecting or dragging does not raise a node. The graph holds plain values so the
+// model is trivially testable and carries no rendering or Qt-GUI dependency beyond
+// geometry types.
 class NodeGraph {
 public:
     int addNode(const Node &node);

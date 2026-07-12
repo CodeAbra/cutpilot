@@ -30,7 +30,8 @@ const Node *NodeGraph::nodeById(int id) const
 
 int NodeGraph::hitTest(const QPointF &world) const
 {
-    // Iterate back-to-front so the top-most (last added / last touched) node wins.
+    // Iterate back-to-front so the top-most node wins. Z-order is insertion order:
+    // nothing reorders the list on select or drag, so the last-added node is on top.
     for (int i = m_nodes.size() - 1; i >= 0; --i) {
         if (m_nodes[i].containsWorld(world))
             return m_nodes[i].id;
