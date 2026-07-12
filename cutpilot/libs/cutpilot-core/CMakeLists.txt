@@ -1,6 +1,7 @@
 add_library(cutpilot-core STATIC
     src/NodeGraph.cpp
     src/SpatialIndex.cpp
+    src/AlignmentGuides.cpp
     src/command/CommandStack.cpp
     src/command/AddNodeCommand.cpp
     src/command/MoveNodesCommand.cpp

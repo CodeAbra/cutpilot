@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QLineF>
 #include <QPointF>
 #include <QRectF>
 #include <QVector>
@@ -58,8 +59,16 @@ public:
     Mesh buildScreenRect(const QRectF &rect, const QColor &fill, const QColor &outline,
                          qreal outlineWidth) const;
 
+    // Build a set of screen-space lines as thin quads of the given width. Used for the
+    // alignment guides; the lines are in the item's logical pixels, so a guide stays a
+    // constant hairline at any zoom.
+    Mesh buildScreenLines(const QVector<QLineF> &lines, const QColor &color,
+                          qreal width) const;
+
 private:
     static void appendQuad(Mesh &mesh, const QRectF &rect, const QColor &color);
+    static void appendLineQuad(Mesh &mesh, const QPointF &a, const QPointF &b,
+                               qreal width, const QColor &color);
     static void appendTriangle(Mesh &mesh, const QPointF &a, const QPointF &b,
                                const QPointF &c, const QColor &color);
     static void appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,

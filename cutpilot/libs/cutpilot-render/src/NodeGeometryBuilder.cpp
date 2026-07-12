@@ -87,6 +87,20 @@ void NodeGeometryBuilder::appendQuad(Mesh &mesh, const QRectF &rect, const QColo
     appendTriangle(mesh, rect.topLeft(), rect.bottomRight(), rect.bottomLeft(), color);
 }
 
+void NodeGeometryBuilder::appendLineQuad(Mesh &mesh, const QPointF &a, const QPointF &b,
+                                         qreal width, const QColor &color)
+{
+    QPointF direction = b - a;
+    const qreal length = std::hypot(direction.x(), direction.y());
+    if (length <= 1e-6)
+        return;
+    direction /= length;
+    const QPointF normal(-direction.y(), direction.x());
+    const QPointF offset = normal * (width / 2.0);
+    appendTriangle(mesh, a + offset, b + offset, b - offset, color);
+    appendTriangle(mesh, a + offset, b - offset, a - offset, color);
+}
+
 // A filled rounded rect, triangulated as a fan from the rect center out to a ring of
 // boundary points (straight edges plus tessellated corner arcs).
 void NodeGeometryBuilder::appendRoundedRect(Mesh &mesh, const QRectF &rect, qreal radius,
@@ -279,6 +293,17 @@ NodeGeometryBuilder::buildScreenRect(const QRectF &rect, const QColor &fill,
                    outline);
     }
 
+    Q_ASSERT(mesh.vertices.size() <= 0xFFFF);
+    return mesh;
+}
+
+NodeGeometryBuilder::Mesh
+NodeGeometryBuilder::buildScreenLines(const QVector<QLineF> &lines, const QColor &color,
+                                      qreal width) const
+{
+    Mesh mesh;
+    for (const QLineF &line : lines)
+        appendLineQuad(mesh, line.p1(), line.p2(), width, color);
     Q_ASSERT(mesh.vertices.size() <= 0xFFFF);
     return mesh;
 }

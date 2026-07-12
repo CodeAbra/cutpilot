@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QLineF>
 #include <QPointF>
 #include <QQuickItem>
 #include <QSet>
@@ -67,9 +68,14 @@ protected:
 private:
     qreal devicePixelRatio() const;
     QPointF worldFromLocal(const QPointF &localLogical) const;
+    QPointF localFromWorld(const QPointF &world) const;
     QPointF panLogical() const;
 
     core::Node defaultNode(const QPointF &worldCentre) const;
+
+    // Recompute the alignment guides for the current drag and store them as screen-space
+    // lines for the overlay. Clears them when the drag aligns with nothing.
+    void updateDragGuides();
 
     // Rebuild the spatial index from the model. Called after any add, move, delete, or
     // restore so culling and picking stay in step with the model.
@@ -120,6 +126,10 @@ private:
     bool m_marqueeAdditive = false;
     QPointF m_marqueeStartLogical;
     QPointF m_marqueeCurrentLogical;
+
+    // Alignment guides for the active drag, as screen-space lines in logical pixels.
+    bool m_guidesActive = false;
+    QVector<QLineF> m_guideLinesLogical;
 
     bool m_panning = false;
     bool m_spaceHeld = false;

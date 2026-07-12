@@ -1,6 +1,7 @@
 #include "cutpilot/render/NodeLayerItem.h"
 #include "NodeGeometryBuilder.h"
 
+#include "cutpilot/core/AlignmentGuides.h"
 #include "cutpilot/core/command/AddNodeCommand.h"
 #include "cutpilot/core/command/DeleteNodesCommand.h"
 #include "cutpilot/core/command/MoveNodesCommand.h"
@@ -25,6 +26,11 @@ namespace {
 
 // The marquee outline in the item's logical pixels: a constant hairline at any zoom.
 constexpr qreal kMarqueeOutlineWidth = 1.0;
+
+// The alignment-guide hairline width and the pixel radius within which a dragged edge
+// snaps a guide into view, both in the item's logical pixels.
+constexpr qreal kGuideWidth = 1.0;
+constexpr qreal kGuidePixelThreshold = 6.0;
 
 // Copy a built mesh into a geometry node, reusing the existing buffers unless the
 // vertex or index counts changed.
@@ -185,6 +191,49 @@ QPointF NodeLayerItem::worldFromLocal(const QPointF &localLogical) const
     return m_controller->worldFromScreen(localLogical * dpr, dpr);
 }
 
+QPointF NodeLayerItem::localFromWorld(const QPointF &world) const
+{
+    const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
+    return world * zoom + panLogical();
+}
+
+void NodeLayerItem::updateDragGuides()
+{
+    const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
+
+    // The moving reference is the grabbed node for a single drag, or the selection's
+    // bounding box for a multi-node drag.
+    const QSet<int> moving(m_dragIds.cbegin(), m_dragIds.cend());
+    QRectF movingRect;
+    QVector<QRectF> neighbours;
+    for (const core::Node &n : m_graph.nodes()) {
+        if (moving.contains(n.id))
+            movingRect = movingRect.isNull() ? n.worldRect() : movingRect.united(n.worldRect());
+        else
+            neighbours.push_back(n.worldRect());
+    }
+
+    m_guideLinesLogical.clear();
+    if (!movingRect.isNull()) {
+        const qreal worldThreshold = kGuidePixelThreshold / (zoom != 0.0 ? zoom : 1.0);
+        const auto guides = core::computeAlignmentGuides(movingRect, neighbours, worldThreshold);
+        for (const core::AlignmentGuide &g : guides) {
+            if (g.axis == core::GuideAxis::Vertical) {
+                const QPointF a = localFromWorld(QPointF(g.coordinate, g.spanStart));
+                const QPointF b = localFromWorld(QPointF(g.coordinate, g.spanEnd));
+                m_guideLinesLogical.push_back(QLineF(a, b));
+            } else {
+                const QPointF a = localFromWorld(QPointF(g.spanStart, g.coordinate));
+                const QPointF b = localFromWorld(QPointF(g.spanEnd, g.coordinate));
+                m_guideLinesLogical.push_back(QLineF(a, b));
+            }
+        }
+    }
+
+    m_guidesActive = !m_guideLinesLogical.isEmpty();
+    m_overlayDirty = true;
+}
+
 QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
 {
     QSGNode *root = oldNode;
@@ -264,27 +313,37 @@ void NodeLayerItem::rebuildNodes(QSGTransformNode *camera, bool detailed,
 
 void NodeLayerItem::updateOverlay(QSGNode *root, QSGTransformNode *camera)
 {
-    // The marquee is the container root's second child, a sibling of the camera
-    // transform, so its vertices draw in the item's logical pixels.
-    auto *marquee = static_cast<QSGGeometryNode *>(camera->nextSibling());
+    // A single screen-space overlay child sits beside the camera transform, so its
+    // vertices draw in the item's logical pixels. The marquee band and the alignment
+    // guides are mutually exclusive gestures, so one geometry node carries whichever is
+    // active.
+    auto *overlay = static_cast<QSGGeometryNode *>(camera->nextSibling());
+    const bool active = m_marqueeActive || m_guidesActive;
 
-    if (m_marqueeActive) {
-        if (!marquee) {
-            marquee = makeGeometryNode();
-            root->appendChildNode(marquee);
+    if (active) {
+        if (!overlay) {
+            overlay = makeGeometryNode();
+            root->appendChildNode(overlay);
             m_overlayDirty = true;
         }
         if (m_overlayDirty) {
             NodeGeometryBuilder builder;
-            const QRectF rect =
-                QRectF(m_marqueeStartLogical, m_marqueeCurrentLogical).normalized();
-            uploadMesh(marquee,
-                       builder.buildScreenRect(rect, m_theme.selectionFill(),
-                                               m_theme.selection(), kMarqueeOutlineWidth));
+            if (m_marqueeActive) {
+                const QRectF rect =
+                    QRectF(m_marqueeStartLogical, m_marqueeCurrentLogical).normalized();
+                uploadMesh(overlay,
+                           builder.buildScreenRect(rect, m_theme.selectionFill(),
+                                                   m_theme.selection(),
+                                                   kMarqueeOutlineWidth));
+            } else {
+                uploadMesh(overlay, builder.buildScreenLines(m_guideLinesLogical,
+                                                             m_theme.emphasis(),
+                                                             kGuideWidth));
+            }
         }
-    } else if (marquee) {
-        root->removeChildNode(marquee);
-        delete marquee;
+    } else if (overlay) {
+        root->removeChildNode(overlay);
+        delete overlay;
     }
 
     m_overlayDirty = false;
@@ -379,6 +438,7 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
         m_dragLastWorld = world;
         m_graph.moveNodesBy(m_dragIds, delta); // live 1:1 feedback
         syncSpatialIndex();
+        updateDragGuides();
         m_geometryDirty = true;
         update();
         event->accept();
@@ -418,7 +478,12 @@ void NodeLayerItem::mouseReleaseEvent(QMouseEvent *event)
             m_commands.record(std::make_unique<core::MoveNodesCommand>(m_dragIds, net));
         m_dragging = false;
         m_dragIds.clear();
+        // The guides are a drag hint; clear them when the gesture ends.
+        m_guidesActive = false;
+        m_guideLinesLogical.clear();
+        m_overlayDirty = true;
         unsetCursor();
+        update();
         event->accept();
         return;
     }
