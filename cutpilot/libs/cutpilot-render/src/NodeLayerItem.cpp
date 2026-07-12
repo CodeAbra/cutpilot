@@ -273,6 +273,9 @@ void NodeLayerItem::updateDragGuides()
 
 QSGNode *NodeLayerItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
 {
+    // Runs on the render thread during the scene-graph sync, with the GUI thread blocked.
+    // Reading the model and camera here is safe only under that guarantee: all mutation is
+    // GUI-thread. A non-blocking sync or any worker-thread edit would race m_graph/m_controller.
     QSGNode *root = oldNode;
     QSGTransformNode *camera = nullptr;
     if (!root) {
