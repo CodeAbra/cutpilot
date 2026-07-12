@@ -134,6 +134,7 @@ private slots:
     void costGateHoldsItsBranchAndResumes();
     void runCapPausesAndResumesAfterARaise();
     void abortSettlesTheBoard();
+    void abortDuringSubmitNeverAdoptsTheStaleJob();
     void forcedRerunIgnoresCache();
     void missingKeyMidPipelineFailsTheBranch();
     void secondRunIsRefusedWhileActive();
@@ -503,6 +504,75 @@ void PipelineFlowTest::abortSettlesTheBoard()
             || graph.nodeById(first)->runState == core::RunState::Done,
         60000);
     QCOMPARE(submissions.count(), 1);
+}
+
+void PipelineFlowTest::abortDuringSubmitNeverAdoptsTheStaleJob()
+{
+    // The clean-room digest of the edited prompt, taken first and alone: two
+    // coordinators must not share the client at once, since each cancels
+    // submission acknowledgements it does not own.
+    QString cleanDigest;
+    {
+        core::NodeGraph cleanGraph;
+        const int cleanPrompt =
+            addPrompt(cleanGraph, QStringLiteral("the second take"));
+        const int cleanGenerate = addGenerate(cleanGraph);
+        wire(cleanGraph, cleanPrompt, QStringLiteral("text"), cleanGenerate,
+             QStringLiteral("prompt"));
+        ipc::GenerationCoordinator cleanCoordinator(&cleanGraph, &m_client);
+        makeReady(cleanCoordinator);
+        cleanCoordinator.runGraph();
+        QTRY_COMPARE_WITH_TIMEOUT(cleanGraph.nodeById(cleanGenerate)->runState,
+                                  core::RunState::Done, 60000);
+        waitRunFinished(cleanCoordinator, 10000);
+        cleanDigest = cleanGraph.nodeById(cleanGenerate)->resultDigest;
+    }
+    QVERIFY(!cleanDigest.isEmpty());
+
+    core::NodeGraph graph;
+    const int prompt = addPrompt(graph, QStringLiteral("the first take"));
+    const int generate = addGenerate(graph);
+    wire(graph, prompt, QStringLiteral("text"), generate, QStringLiteral("prompt"));
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    makeReady(coordinator);
+    QSignalSpy refusals(&coordinator, &ipc::GenerationCoordinator::runRefused);
+
+    // Abort while the submission is still on the wire, then edit and re-run
+    // before its acknowledgement lands.
+    coordinator.runGraph();
+    QVERIFY(coordinator.runActive());
+    coordinator.abortRun();
+    QVERIFY(!coordinator.runActive());
+    graph.nodeById(prompt)->promptText = QStringLiteral("the second take");
+    coordinator.runGraph();
+
+    // The unsettled submission blocks the new run instead of racing it: the
+    // stale acknowledgement must never be adopted as the new run's job.
+    QCOMPARE(refusals.count(), 1);
+    QVERIFY(refusals.first().first().toString().contains(
+        QStringLiteral("stopping")));
+
+    // The disowned acknowledgement cancels its job and settles the node.
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(generate)->runState,
+                              core::RunState::Idle, 15000);
+
+    // A fresh run now really generates the edited prompt — proven by
+    // matching the clean-room run of an identical graph.
+    coordinator.runGraph();
+    QVERIFY(coordinator.runActive());
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(generate)->runState,
+                              core::RunState::Done, 60000);
+    waitRunFinished(coordinator, 10000);
+    QCOMPARE(graph.nodeById(generate)->resultDigest, cleanDigest);
+
+    // And the cache now holds the edited prompt's result, not the aborted
+    // run's: an unchanged re-run reuses it without a submission.
+    QSignalSpy postSubmissions(&m_client, &ipc::GenerationClient::jobSubmitted);
+    coordinator.runGraph();
+    waitRunFinished(coordinator, 10000);
+    QCOMPARE(postSubmissions.count(), 0);
+    QCOMPARE(graph.nodeById(generate)->statusMessage, QStringLiteral("Reused"));
 }
 
 void PipelineFlowTest::forcedRerunIgnoresCache()

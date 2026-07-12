@@ -142,6 +142,7 @@ private:
     bool applyCachedResult(core::Node *node, const QString &signature);
     void submitNode(core::Node *node, const ModelInfo &model,
                     const QString &signature);
+    void settleDisownedSubmit(int nodeId);
     void failRunNode(int nodeId, const QString &message);
     void finishRunIfSettled();
     void updateGateReadouts();
@@ -163,10 +164,16 @@ private:
     QHash<QString, int> m_nodeByJob;
     QHash<int, QString> m_jobByNode;
 
-    // Nodes whose submission is on the wire but not yet acknowledged. An
-    // acknowledgement nobody awaits — the run was aborted, or the context is
-    // stale — is cancelled instead of adopted, so no job spends unowned.
+    // Nodes whose submission is on the wire but not yet acknowledged. A new
+    // run on such a node is refused until the acknowledgement settles, so an
+    // earlier request's acknowledgement can never be adopted as a later
+    // run's job.
     QSet<int> m_awaitingSubmit;
+
+    // The awaited submissions whose run was aborted. Their acknowledgements
+    // cancel the job and settle the node back to idle instead of adopting
+    // work nobody owns anymore.
+    QSet<int> m_disownedSubmits;
 
     ResultCache m_cache;
     PipelineRun m_run;

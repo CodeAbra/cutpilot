@@ -338,6 +338,20 @@ void GenerationCoordinator::submitNode(core::Node *node, const ModelInfo &model,
     m_client->submitJob(node->id, request);
 }
 
+void GenerationCoordinator::settleDisownedSubmit(int nodeId)
+{
+    core::Node *node = generateNode(nodeId);
+    if (!node)
+        return;
+    if (node->runState != core::RunState::Queued
+        && node->runState != core::RunState::Running)
+        return;
+    node->runState = core::RunState::Idle;
+    node->runProgress = 0.0;
+    node->statusMessage.clear();
+    touchNode(node);
+}
+
 void GenerationCoordinator::failRunNode(int nodeId, const QString &message)
 {
     m_run.pending.remove(nodeId);
@@ -613,13 +627,14 @@ void GenerationCoordinator::abortRun()
 
     // Deactivate first: the cancellations below stream terminal states back,
     // and those must be plain node updates, not run bookkeeping. Submissions
-    // still on the wire stop being awaited, so their acknowledgements are
-    // cancelled on arrival instead of adopted.
+    // still on the wire are disowned, not forgotten: their acknowledgements
+    // cancel the job and settle the node, and until they land a new run on
+    // those nodes is refused rather than raced.
     m_run.active = false;
     const QSet<int> inFlight = m_run.inFlight;
     const QSet<int> parked = m_run.pending + m_run.held;
     m_run = PipelineRun();
-    m_awaitingSubmit.clear();
+    m_disownedSubmits.unite(m_awaitingSubmit);
 
     for (int nodeId : inFlight) {
         const QString jobId = m_jobByNode.value(nodeId);
@@ -726,6 +741,12 @@ void GenerationCoordinator::reconcile()
         else
             ++it;
     }
+    for (auto it = m_disownedSubmits.begin(); it != m_disownedSubmits.end();) {
+        if (!m_graph->nodeById(*it))
+            it = m_disownedSubmits.erase(it);
+        else
+            ++it;
+    }
 
     refreshEstimates();
 
@@ -785,6 +806,11 @@ void GenerationCoordinator::onJobSubmitted(int nodeId, const QString &jobId,
         m_client->cancelJob(jobId);
         return;
     }
+    if (m_disownedSubmits.remove(nodeId)) {
+        m_client->cancelJob(jobId);
+        settleDisownedSubmit(nodeId);
+        return;
+    }
     core::Node *node = generateNode(nodeId);
     if (!node) {
         m_client->cancelJob(jobId);
@@ -800,6 +826,10 @@ void GenerationCoordinator::onSubmitRefused(int nodeId, SubmitRefusal refusal,
 {
     if (!m_awaitingSubmit.remove(nodeId))
         return;
+    if (m_disownedSubmits.remove(nodeId)) {
+        settleDisownedSubmit(nodeId);
+        return;
+    }
     const bool inRun = m_run.active && m_run.inFlight.contains(nodeId);
     if (inRun) {
         m_run.inFlight.remove(nodeId);
