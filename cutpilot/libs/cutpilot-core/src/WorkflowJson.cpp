@@ -232,8 +232,17 @@ bool nodeFromJson(const QJsonObject &json, Node &node)
     node.promptText = json[QLatin1String("promptText")].toString();
     node.modelId = json[QLatin1String("modelId")].toString();
     node.modelLabel = json[QLatin1String("modelLabel")].toString();
-    node.outputWidth = qMax(0, json[QLatin1String("outputWidth")].toInt());
-    node.outputHeight = qMax(0, json[QLatin1String("outputHeight")].toInt());
+    // A stored output size must be one the generation service accepts, so a
+    // loaded node can always run; a half-set pair is no format at all.
+    const int outputWidth = json[QLatin1String("outputWidth")].toInt();
+    const int outputHeight = json[QLatin1String("outputHeight")].toInt();
+    if (outputWidth > 0 && outputHeight > 0) {
+        node.outputWidth = qBound(kOutputSideMin, outputWidth, kOutputSideMax);
+        node.outputHeight = qBound(kOutputSideMin, outputHeight, kOutputSideMax);
+    } else {
+        node.outputWidth = 0;
+        node.outputHeight = 0;
+    }
     node.gateLimitUsd =
         json[QLatin1String("gateLimitUsd")].toDouble(node.gateLimitUsd);
     node.mediaPath = json[QLatin1String("mediaPath")].toString();

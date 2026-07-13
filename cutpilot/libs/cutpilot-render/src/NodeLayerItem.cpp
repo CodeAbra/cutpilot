@@ -575,8 +575,17 @@ void NodeLayerItem::setNodeModel(int nodeId, const QString &modelId,
 
 void NodeLayerItem::setNodeOutputFormat(int nodeId, int width, int height)
 {
+    // Only a full positive pair is a format, stored already inside the
+    // generation service's accepted range; zero for both returns the node to
+    // the model's default, and anything else is refused.
+    if (width > 0 && height > 0) {
+        width = qBound(core::kOutputSideMin, width, core::kOutputSideMax);
+        height = qBound(core::kOutputSideMin, height, core::kOutputSideMax);
+    } else if (width != 0 || height != 0) {
+        return;
+    }
     const core::Node *node = m_graph.nodeById(nodeId);
-    if (!node || node->kind != core::NodeKind::Generate || width < 0 || height < 0
+    if (!node || node->kind != core::NodeKind::Generate
         || (node->outputWidth == width && node->outputHeight == height))
         return;
     m_commands.push(

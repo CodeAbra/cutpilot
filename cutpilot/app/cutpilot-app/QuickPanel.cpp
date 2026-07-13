@@ -34,16 +34,14 @@ QString money(double usd)
     return QStringLiteral("$%1").arg(usd, 0, 'f', 3);
 }
 
-// The service accepts sides between these bounds; the aspect math clamps into
-// the same range so a picked format can never be refused for its size.
-constexpr int kMinSide = 64;
-constexpr int kMaxSide = 2048;
-
+// The aspect math clamps into the range the generation service accepts —
+// the same bound every document seam enforces — so a picked format can
+// never be refused for its size.
 int evenClamped(double side)
 {
     int value = int(side + 0.5);
     value += value & 1;
-    return qBound(kMinSide, value, kMaxSide);
+    return qBound(core::kOutputSideMin, value, core::kOutputSideMax);
 }
 
 // The node's effective output size: its own when set, the request default
@@ -77,7 +75,7 @@ QToolButton *makeChip(const QString &text, const QString &tip, QWidget *parent)
 
 QSize quickOutputSize(int shortSide, int aspectWidth, int aspectHeight)
 {
-    shortSide = qBound(kMinSide, shortSide, kMaxSide);
+    shortSide = qBound(core::kOutputSideMin, shortSide, core::kOutputSideMax);
     aspectWidth = qMax(1, aspectWidth);
     aspectHeight = qMax(1, aspectHeight);
     const double ratio = double(aspectWidth) / double(aspectHeight);

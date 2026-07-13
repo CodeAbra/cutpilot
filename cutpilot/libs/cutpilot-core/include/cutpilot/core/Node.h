@@ -113,6 +113,11 @@ enum class RunState {
     Held
 };
 
+// The generation service accepts output sides in this range, in pixels. Every
+// seam that stores a requested output size holds both sides inside it.
+inline constexpr int kOutputSideMin = 64;
+inline constexpr int kOutputSideMax = 2048;
+
 // A node on the canvas, expressed entirely in world coordinates. The body is the
 // content; the header is a slim strip carrying the title and model name. The
 // renderer draws this; the node never becomes a per-instance widget.
@@ -136,7 +141,10 @@ struct Node {
 
     // The requested output size for a generation, in pixels. Zero means the
     // model's default. A document parameter edited through an undoable
-    // command; it keys the result cache, so changing it re-generates.
+    // command; it keys the result cache, so changing it re-generates. Both
+    // sides stay inside [kOutputSideMin, kOutputSideMax] — every seam that
+    // writes them enforces the bound, so a stored format can never be
+    // refused by the generation service for its size.
     int outputWidth = 0;
     int outputHeight = 0;
 

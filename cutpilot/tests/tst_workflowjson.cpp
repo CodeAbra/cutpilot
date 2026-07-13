@@ -184,6 +184,55 @@ private slots:
         QCOMPARE(occupied.nodes().size(), 1);
     }
 
+    void outputSizesNormalizeToTheServiceContractOnLoad()
+    {
+        // A foreign document may carry any size; the loader holds both sides
+        // inside the generation service's accepted range so a loaded node can
+        // always run.
+        QJsonObject json = core::workflowToJson(fullBoard(), QString());
+        QJsonArray nodes = json[QLatin1String("nodes")].toArray();
+        int generateIndex = -1;
+        for (int i = 0; i < nodes.size(); ++i) {
+            if (nodes[i].toObject()[QLatin1String("outputWidth")].toInt() > 0)
+                generateIndex = i;
+        }
+        QVERIFY(generateIndex != -1);
+
+        const auto loadWithSize = [&](QJsonValue width, QJsonValue height,
+                                      core::NodeGraph &restored) {
+            QJsonObject node = nodes[generateIndex].toObject();
+            node[QLatin1String("outputWidth")] = width;
+            node[QLatin1String("outputHeight")] = height;
+            QJsonArray patched = nodes;
+            patched.replace(generateIndex, node);
+            QJsonObject document = json;
+            document[QLatin1String("nodes")] = patched;
+            QVERIFY(core::workflowFromJson(document, restored, nullptr));
+        };
+
+        const auto restoredSize = [&](const core::NodeGraph &restored) {
+            for (const core::Node &node : restored.nodes()) {
+                if (node.kind == core::NodeKind::Generate)
+                    return QSize(node.outputWidth, node.outputHeight);
+            }
+            return QSize(-1, -1);
+        };
+
+        core::NodeGraph oversized;
+        loadWithSize(9000, 9000, oversized);
+        QCOMPARE(restoredSize(oversized), QSize(2048, 2048));
+
+        core::NodeGraph undersized;
+        loadWithSize(16, 16, undersized);
+        QCOMPARE(restoredSize(undersized), QSize(64, 64));
+
+        // A half-set pair is no format at all: the node returns to the
+        // model-default marker instead of carrying one dangling side.
+        core::NodeGraph halfSet;
+        loadWithSize(1080, 0, halfSet);
+        QCOMPARE(restoredSize(halfSet), QSize(0, 0));
+    }
+
     void catalogTitlesAreUniqueAndPlaceable()
     {
         QStringList titles;
