@@ -36,7 +36,8 @@ QVector<CompositeInput> wiredInputs(const NodeGraph &graph, const Node &node)
 // Post-order walk collecting sources and passes, dependencies first. Returns
 // false when a cycle passes through the node.
 bool collect(const NodeGraph &graph, int nodeId, QSet<int> &visiting,
-             QSet<int> &done, CompositePlan &plan)
+             QSet<int> &done, CompositePlan &plan,
+             QHash<int, QString> *signatureMemo)
 {
     if (done.contains(nodeId))
         return true;
@@ -59,10 +60,19 @@ bool collect(const NodeGraph &graph, int nodeId, QSet<int> &visiting,
     pass.kind = node->kind;
     pass.params = node->comp;
     pass.inputs = wiredInputs(graph, *node);
-    pass.signature = compositeSignature(graph, nodeId);
+    if (signatureMemo) {
+        auto memo = signatureMemo->constFind(nodeId);
+        if (memo == signatureMemo->constEnd())
+            memo = signatureMemo->insert(nodeId,
+                                         compositeSignature(graph, nodeId));
+        pass.signature = memo.value();
+    } else {
+        pass.signature = compositeSignature(graph, nodeId);
+    }
     for (const CompositeInput &input : pass.inputs) {
         if (input.nodeId != -1
-            && !collect(graph, input.nodeId, visiting, done, plan))
+            && !collect(graph, input.nodeId, visiting, done, plan,
+                        signatureMemo))
             return false;
     }
     visiting.remove(nodeId);
@@ -148,7 +158,8 @@ QByteArray canonicalForm(const NodeGraph &graph, int nodeId, QSet<int> &visiting
 
 } // namespace
 
-CompositePlan buildCompositePlan(const NodeGraph &graph, int targetNodeId)
+CompositePlan buildCompositePlan(const NodeGraph &graph, int targetNodeId,
+                                 QHash<int, QString> *signatureMemo)
 {
     CompositePlan plan;
     plan.targetNodeId = targetNodeId;
@@ -159,7 +170,7 @@ CompositePlan buildCompositePlan(const NodeGraph &graph, int targetNodeId)
 
     QSet<int> visiting;
     QSet<int> done;
-    if (!collect(graph, targetNodeId, visiting, done, plan)) {
+    if (!collect(graph, targetNodeId, visiting, done, plan, signatureMemo)) {
         plan.sourceNodeIds.clear();
         plan.passes.clear();
         return plan;

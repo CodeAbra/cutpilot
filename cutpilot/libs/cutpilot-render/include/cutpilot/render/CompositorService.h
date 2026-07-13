@@ -1,24 +1,30 @@
 #pragma once
 
 #include <QHash>
+#include <QImage>
 #include <QObject>
 #include <QString>
 
 #include <memory>
 
 QT_BEGIN_NAMESPACE
+class QThread;
 class QTimer;
 QT_END_NAMESPACE
 
+namespace cutpilot::core {
+struct CompositePlan;
+}
+
 namespace cutpilot::render {
 
-class CompositorEngine;
 class NodeLayerItem;
 
 // Keeps card pixels in step with the graph, off the scrub path. Still files
 // decode off the GUI thread whenever their path changes — including through
 // undo — and each compositing node's thumbnail renders through a windowless
-// compositor engine on a debounce, landing as ordinary card media. Without a
+// compositor engine on its own render thread, landing back here as ordinary
+// card media, so a heavy composite never blocks the GUI thread. Without a
 // GPU device the thumbnails stay parameter summaries and stills still load.
 //
 // Video nodes get a playback each: the media stack decodes on its own
@@ -57,20 +63,30 @@ signals:
 
 private:
     struct VideoPlayback;
+    struct RenderWorker;
 
     void refreshNow();
     void reconcileStills();
     void reconcileVideos();
     void renderThumbnails();
+    void ensureRenderThread();
+    void releaseRenderedNode(int nodeId);
+    void adoptThumbnail(int nodeId, const QString &key, const QImage &image);
 
     NodeLayerItem *m_layer = nullptr;
-    std::unique_ptr<CompositorEngine> m_engine;
-    bool m_engineTried = false;
     QTimer *m_timer = nullptr;
 
+    // The thumbnail render thread: a host object living on it receives the
+    // queued render jobs, and the worker state — the GPU engine included —
+    // is touched only from that thread until the blocking teardown.
+    QThread *m_renderThread = nullptr;
+    QObject *m_renderHost = nullptr;
+    std::shared_ptr<RenderWorker> m_renderWorker;
+    bool m_deviceFailed = false;
+
     // What is already on the cards: the decoded path per still node and the
-    // rendered plan key per compositing node, so an unchanged node is never
-    // re-decoded or re-read-back.
+    // last requested plan key per compositing node, so an unchanged node is
+    // never re-decoded or re-rendered and a stale delivery is never adopted.
     QHash<int, QString> m_decodedPaths;
     QHash<int, QString> m_thumbnailKeys;
     QHash<int, VideoPlayback *> m_videos;

@@ -9,6 +9,7 @@
 #include <QImage>
 #include <QImageReader>
 #include <QMediaPlayer>
+#include <QThread>
 #include <QTimer>
 #include <QVideoFrame>
 #include <QVideoSink>
@@ -35,7 +36,33 @@ QImage decodeBounded(const QString &path)
     return reader.read();
 }
 
+// One source's pixels travelling to the render thread; the QImage is
+// implicitly shared, so the copy is shallow until the worker scales it.
+struct SourceUpload {
+    int nodeId = -1;
+    QImage image;
+    int version = -1;
+};
+
 } // namespace
+
+// The render thread's whole state. Owned by the service but touched only on
+// the render thread between the first job and the blocking teardown.
+struct CompositorService::RenderWorker {
+    std::unique_ptr<CompositorEngine> engine;
+    bool engineTried = false;
+
+    CompositorEngine *engineOrNull()
+    {
+        if (!engineTried) {
+            engineTried = true;
+            auto candidate = std::make_unique<CompositorEngine>();
+            if (candidate->adoptHeadlessDevice())
+                engine = std::move(candidate);
+        }
+        return engine.get();
+    }
+};
 
 // One video node's playback: the media stack decodes on its own threads and
 // hands frames to the sink; only the proxy-scale conversion of the delivered
@@ -60,7 +87,30 @@ CompositorService::CompositorService(QObject *parent)
 
 CompositorService::~CompositorService()
 {
+    if (m_renderThread) {
+        // The blocking call drains every queued render job first, then frees
+        // the GPU engine on the thread that used it; only then may the
+        // thread stop and the host die.
+        QMetaObject::invokeMethod(
+            m_renderHost, [worker = m_renderWorker] { worker->engine.reset(); },
+            Qt::BlockingQueuedConnection);
+        m_renderThread->quit();
+        m_renderThread->wait();
+        delete m_renderHost;
+    }
     qDeleteAll(m_videos);
+}
+
+void CompositorService::ensureRenderThread()
+{
+    if (m_renderThread)
+        return;
+    m_renderThread = new QThread(this);
+    m_renderThread->setObjectName(QStringLiteral("cutpilot-thumbnails"));
+    m_renderHost = new QObject;
+    m_renderHost->moveToThread(m_renderThread);
+    m_renderWorker = std::make_shared<RenderWorker>();
+    m_renderThread->start();
 }
 
 void CompositorService::setLayer(NodeLayerItem *layer)
@@ -92,8 +142,7 @@ void CompositorService::refreshNow()
     const auto prune = [this](QHash<int, QString> &tracked) {
         for (auto it = tracked.begin(); it != tracked.end();) {
             if (!m_layer->graph().nodeById(it.key())) {
-                if (m_engine)
-                    m_engine->releaseNode(it.key());
+                releaseRenderedNode(it.key());
                 it = tracked.erase(it);
             } else {
                 ++it;
@@ -104,8 +153,7 @@ void CompositorService::refreshNow()
     prune(m_thumbnailKeys);
     for (auto it = m_videos.begin(); it != m_videos.end();) {
         if (!m_layer->graph().nodeById(it.key())) {
-            if (m_engine)
-                m_engine->releaseNode(it.key());
+            releaseRenderedNode(it.key());
             // The frame lambda captures this playback raw; the plain delete
             // is safe only while the sink delivers on this same thread, so
             // destruction disconnects before any next delivery.
@@ -303,23 +351,19 @@ void CompositorService::renderThumbnails()
         if (core::isCompositeKind(node.kind))
             compositeIds.push_back(node.id);
     }
-    if (compositeIds.isEmpty())
+    if (compositeIds.isEmpty() || m_deviceFailed)
         return;
 
-    if (!m_engine && !m_engineTried) {
-        m_engineTried = true;
-        auto engine = std::make_unique<CompositorEngine>();
-        if (engine->adoptHeadlessDevice())
-            m_engine = std::move(engine);
-        else
-            qWarning("Compositor thumbnails disabled: no windowless GPU device");
-    }
-    if (!m_engine)
-        return;
+    ensureRenderThread();
+
+    // Signatures shared across this pass's plan builds: on a deep chain each
+    // downstream plan re-visits the whole upstream, and recomputing every
+    // signature per plan is what used to stall this thread.
+    QHash<int, QString> signatureMemo;
 
     for (int nodeId : compositeIds) {
         const core::CompositePlan plan =
-            core::buildCompositePlan(m_layer->graph(), nodeId);
+            core::buildCompositePlan(m_layer->graph(), nodeId, &signatureMemo);
         if (!plan.valid || plan.passes.isEmpty()) {
             m_thumbnailKeys.remove(nodeId);
             m_layer->clearNodeMedia(nodeId);
@@ -335,28 +379,91 @@ void CompositorService::renderThumbnails()
         }
         if (m_thumbnailKeys.value(nodeId) == key)
             continue;
+        m_thumbnailKeys.insert(nodeId, key);
 
+        QVector<SourceUpload> sources;
+        sources.reserve(plan.sourceNodeIds.size());
         for (int sourceId : plan.sourceNodeIds) {
-            QImage image = m_layer->nodeMediaImage(sourceId);
+            const QImage image = m_layer->nodeMediaImage(sourceId);
             if (image.isNull())
                 continue;
-            if (image.width() > kThumbnailSourceDim
-                || image.height() > kThumbnailSourceDim) {
-                image = image.scaled(kThumbnailSourceDim, kThumbnailSourceDim,
-                                     Qt::KeepAspectRatio,
-                                     Qt::SmoothTransformation);
-            }
-            m_engine->setSource(sourceId, image,
-                                m_layer->nodeMediaVersion(sourceId));
+            sources.push_back(
+                { sourceId, image, m_layer->nodeMediaVersion(sourceId) });
         }
 
-        const QImage thumbnail = m_engine->evaluateToImage(plan);
-        m_thumbnailKeys.insert(nodeId, key);
-        if (!thumbnail.isNull())
-            m_layer->setNodeMedia(nodeId, thumbnail);
-        else
-            m_layer->clearNodeMedia(nodeId);
+        // Scale, upload, render, and read back on the render thread; the
+        // finished thumbnail queues back here. Delivery is guarded by the
+        // requested key, so a render overtaken by a newer request for the
+        // same node is dropped on arrival.
+        QMetaObject::invokeMethod(
+            m_renderHost,
+            [this, worker = m_renderWorker, nodeId, key, plan,
+             sources = std::move(sources)] {
+                CompositorEngine *engine = worker->engineOrNull();
+                if (!engine) {
+                    QMetaObject::invokeMethod(
+                        this,
+                        [this] {
+                            if (!m_deviceFailed) {
+                                m_deviceFailed = true;
+                                qWarning("Compositor thumbnails disabled: no "
+                                         "windowless GPU device");
+                            }
+                        },
+                        Qt::QueuedConnection);
+                    return;
+                }
+                for (const SourceUpload &source : sources) {
+                    if (engine->sourceVersion(source.nodeId) == source.version)
+                        continue;
+                    QImage image = source.image;
+                    if (image.width() > kThumbnailSourceDim
+                        || image.height() > kThumbnailSourceDim) {
+                        image = image.scaled(kThumbnailSourceDim,
+                                             kThumbnailSourceDim,
+                                             Qt::KeepAspectRatio,
+                                             Qt::SmoothTransformation);
+                    }
+                    engine->setSource(source.nodeId, image, source.version);
+                }
+                const QImage thumbnail = engine->evaluateToImage(plan);
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, nodeId, key, thumbnail] {
+                        adoptThumbnail(nodeId, key, thumbnail);
+                    },
+                    Qt::QueuedConnection);
+            },
+            Qt::QueuedConnection);
     }
+}
+
+void CompositorService::adoptThumbnail(int nodeId, const QString &key,
+                                       const QImage &image)
+{
+    if (!m_layer || !m_layer->graph().nodeById(nodeId))
+        return;
+    // Only the newest request for the node may land; anything else is a
+    // stale render whose replacement is already queued behind it.
+    if (m_thumbnailKeys.value(nodeId) != key)
+        return;
+    if (!image.isNull())
+        m_layer->setNodeMedia(nodeId, image);
+    else
+        m_layer->clearNodeMedia(nodeId);
+}
+
+void CompositorService::releaseRenderedNode(int nodeId)
+{
+    if (!m_renderThread)
+        return;
+    QMetaObject::invokeMethod(
+        m_renderHost,
+        [worker = m_renderWorker, nodeId] {
+            if (worker->engine)
+                worker->engine->releaseNode(nodeId);
+        },
+        Qt::QueuedConnection);
 }
 
 } // namespace cutpilot::render

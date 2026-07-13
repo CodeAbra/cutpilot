@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reuse behaves exactly as before. A cached digest is also no longer trusted
   when it was computed inside the freshly-written window of a file whose
   clocks later settled — the next run re-hashes once and trusts from there.
+- Compositing-node thumbnails render on their own GPU thread and land on the
+  cards through the event loop, so a board full of heavy composites no longer
+  freezes the interface on every edit's refresh tick. Building the refresh
+  pass itself also stopped recomputing every upstream signature once per
+  downstream node, which alone stalled deep chains for noticeable fractions
+  of a second.
 
 ### Changed
 - Quick Mode adoption resolves by the recorded node identity instead of the

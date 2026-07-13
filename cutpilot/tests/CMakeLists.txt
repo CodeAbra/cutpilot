@@ -84,6 +84,13 @@ qt_add_executable(tst_compositor tst_compositor.cpp)
 target_link_libraries(tst_compositor PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.compositor COMMAND tst_compositor)
 
+# The thumbnail service over a live compositing chain: card pixels arrive
+# through the event loop without blocking the GUI thread, and follow source
+# changes. Skips without a headless GPU device.
+qt_add_executable(tst_compositorservice tst_compositorservice.cpp)
+target_link_libraries(tst_compositorservice PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.compositorservice COMMAND tst_compositorservice)
+
 qt_add_executable(tst_previewwiring tst_previewwiring.cpp)
 target_link_libraries(tst_previewwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.previewwiring COMMAND tst_previewwiring)

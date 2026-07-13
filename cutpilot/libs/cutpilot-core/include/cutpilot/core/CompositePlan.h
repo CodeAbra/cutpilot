@@ -2,6 +2,7 @@
 
 #include "cutpilot/core/NodeGraph.h"
 
+#include <QHash>
 #include <QString>
 #include <QVector>
 
@@ -44,7 +45,12 @@ struct CompositePlan {
     QVector<CompositePass> passes;
 };
 
-CompositePlan buildCompositePlan(const NodeGraph &graph, int targetNodeId);
+// signatureMemo, when given, caches each node's composite signature across
+// calls that share it — one refresh pass building plans for many targets of
+// one graph computes every signature once instead of once per plan. The memo
+// must not outlive the graph state it was filled against.
+CompositePlan buildCompositePlan(const NodeGraph &graph, int targetNodeId,
+                                 QHash<int, QString> *signatureMemo = nullptr);
 
 // A stable signature of everything that shapes the node's composited pixels:
 // the operation, its parameters, the wiring, and each source's identity —
