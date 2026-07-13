@@ -9,6 +9,7 @@
 #include <QToolButton>
 
 #include "QuickPanel.h"
+#include "cutpilot/core/NodeCatalog.h"
 #include "cutpilot/core/NodeGraph.h"
 #include "cutpilot/ipc/GenerationClient.h"
 #include "cutpilot/ipc/GenerationCoordinator.h"
@@ -32,7 +33,9 @@ private slots:
     void cleanupTestCase();
 
     void outputSizeMathIsExact();
+    void outputFormatSetterHoldsTheServiceBounds();
     void openMaterializesOneRealGenerateNode();
+    void adoptionPrefersTheOldestQuickNode();
     void editsLandOnTheNodeThroughTheUndoablePath();
     void runProducesASizedResultAndTheCacheStaysHonest();
     void missingVendorKeySurfacesTheAddKeyAffordance();
@@ -115,6 +118,34 @@ void QuickModeTest::outputSizeMathIsExact()
     QCOMPARE(quickOutputSize(8, 1, 1), QSize(64, 64));
 }
 
+void QuickModeTest::outputFormatSetterHoldsTheServiceBounds()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+    rig.panel.openAt(QPointF(0.0, 0.0));
+    const int nodeId = rig.panel.nodeId();
+
+    // Sizes land through the undoable setter already inside the generation
+    // service's accepted range, however far outside a caller reaches.
+    rig.layer.setNodeOutputFormat(nodeId, 9000, 9000);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputWidth, 2048);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputHeight, 2048);
+
+    rig.layer.setNodeOutputFormat(nodeId, 16, 16);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputWidth, 64);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputHeight, 64);
+
+    // A half-set pair is not a format; the node keeps what it had.
+    rig.layer.setNodeOutputFormat(nodeId, 1080, 0);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputWidth, 64);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputHeight, 64);
+
+    // Zero for both still means the model's own default.
+    rig.layer.setNodeOutputFormat(nodeId, 0, 0);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputWidth, 0);
+    QCOMPARE(rig.layer.graph().nodeById(nodeId)->outputHeight, 0);
+}
+
 void QuickModeTest::openMaterializesOneRealGenerateNode()
 {
     Rig rig(&m_client);
@@ -148,6 +179,33 @@ void QuickModeTest::openMaterializesOneRealGenerateNode()
     QCOMPARE(rig.panel.nodeId(), -1);
     QCOMPARE(dismissedSpy.count(), 1);
     QVERIFY(!rig.panel.isVisible());
+}
+
+void QuickModeTest::adoptionPrefersTheOldestQuickNode()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    // Duplicates can reach the board — a placed template can carry a saved
+    // quick node — so adoption must stay with the oldest match instead of
+    // jumping to whichever duplicate arrived last.
+    core::Node prototype =
+        core::catalogPrototype(QStringLiteral("Generate Image"));
+    prototype.title = QStringLiteral("Quick Generate");
+    const int oldest = rig.layer.placePrototypeAt(prototype, QPointF(0.0, 0.0));
+    rig.layer.placePrototypeAt(prototype, QPointF(500.0, 0.0));
+
+    rig.panel.openAt(QPointF(250.0, 250.0));
+    QCOMPARE(rig.panel.nodeId(), oldest);
+    QCOMPARE(rig.layer.graph().nodes().size(), 2);
+
+    // Re-opening after a dismissal lands on the same node again, even with
+    // yet another duplicate in between.
+    rig.panel.dismiss();
+    rig.layer.placePrototypeAt(prototype, QPointF(0.0, 500.0));
+    rig.panel.openAt(QPointF(250.0, 250.0));
+    QCOMPARE(rig.panel.nodeId(), oldest);
+    QCOMPARE(rig.layer.graph().nodes().size(), 3);
 }
 
 void QuickModeTest::editsLandOnTheNodeThroughTheUndoablePath()
@@ -259,6 +317,10 @@ void QuickModeTest::runProducesASizedResultAndTheCacheStaysHonest()
              QStringLiteral("Reused"));
     QCOMPARE(submissionSpy.count(), 1);
     QVERIFY(status->text().contains(QStringLiteral("Reused")));
+    // The cache hit re-delivers the media, so a reused result still reaches
+    // the card and the surface — awaited here so the decode never dangles
+    // into the next run's assertions.
+    QTRY_VERIFY_WITH_TIMEOUT(mediaSpy.count() >= 2, 10000);
 
     // A new format is a new result: the cache must not serve the old size.
     rig.panel.applyTier(768);

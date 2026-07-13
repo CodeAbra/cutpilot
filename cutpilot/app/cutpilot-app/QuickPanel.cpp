@@ -335,11 +335,15 @@ void QuickPanel::openAt(const QPointF &worldCentre)
 {
     if (m_nodeId == -1 || !m_layer->graph().nodeById(m_nodeId)) {
         // Adopt the board's live quick node before making another, so the
-        // surface never leaves duplicates behind.
+        // surface never leaves duplicates behind. The oldest match wins:
+        // duplicates can arrive (a placed template may carry a saved quick
+        // node), and adoption must not jump to whichever came last.
         m_nodeId = -1;
         for (const core::Node &node : m_layer->graph().nodes()) {
-            if (node.kind == core::NodeKind::Generate && node.title == kQuickTitle)
+            if (node.kind == core::NodeKind::Generate && node.title == kQuickTitle) {
                 m_nodeId = node.id;
+                break;
+            }
         }
         if (m_nodeId == -1) {
             core::Node prototype =
