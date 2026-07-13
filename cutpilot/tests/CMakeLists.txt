@@ -200,3 +200,15 @@ target_include_directories(tst_compositeinspector PRIVATE
 target_link_libraries(tst_compositeinspector PRIVATE Qt6::Test Qt6::Widgets
     cutpilot-render)
 add_test(NAME app.compositeinspector COMMAND tst_compositeinspector)
+
+# The quick surface over the real stack: a live sidecar, the real coordinator
+# and cache, a real layer — one prompt materializes a real generate node,
+# runs it to a sized result, honors the cache, surfaces the add-a-key path,
+# and leaves everything on the canvas when dismissed.
+qt_add_executable(tst_quickmode tst_quickmode.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/QuickPanel.cpp)
+target_include_directories(tst_quickmode PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_quickmode PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-render cutpilot-ipc)
+add_test(NAME app.quickmode COMMAND tst_quickmode)
