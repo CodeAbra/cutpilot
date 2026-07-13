@@ -49,4 +49,9 @@ struct GraphTimelineResult {
 GraphTimelineResult timelineFromGraph(const NodeGraph &graph,
                                       const GraphTimelineOptions &options);
 
+// The compositing nodes that are shots — they feed no downstream media
+// producer — but hold no file of their own. An export renders each to disk
+// and passes the files through renderedMedia so they land on the timeline.
+QVector<int> compositeTerminals(const NodeGraph &graph);
+
 } // namespace cutpilot::core::timeline

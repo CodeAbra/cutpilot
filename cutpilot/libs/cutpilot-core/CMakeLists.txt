@@ -20,6 +20,7 @@ add_library(cutpilot-core STATIC
     src/CompositeNodes.cpp
     src/CompositePlan.cpp
     src/PipelineOrder.cpp
+    src/ComfyImport.cpp
     src/timeline/Timeline.cpp
     src/timeline/EdlWriter.cpp
     src/timeline/GraphTimeline.cpp

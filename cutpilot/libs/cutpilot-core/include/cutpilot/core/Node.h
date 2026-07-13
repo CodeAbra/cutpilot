@@ -140,6 +140,12 @@ struct Node {
     // undoable command, unlike the transient resultPath a run writes.
     QString mediaPath;
 
+    // A foreign node preserved through workflow import: the external
+    // system's type name, and its original payload re-emitted unchanged on
+    // export so a round trip loses nothing.
+    QString externalType;
+    QString externalData;
+
     // The local compositing parameters. Scrubbing writes them directly for
     // live feedback and records one coalesced command on release, mirroring
     // how a drag moves nodes.

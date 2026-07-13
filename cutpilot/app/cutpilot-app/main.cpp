@@ -1,7 +1,9 @@
 #include "CompositeInspector.h"
+#include "ExportController.h"
 
 #include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/NodeGraph.h"
+#include "cutpilot/ipc/ConvertClient.h"
 #include "cutpilot/ipc/GenerationClient.h"
 #include "cutpilot/ipc/GenerationCoordinator.h"
 #include "cutpilot/ipc/SidecarHost.h"
@@ -14,6 +16,7 @@
 #include "cutpilot/secrets/KeychainStore.h"
 #include "cutpilot/theme/ThemeTable.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCursor>
@@ -27,6 +30,7 @@
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -47,6 +51,7 @@
 #include <vector>
 
 using cutpilot::app::CompositeInspector;
+using cutpilot::ipc::ConvertClient;
 using cutpilot::ipc::GenerationClient;
 using cutpilot::ipc::GenerationCoordinator;
 using cutpilot::ipc::SidecarHost;
@@ -922,6 +927,9 @@ int main(int argc, char *argv[])
     // parented into its widget tree, which hold pointers to them.
     SidecarHost host;
     GenerationClient client;
+    SidecarHost convertHost{ QStringLiteral("sidecars/convert"),
+                             QStringLiteral("convert") };
+    ConvertClient convertClient;
 
     QMainWindow window;
     window.setWindowTitle(QStringLiteral("CutPilot"));
@@ -942,6 +950,7 @@ int main(int argc, char *argv[])
     GenerationChrome *chrome = nullptr;
     PreviewController *previews = nullptr;
     PreviewPanel *previewPanel = nullptr;
+    ExportController *exporter = nullptr;
     if (layer) {
         coordinator = new GenerationCoordinator(&layer->graph(), &client, view);
         previews = new PreviewController(view);
@@ -1066,6 +1075,53 @@ int main(int argc, char *argv[])
                              panel->adjustSize();
                          });
 
+        // The way out: the export bundle, the project-model landing, the
+        // ComfyUI import, and the Resolve hand-off, reached through the
+        // File menu and reporting on the same status strip.
+        exporter = new ExportController(layer, &convertClient, media, view);
+        QObject::connect(exporter, &ExportController::statusChanged, panel,
+                         [panel](const QString &message) {
+                             panel->status->setText(message);
+                             panel->adjustSize();
+                         });
+
+        QMenu *fileMenu =
+            window.menuBar()->addMenu(QStringLiteral("File"));
+        QObject::connect(
+            fileMenu->addAction(QStringLiteral("Export Timeline…")),
+            &QAction::triggered, exporter,
+            [exporter, viewPtr = view] {
+                exporter->exportTimelineInteractive(viewPtr);
+            });
+        QObject::connect(
+            fileMenu->addAction(QStringLiteral("Add Results to Timeline")),
+            &QAction::triggered, exporter,
+            [exporter] { exporter->addResultsToTimeline(); });
+        QObject::connect(
+            fileMenu->addAction(
+                QStringLiteral("Import ComfyUI Workflow…")),
+            &QAction::triggered, exporter,
+            [exporter, viewPtr = view] {
+                exporter->importComfyInteractive(viewPtr);
+            });
+        QObject::connect(
+            fileMenu->addAction(QStringLiteral("Send to DaVinci Resolve")),
+            &QAction::triggered, exporter,
+            [exporter] { exporter->sendToResolve(); });
+
+        QObject::connect(&convertHost, &SidecarHost::ready, &convertClient,
+                         [clientPtr = &convertClient](quint16 port,
+                                                      const QByteArray &token) {
+                             clientPtr->setEndpoint(port, token);
+                         });
+        QObject::connect(&convertHost, &SidecarHost::failed, view,
+                         [panel](const QString &reason) {
+                             qWarning("%s", qPrintable(reason));
+                             panel->status->setText(reason);
+                             panel->adjustSize();
+                         });
+        convertHost.start();
+
         // On the seeded compositing board, open the preview ready to compare:
         // the final blend in A, the raw backdrop in B, wipe engaged.
         if (qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0) {
@@ -1106,6 +1162,12 @@ int main(int argc, char *argv[])
         coordinator ? qMax(0, qEnvironmentVariableIntValue("CUTPILOT_AUTORUN")) : 0;
     const QString shotPath = qEnvironmentVariable("CUTPILOT_SCREENSHOT");
 
+    // CUTPILOT_EXPORT_DIR=<dir> exports the board there once the autorun
+    // passes settle; with CUTPILOT_SCREENSHOT the capture waits for the
+    // export to finish so the status strip shows the export summary.
+    const QString exportDir =
+        exporter ? qEnvironmentVariable("CUTPILOT_EXPORT_DIR") : QString();
+
     auto passesLeft = std::make_shared<int>(autorunPasses);
     if (autorunPasses > 0) {
         QObject::connect(
@@ -1125,7 +1187,33 @@ int main(int argc, char *argv[])
             });
     }
 
-    if (!shotPath.isEmpty() && autorunPasses > 0) {
+    if (!exportDir.isEmpty() && autorunPasses > 0) {
+        auto exportStarted = std::make_shared<bool>(false);
+        QObject::connect(
+            coordinator, &GenerationCoordinator::runSummaryChanged, exporter,
+            [exporter, exportDir, exportStarted,
+             passesLeft](const cutpilot::ipc::RunSummary &summary) {
+                if (*exportStarted || summary.active || summary.total == 0
+                    || *passesLeft > 0)
+                    return;
+                *exportStarted = true;
+                QTimer::singleShot(400, exporter, [exporter, exportDir] {
+                    exporter->exportTimelineTo(exportDir,
+                                               QStringLiteral("cut"));
+                });
+            });
+        QObject::connect(
+            exporter, &ExportController::exportFinished, &window,
+            [&window, shotPath, statsActive](bool, const QString &) {
+                if (shotPath.isEmpty())
+                    return;
+                QTimer::singleShot(700, &window, [&window, shotPath, statsActive] {
+                    window.grab().save(shotPath);
+                    if (!statsActive)
+                        QCoreApplication::quit();
+                });
+            });
+    } else if (!shotPath.isEmpty() && autorunPasses > 0) {
         auto captured = std::make_shared<bool>(false);
         QObject::connect(
             coordinator, &GenerationCoordinator::runSummaryChanged, &window,

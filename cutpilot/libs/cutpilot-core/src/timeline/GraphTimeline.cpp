@@ -1,5 +1,7 @@
 #include "cutpilot/core/timeline/GraphTimeline.h"
 
+#include "cutpilot/core/CompositeNodes.h"
+
 #include <QFileInfo>
 #include <QImageReader>
 #include <QSet>
@@ -12,29 +14,7 @@ namespace {
 
 bool producesMediaFromInputs(NodeKind kind)
 {
-    switch (kind) {
-    case NodeKind::Generate:
-    case NodeKind::Blend:
-    case NodeKind::Mask:
-    case NodeKind::Key:
-    case NodeKind::Transform:
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool isCompositeKind(NodeKind kind)
-{
-    switch (kind) {
-    case NodeKind::Blend:
-    case NodeKind::Mask:
-    case NodeKind::Key:
-    case NodeKind::Transform:
-        return true;
-    default:
-        return false;
-    }
+    return kind == NodeKind::Generate || isCompositeKind(kind);
 }
 
 struct ShotCandidate {
@@ -45,6 +25,17 @@ struct ShotCandidate {
     int width = 0;
     int height = 0;
 };
+
+QSet<int> ingredientNodes(const NodeGraph &graph)
+{
+    QSet<int> ingredients;
+    for (const Connection &connection : graph.connections()) {
+        const Node *consumer = graph.nodeById(connection.toNodeId);
+        if (consumer && producesMediaFromInputs(consumer->kind))
+            ingredients.insert(connection.fromNodeId);
+    }
+    return ingredients;
+}
 
 } // namespace
 
@@ -66,12 +57,7 @@ GraphTimelineResult timelineFromGraph(const NodeGraph &graph,
 
     // An ingredient feeds a downstream producer; its pixels live on inside
     // that producer's output, so it is not a shot of its own.
-    QSet<int> ingredients;
-    for (const Connection &connection : graph.connections()) {
-        const Node *consumer = graph.nodeById(connection.toNodeId);
-        if (consumer && producesMediaFromInputs(consumer->kind))
-            ingredients.insert(connection.fromNodeId);
-    }
+    const QSet<int> ingredients = ingredientNodes(graph);
 
     QVector<ShotCandidate> candidates;
     for (const Node &node : graph.nodes()) {
@@ -162,6 +148,17 @@ GraphTimelineResult timelineFromGraph(const NodeGraph &graph,
     sequence.tracks.append(track);
     result.project.sequences.append(sequence);
     return result;
+}
+
+QVector<int> compositeTerminals(const NodeGraph &graph)
+{
+    const QSet<int> ingredients = ingredientNodes(graph);
+    QVector<int> terminals;
+    for (const Node &node : graph.nodes()) {
+        if (isCompositeKind(node.kind) && !ingredients.contains(node.id))
+            terminals.append(node.id);
+    }
+    return terminals;
 }
 
 } // namespace cutpilot::core::timeline

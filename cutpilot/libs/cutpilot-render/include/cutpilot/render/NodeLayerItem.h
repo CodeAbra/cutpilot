@@ -9,6 +9,7 @@
 #include <QStringList>
 #include <QVector>
 
+#include "cutpilot/core/ComfyImport.h"
 #include "cutpilot/core/NodeGraph.h"
 #include "cutpilot/core/PortRules.h"
 #include "cutpilot/core/SpatialIndex.h"
@@ -90,6 +91,11 @@ public:
     // into a blend — for demos and evidence runs, no vendor required. The
     // still images are generated and written under the system temp location.
     Q_INVOKABLE void seedCompositeBoard();
+
+    // Land a mapped ComfyUI workflow on the board as one undo step. The
+    // outcome carries the per-node tier report for the chrome to present.
+    core::ComfyImportOutcome importComfyWorkflow(const QJsonObject &result,
+                                                 const QPointF &worldOrigin);
 
     // Hand the layer a node's decoded result to display as the card's media
     // body. Images stay keyed by node id, which is never reused, so a node

@@ -380,6 +380,21 @@ void NodeLayerItem::seedStressBoard(int count)
     update();
 }
 
+core::ComfyImportOutcome
+NodeLayerItem::importComfyWorkflow(const QJsonObject &result,
+                                   const QPointF &worldOrigin)
+{
+    const core::ComfyImportOutcome outcome =
+        core::applyComfyImport(m_graph, m_commands, result, worldOrigin);
+    if (outcome.ok) {
+        syncSpatialIndex();
+        m_geometryDirty = true;
+        update();
+        emit graphMutated();
+    }
+    return outcome;
+}
+
 void NodeLayerItem::addNodeAtCursor(const QPointF &worldPoint)
 {
     m_commands.push(std::make_unique<core::AddNodeCommand>(defaultNode(worldPoint)),
