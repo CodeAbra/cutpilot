@@ -19,7 +19,11 @@ add_library(cutpilot-core STATIC
     src/command/SetMediaPathCommand.cpp
     src/CompositeNodes.cpp
     src/CompositePlan.cpp
-    src/PipelineOrder.cpp)
+    src/PipelineOrder.cpp
+    src/timeline/Timeline.cpp
+    src/timeline/EdlWriter.cpp
+    src/timeline/GraphTimeline.cpp
+    src/timeline/ProjectStore.cpp)
 
 target_include_directories(cutpilot-core PUBLIC include)
 

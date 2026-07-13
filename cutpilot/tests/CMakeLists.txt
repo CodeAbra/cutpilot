@@ -40,6 +40,14 @@ qt_add_executable(tst_composite tst_composite.cpp)
 target_link_libraries(tst_composite PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.composite COMMAND tst_composite)
 
+qt_add_executable(tst_timeline tst_timeline.cpp)
+target_link_libraries(tst_timeline PRIVATE Qt6::Test cutpilot-core)
+add_test(NAME core.timeline COMMAND tst_timeline)
+
+qt_add_executable(tst_edl tst_edl.cpp)
+target_link_libraries(tst_edl PRIVATE Qt6::Test cutpilot-core)
+add_test(NAME core.edl COMMAND tst_edl)
+
 qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
