@@ -144,6 +144,40 @@ target_link_libraries(tst_exportcontroller PRIVATE Qt6::Test Qt6::Widgets
     cutpilot-ipc cutpilot-render)
 add_test(NAME app.exportcontroller COMMAND tst_exportcontroller)
 
+# The workflow's autosave home: save/load round trip, debounced bursts,
+# name fallback and persistence, and failure reporting.
+qt_add_executable(tst_workflowstore tst_workflowstore.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/WorkflowStore.cpp)
+target_include_directories(tst_workflowstore PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_workflowstore PRIVATE Qt6::Test cutpilot-core)
+add_test(NAME app.workflowstore COMMAND tst_workflowstore)
+
+# The command palette's data and keyboard flow: taxonomy sections, the
+# incremental filter across titles/categories/models, offer mode, and
+# choose/dismiss driven entirely by keys.
+qt_add_executable(tst_commandpalette tst_commandpalette.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/CommandPalette.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/PaletteModel.cpp)
+target_include_directories(tst_commandpalette PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_commandpalette PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-core cutpilot-theme)
+add_test(NAME app.commandpalette COMMAND tst_commandpalette)
+
+# The pill, cluster, and top bar against a real layer and camera: tool
+# state round trips, history enablement, zoom/fit, minimap toggles, mode
+# tabs, and the inline name commit.
+qt_add_executable(tst_chromewiring tst_chromewiring.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/CanvasCluster.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/ToolPill.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/TopBar.cpp)
+target_include_directories(tst_chromewiring PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_chromewiring PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-render)
+add_test(NAME app.chromewiring COMMAND tst_chromewiring)
+
 # The composite inspector against the real command stack: a scrub commits one
 # undo step, and an undo taken while the panel stays open must survive the
 # panel's next gesture untouched.
