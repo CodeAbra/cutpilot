@@ -33,6 +33,7 @@ private slots:
     void boundsContainEverySampleAtAnyRelativePosition();
     void portWorldPositionSitsOnTheCorrectEdge();
     void portPickingFindsNearestWithinRadius();
+    void distanceIsZeroOnCurveAndGrowsOffIt();
 };
 
 void TstConnectorPath::controlPointsLeaveAndEnterHorizontally()
@@ -128,6 +129,24 @@ void TstConnectorPath::portPickingFindsNearestWithinRadius()
     QCOMPARE(n.portIndexAtWorld(QPointF(297, 251), 8.0), 2);
     // Outside every port's radius: no pick.
     QCOMPARE(n.portIndexAtWorld(QPointF(200, 250), 8.0), -1);
+}
+
+void TstConnectorPath::distanceIsZeroOnCurveAndGrowsOffIt()
+{
+    const QPointF from(0, 0);
+    const QPointF to(400, 200);
+    const QVector<QPointF> samples = cutpilot::core::sampleConnector(from, to);
+
+    // Every sample point lies on the polyline, so its distance is zero.
+    for (const QPointF &p : samples)
+        QVERIFY(cutpilot::core::connectorDistance(from, to, p) < 1e-9);
+
+    // A point offset perpendicular to the curve midpoint reads roughly that
+    // offset; a far point reads far.
+    const QPointF mid = samples[samples.size() / 2];
+    const qreal near = cutpilot::core::connectorDistance(from, to, mid + QPointF(0.0, 9.0));
+    QVERIFY(near > 4.0 && near < 10.0 + 1e-9);
+    QVERIFY(cutpilot::core::connectorDistance(from, to, QPointF(200.0, -500.0)) > 300.0);
 }
 
 QTEST_APPLESS_MAIN(TstConnectorPath)

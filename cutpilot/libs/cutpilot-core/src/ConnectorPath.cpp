@@ -67,6 +67,28 @@ QVector<QPointF> sampleConnector(const QPointF &from, const QPointF &to)
     return points;
 }
 
+qreal connectorDistance(const QPointF &from, const QPointF &to, const QPointF &point)
+{
+    const QVector<QPointF> polyline = sampleConnector(from, to);
+    qreal best = distance(polyline.first(), point);
+    for (int i = 0; i + 1 < polyline.size(); ++i) {
+        const QPointF a = polyline[i];
+        const QPointF b = polyline[i + 1];
+        const QPointF ab = b - a;
+        const qreal lengthSq = ab.x() * ab.x() + ab.y() * ab.y();
+        QPointF nearest = a;
+        if (lengthSq > 1e-12) {
+            const qreal t = std::clamp(
+                ((point.x() - a.x()) * ab.x() + (point.y() - a.y()) * ab.y())
+                    / lengthSq,
+                0.0, 1.0);
+            nearest = a + ab * t;
+        }
+        best = std::min(best, distance(nearest, point));
+    }
+    return best;
+}
+
 QRectF connectorBounds(const QPointF &from, const QPointF &to, qreal pad)
 {
     const std::array<QPointF, 4> cp = connectorControlPoints(from, to);

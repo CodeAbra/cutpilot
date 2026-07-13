@@ -39,7 +39,8 @@ struct Port {
 // loaded from a local file, or one of the local compositing operations
 // (blend, mask, key, transform) evaluated on the GPU without any vendor
 // call. A video feeds its current frame downstream; its transport scrubs at
-// proxy resolution.
+// proxy resolution. A frame is an organizational backdrop: a tinted, titled
+// region drawn behind the nodes resting on it, which move with it.
 enum class NodeKind {
     Blank,
     Prompt,
@@ -50,7 +51,8 @@ enum class NodeKind {
     Blend,
     Mask,
     Key,
-    Transform
+    Transform,
+    Frame
 };
 
 // How a blend node combines its over layer with its base. The separable

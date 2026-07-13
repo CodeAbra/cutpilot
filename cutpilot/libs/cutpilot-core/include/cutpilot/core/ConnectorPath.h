@@ -23,4 +23,8 @@ QVector<QPointF> sampleConnector(const QPointF &from, const QPointF &to);
 // every side. Used for connector culling against the viewport.
 QRectF connectorBounds(const QPointF &from, const QPointF &to, qreal pad);
 
+// The shortest distance from a world point to the sampled curve. Used by the cut
+// tool to decide whether a click or a slice stroke touches the connector.
+qreal connectorDistance(const QPointF &from, const QPointF &to, const QPointF &point);
+
 } // namespace cutpilot::core

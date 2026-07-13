@@ -17,6 +17,9 @@ add_library(cutpilot-core STATIC
     src/command/SetGateLimitCommand.cpp
     src/command/SetCompositeParamsCommand.cpp
     src/command/SetMediaPathCommand.cpp
+    src/command/AddSubgraphCommand.cpp
+    src/NodeCatalog.cpp
+    src/WorkflowJson.cpp
     src/CompositeNodes.cpp
     src/CompositePlan.cpp
     src/PipelineOrder.cpp

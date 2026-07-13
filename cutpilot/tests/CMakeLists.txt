@@ -54,6 +54,10 @@ qt_add_executable(tst_comfyimport tst_comfyimport.cpp)
 target_link_libraries(tst_comfyimport PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.comfyimport COMMAND tst_comfyimport)
 
+qt_add_executable(tst_workflowjson tst_workflowjson.cpp)
+target_link_libraries(tst_workflowjson PRIVATE Qt6::Test cutpilot-core)
+add_test(NAME core.workflowjson COMMAND tst_workflowjson)
+
 qt_add_executable(tst_timeline tst_timeline.cpp)
 target_link_libraries(tst_timeline PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.timeline COMMAND tst_timeline)
