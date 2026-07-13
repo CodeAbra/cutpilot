@@ -9,6 +9,8 @@ qt_add_executable(cutpilot-app
     ExportController.h
     PaletteModel.cpp
     PaletteModel.h
+    QuickPanel.cpp
+    QuickPanel.h
     RailPanels.cpp
     RailPanels.h
     ThemeController.cpp

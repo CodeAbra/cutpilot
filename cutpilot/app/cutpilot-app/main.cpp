@@ -2,6 +2,7 @@
 #include "CommandPalette.h"
 #include "CompositeInspector.h"
 #include "ExportController.h"
+#include "QuickPanel.h"
 #include "RailPanels.h"
 #include "ThemeController.h"
 #include "ToolPill.h"
@@ -81,6 +82,7 @@ using cutpilot::ipc::SidecarHost;
 using cutpilot::app::CanvasCluster;
 using cutpilot::app::CommandPalette;
 using cutpilot::app::PaletteModel;
+using cutpilot::app::QuickPanel;
 using cutpilot::app::ThemeController;
 using cutpilot::app::ToolPill;
 using cutpilot::app::ToolRail;
@@ -1403,41 +1405,6 @@ int main(int argc, char *argv[])
                         viewCenterWorld());
             });
 
-        // Quick Mode: one self-contained generate node — type the prompt in
-        // its body, pick a model on its chip, press its run control. The
-        // toggle places it (or refocuses the existing one).
-        auto quickNodeId = std::make_shared<int>(-1);
-        QObject::connect(
-            pill, &ToolPill::quickModeToggled, view,
-            [view, layer, viewCenterWorld, quickNodeId](bool active) {
-                if (!active)
-                    return;
-                const core::Node *existing = *quickNodeId != -1
-                    ? layer->graph().nodeById(*quickNodeId)
-                    : nullptr;
-                if (existing) {
-                    view->controller()->centerOnWorld(
-                        existing->worldRect().center(),
-                        QSizeF(layer->width(), layer->height())
-                            * view->devicePixelRatioF(),
-                        view->devicePixelRatioF());
-                    return;
-                }
-                core::Node prototype =
-                    core::catalogPrototype(QStringLiteral("Generate Image"));
-                prototype.title = QStringLiteral("Quick Generate");
-                *quickNodeId =
-                    layer->placePrototypeAt(prototype, viewCenterWorld());
-            });
-        QObject::connect(layer, &NodeLayerItem::graphMutated, pill,
-                         [pill, layer, quickNodeId] {
-                             if (*quickNodeId == -1
-                                 || layer->graph().nodeById(*quickNodeId))
-                                 return;
-                             *quickNodeId = -1;
-                             pill->setQuickModeActive(false);
-                         });
-
         // The bottom-left cluster: minimap toggle, history, zoom.
         auto *cluster =
             new CanvasCluster(theme, layer, view->controller(), view);
@@ -1559,6 +1526,60 @@ int main(int argc, char *argv[])
                         "Ctrl+Z / Ctrl+Shift+Z — undo / redo\n"
                         "Esc — cancel a wire, tool, or selection"));
             });
+
+        // ------- Quick Mode: the one-prompt surface over a real node -------
+
+        // While the quick surface is up the screen reduces to it: the side
+        // panels close and the cluster and minimap step aside. The pill (with
+        // the toggle itself) and the top bar stay. Everything the surface
+        // builds is an ordinary node, so leaving it just reveals the board.
+        auto *quick = new QuickPanel(theme, layer, coordinator, view);
+        const auto reduceChrome = [view, cluster, rail](bool reduced) {
+            cluster->setVisible(!reduced);
+            if (auto *minimap = view->minimap())
+                minimap->setVisible(!reduced && cluster->minimapVisible());
+            if (reduced)
+                rail->closeAll();
+        };
+        QObject::connect(pill, &ToolPill::quickModeToggled, quick,
+                         [quick, viewCenterWorld, reduceChrome](bool active) {
+                             if (active) {
+                                 reduceChrome(true);
+                                 quick->openAt(viewCenterWorld());
+                             } else {
+                                 quick->dismiss();
+                                 reduceChrome(false);
+                             }
+                         });
+        QObject::connect(quick, &QuickPanel::dismissed, pill,
+                         [pill] { pill->setQuickModeActive(false); });
+        QObject::connect(quick, &QuickPanel::nodeFocusRequested, view,
+                         jumpToNode);
+        QObject::connect(quick, &QuickPanel::addKeyRequested, chrome,
+                         [chrome](int nodeId, const QString &provider) {
+                             chrome->promptAddKey(nodeId, provider);
+                         });
+
+        // A scripted pass over the same quick surface: toggle it on through
+        // the pill, land a prompt in its field, press its run control — for
+        // demos and evidence captures on machines without pointer automation.
+        if (qEnvironmentVariableIntValue("CUTPILOT_QUICK_DEMO") > 0) {
+            QObject::connect(
+                coordinator, &GenerationCoordinator::modelsReady, quick,
+                [pill, quick] {
+                    pill->setQuickModeActive(true);
+                    if (auto *prompt = quick->findChild<QPlainTextEdit *>(
+                            QStringLiteral("quickPrompt")))
+                        prompt->setPlainText(QStringLiteral(
+                            "A lighthouse on a basalt cliff at dusk, warm "
+                            "window light, drifting fog"));
+                    if (auto *run = quick->findChild<QPushButton *>(
+                            QStringLiteral("quickRun")))
+                        run->click();
+                },
+                static_cast<Qt::ConnectionType>(Qt::AutoConnection
+                                                | Qt::SingleShotConnection));
+        }
 
         // ------- Top bar: name, autosave state, share, settings, account ---
 
@@ -1783,12 +1804,13 @@ int main(int argc, char *argv[])
             &themes, &ThemeController::themeChanged, &window,
             [&themes, view, topBar, rail, pill, cluster, palette, contentPanel,
              searchPanel, assetsPanel, builderPanel, previewPanel, chrome,
-             modePages, inspector, transport] {
+             modePages, inspector, transport, quick] {
                 const ThemeTable &table = themes.table();
                 topBar->retheme(table);
                 rail->retheme(table);
                 pill->retheme(table);
                 cluster->retheme(table);
+                quick->retheme(table);
                 palette->retheme(table);
                 contentPanel->retheme(table);
                 searchPanel->retheme(table);
@@ -1911,6 +1933,24 @@ int main(int argc, char *argv[])
              passesLeft](const cutpilot::ipc::RunSummary &summary) {
                 if (*captured || summary.active || summary.total == 0
                     || *passesLeft > 0)
+                    return;
+                *captured = true;
+                QTimer::singleShot(700, &window, [&window, shotPath, statsActive] {
+                    window.grab().save(shotPath);
+                    if (!statsActive)
+                        QCoreApplication::quit();
+                });
+            });
+    } else if (!shotPath.isEmpty() && coordinator
+               && qEnvironmentVariableIntValue("CUTPILOT_QUICK_DEMO") > 0) {
+        // The scripted quick pass is a real run; the capture waits for it to
+        // settle so the surface shows the finished result.
+        auto captured = std::make_shared<bool>(false);
+        QObject::connect(
+            coordinator, &GenerationCoordinator::runSummaryChanged, &window,
+            [&window, shotPath, statsActive,
+             captured](const cutpilot::ipc::RunSummary &summary) {
+                if (*captured || summary.active || summary.total == 0)
                     return;
                 *captured = true;
                 QTimer::singleShot(700, &window, [&window, shotPath, statsActive] {
