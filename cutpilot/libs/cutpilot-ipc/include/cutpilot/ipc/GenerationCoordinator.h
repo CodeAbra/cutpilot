@@ -142,6 +142,7 @@ private:
                           bool &pending);
     static QSize requestedSize(const core::Node &node);
     QString resolveInputPath(const core::Node &node) const;
+    bool imageFeedIsCompositeOnly(const core::Node &node) const;
     QVector<QString> inputDigests(const core::Node &node, bool &pending);
 
     // The image file an upstream node feeds downstream: a finished

@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass itself also stopped recomputing every upstream signature once per
   downstream node, which alone stalled deep chains for noticeable fractions
   of a second.
+- Running a generation whose image input is wired from a compositing node now
+  says "Composite outputs can't feed generations" instead of the misleading
+  "Connect an image input" — the wire is legal under the port rules, but a
+  composite renders a texture with no file behind it, so nothing can reach
+  the job yet.
 
 ### Changed
 - Quick Mode adoption resolves by the recorded node identity instead of the

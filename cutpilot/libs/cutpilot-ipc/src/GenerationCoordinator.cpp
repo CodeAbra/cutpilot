@@ -1,5 +1,6 @@
 #include "cutpilot/ipc/GenerationCoordinator.h"
 
+#include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/NodeGraph.h"
 #include "cutpilot/core/PipelineOrder.h"
 #include "cutpilot/ipc/GenerationClient.h"
@@ -233,6 +234,30 @@ QString GenerationCoordinator::resolveInputPath(const core::Node &node) const
             return path;
     }
     return QString();
+}
+
+// True when the node's image inputs are wired but only to compositing nodes,
+// whose output is a texture with no file behind it — nothing can feed the
+// job, and the refusal should say so rather than claim nothing is wired.
+bool GenerationCoordinator::imageFeedIsCompositeOnly(const core::Node &node) const
+{
+    bool sawComposite = false;
+    for (int i = 0; i < node.ports.size(); ++i) {
+        const core::Port &port = node.ports[i];
+        if (!port.isInput || port.type != core::PortType::Image)
+            continue;
+        const int connectionId = m_graph->connectionAtInput(node.id, i);
+        if (connectionId == -1)
+            continue;
+        const core::Connection *edge = m_graph->connectionById(connectionId);
+        const core::Node *source = edge ? m_graph->nodeById(edge->fromNodeId) : nullptr;
+        if (!source)
+            continue;
+        if (!core::isCompositeKind(source->kind))
+            return false;
+        sawComposite = true;
+    }
+    return sawComposite;
 }
 
 QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node,
@@ -596,7 +621,10 @@ void GenerationCoordinator::advanceRun()
                 const QString input = resolveInputPath(*node);
                 if (input.isEmpty()) {
                     failRunNode(nodeId,
-                                QStringLiteral("Connect an image input"));
+                                imageFeedIsCompositeOnly(*node)
+                                    ? QStringLiteral("Composite outputs can't "
+                                                     "feed generations")
+                                    : QStringLiteral("Connect an image input"));
                     progressed = true;
                     continue;
                 }

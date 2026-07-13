@@ -169,6 +169,7 @@ private slots:
     void rewrittenReferenceWithForgedTimestampRegenerates();
     void largeReferenceHashesOffTheRunThread();
     void vanishedReferenceFileRefusesTheRunWithGuidance();
+    void compositeWiredInputRefusesWithTheHonestReason();
     void unchangedRerunServesTheCachedResult();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
@@ -512,6 +513,59 @@ void GenerationFlowTest::vanishedReferenceFileRefusesTheRunWithGuidance()
     QCOMPARE(graph.nodeById(rig.editId)->runState, core::RunState::Error);
     QCOMPARE(graph.nodeById(rig.editId)->statusMessage,
              QStringLiteral("Reference file missing"));
+    QCOMPARE(submissionSpy.count(), 0);
+    QVERIFY(!coordinator.runActive());
+}
+
+void GenerationFlowTest::compositeWiredInputRefusesWithTheHonestReason()
+{
+    // A compositing node's output wires into an image input under the port
+    // rules, but composites render textures, not files, so nothing can feed
+    // the job. The refusal must say that — not pretend nothing is wired.
+    core::NodeGraph graph;
+    core::Node blend;
+    blend.kind = core::NodeKind::Blend;
+    blend.title = QStringLiteral("Blend");
+    blend.worldSize = QSizeF(260, 180);
+    blend.ports = {
+        { QStringLiteral("base"), core::PortType::Image, true, 0.35 },
+        { QStringLiteral("over"), core::PortType::Image, true, 0.65 },
+        { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
+    };
+    const int blendId = graph.addNode(blend);
+
+    core::Node edit;
+    edit.kind = core::NodeKind::Generate;
+    edit.title = QStringLiteral("Edit Image");
+    edit.promptText = QStringLiteral("weathered postcard grain");
+    edit.modelId = QStringLiteral("local/procedural-edit-v1");
+    edit.modelLabel = QStringLiteral("Procedural Edit (local)");
+    edit.worldPos = QPointF(500, 0);
+    edit.worldSize = QSizeF(280, 200);
+    edit.ports = {
+        { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
+        { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
+        { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
+    };
+    const int editId = graph.addNode(edit);
+
+    core::Connection wire;
+    wire.fromNodeId = blendId;
+    wire.fromPortIndex = 2;
+    wire.toNodeId = editId;
+    wire.toPortIndex = 0;
+    QVERIFY(graph.addConnection(wire) != -1);
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    QSignalSpy submissionSpy(&m_client, &ipc::GenerationClient::jobSubmitted);
+    coordinator.runNode(editId);
+    QCOMPARE(graph.nodeById(editId)->runState, core::RunState::Error);
+    QCOMPARE(graph.nodeById(editId)->statusMessage,
+             QStringLiteral("Composite outputs can't feed generations"));
     QCOMPARE(submissionSpy.count(), 0);
     QVERIFY(!coordinator.runActive());
 }
