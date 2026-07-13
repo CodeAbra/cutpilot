@@ -356,9 +356,9 @@ void CompositorService::renderThumbnails()
 
     ensureRenderThread();
 
-    // Signatures shared across this pass's plan builds: on a deep chain each
-    // downstream plan re-visits the whole upstream, and recomputing every
-    // signature per plan is what used to stall this thread.
+    // Signatures shared across this pass's plan builds: each downstream plan
+    // re-visits the whole upstream, and recomputing every signature per plan
+    // would stall this thread on a deep chain.
     QHash<int, QString> signatureMemo;
 
     for (int nodeId : compositeIds) {
