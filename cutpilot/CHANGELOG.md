@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly as the undo removed it. Previously a generation result or picked
   file that arrived after the placement was dropped from the document by the
   undo/redo round trip.
+- The same guarantee now holds for deletion: undoing a redone delete restores
+  the node as the redo removed it, so a generation result that landed between
+  the undo and the redo survives the history walk instead of reverting to the
+  snapshot captured at first delete.
+- Undo/redo no longer replays node selection: a node restored by the history
+  walk comes back with the selection it had when the step was first recorded,
+  not whatever the selection happened to be at undo time.
 - A reference image (Still Image node) wired into an image-consuming
   generation now genuinely feeds the run: the picked file travels into the
   job and its content keys the result cache, so swapping the file

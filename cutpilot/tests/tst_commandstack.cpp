@@ -63,8 +63,10 @@ private slots:
 
     void addUndoRedoPreservesId();
     void addUndoRedoPreservesUid();
+    void addRedoDoesNotReplaySelection();
     void addRaiseUndoRedoKeepsAddZOrder();
     void deleteUndoRestoresIdAndZOrder();
+    void deleteRedoThenUndoKeepsLateWrittenContent();
     void moveDoUndoRedoRoundTrip();
     void recordedDragLandsAtNetDeltaNotDouble();
     void singleDragIsOneCoalescedCommand();
@@ -214,6 +216,26 @@ void TstCommandStack::addUndoRedoPreservesUid()
     QCOMPARE(graph.nodeById(id)->resultPath, QStringLiteral("/tmp/result.png"));
 }
 
+void TstCommandStack::addRedoDoesNotReplaySelection()
+{
+    NodeGraph graph;
+    CommandStack stack;
+
+    auto add = std::make_unique<AddNodeCommand>(makeNode(QPointF(0, 0)));
+    AddNodeCommand *addPtr = add.get();
+    stack.push(std::move(add), graph);
+    const int id = addPtr->nodeId();
+    QVERIFY(!graph.nodeById(id)->selected);
+
+    // Selection is view state, written outside the stack; the history walk
+    // restores content, never whatever the selection happened to be at undo
+    // time.
+    graph.setSelected(id, true);
+    stack.undo(graph);
+    stack.redo(graph);
+    QVERIFY(!graph.nodeById(id)->selected);
+}
+
 void TstCommandStack::addRaiseUndoRedoKeepsAddZOrder()
 {
     NodeGraph graph;
@@ -273,6 +295,27 @@ void TstCommandStack::deleteUndoRestoresIdAndZOrder()
     stack.redo(graph);
     QCOMPARE(graph.nodeById(a), nullptr);
     QCOMPARE(graph.nodeById(c), nullptr);
+}
+
+void TstCommandStack::deleteRedoThenUndoKeepsLateWrittenContent()
+{
+    NodeGraph graph;
+    CommandStack stack;
+    const int id = graph.addNode(makeNode(QPointF(0, 0)));
+    graph.nodeById(id)->resultPath = QStringLiteral("/tmp/first.png");
+
+    stack.push(std::make_unique<DeleteNodesCommand>(QVector<int>{ id }), graph);
+    stack.undo(graph);
+    QCOMPARE(graph.nodeById(id)->resultPath, QStringLiteral("/tmp/first.png"));
+
+    // A result landing outside the stack while the delete sits in the redo
+    // tail: the walk must keep restoring the node the redo actually removed,
+    // not the snapshot the first delete captured.
+    graph.nodeById(id)->resultPath = QStringLiteral("/tmp/second.png");
+    stack.redo(graph);
+    QCOMPARE(graph.nodeById(id), nullptr);
+    stack.undo(graph);
+    QCOMPARE(graph.nodeById(id)->resultPath, QStringLiteral("/tmp/second.png"));
 }
 
 void TstCommandStack::moveDoUndoRedoRoundTrip()

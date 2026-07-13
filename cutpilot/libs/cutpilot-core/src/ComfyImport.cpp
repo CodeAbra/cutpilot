@@ -72,9 +72,14 @@ public:
             graph.removeConnection(m_connections.at(i).id);
         for (int i = m_nodes.size() - 1; i >= 0; --i) {
             // Re-capture each node so redo restores exactly what this undo
-            // removes, including results written after the import.
-            if (const Node *current = graph.nodeById(m_nodes.at(i).id))
+            // removes, including results written after the import. Selection
+            // is view state written outside the stack; it stays as first
+            // captured so redo never replays it.
+            if (const Node *current = graph.nodeById(m_nodes.at(i).id)) {
+                const bool selected = m_nodes.at(i).selected;
                 m_nodes[i] = *current;
+                m_nodes[i].selected = selected;
+            }
             graph.removeNode(m_nodes.at(i).id);
         }
     }

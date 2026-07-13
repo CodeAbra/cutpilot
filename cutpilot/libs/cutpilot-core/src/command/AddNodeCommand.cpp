@@ -31,9 +31,15 @@ void AddNodeCommand::revert(NodeGraph &graph)
     // generation, a picked file) live on the node, not in later commands.
     // m_index stays at the position captured on the first apply: re-deriving
     // it here would read whatever z the node currently sits at, so an
-    // intervening raise-to-top would make redo restore the wrong z.
-    if (const Node *current = graph.nodeById(m_node.id))
+    // intervening raise-to-top would make redo restore the wrong z. Selection
+    // is view state written outside the stack; it stays as first captured so
+    // a redo never replays whatever the selection happened to be at undo
+    // time.
+    if (const Node *current = graph.nodeById(m_node.id)) {
+        const bool selected = m_node.selected;
         m_node = *current;
+        m_node.selected = selected;
+    }
     graph.removeNode(m_node.id);
 }
 

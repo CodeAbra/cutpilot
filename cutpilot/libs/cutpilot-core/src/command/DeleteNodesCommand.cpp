@@ -39,6 +39,21 @@ void DeleteNodesCommand::apply(NodeGraph &graph)
             }
         }
         m_captured = true;
+    } else {
+        // Re-applying (redo): re-capture each node's current content so the
+        // next undo restores exactly what this removal takes — results
+        // written after the first undo live on the node, not in later
+        // commands. Indices stay first-captured (z-order contract), and so
+        // does selection: view state written outside the stack is never
+        // replayed by the history walk. Connections cannot drift here — only
+        // commands mutate them, and any new command truncates the redo tail.
+        for (auto &entry : m_snapshots) {
+            if (const Node *current = graph.nodeById(entry.second.id)) {
+                const bool selected = entry.second.selected;
+                entry.second = *current;
+                entry.second.selected = selected;
+            }
+        }
     }
 
     // Remove in descending index order so earlier indices stay valid.
