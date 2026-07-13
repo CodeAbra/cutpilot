@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-generates while an unchanged reference is served from cache. Previously
   only a finished generation's result could feed an image input, and an
   image-consuming model fed by a reference alone refused to run.
+- A reference file rewritten with the same byte size and modification time
+  (a timestamp-preserving tool, or two writes inside one clock tick) no
+  longer serves the stale cached result: change detection also watches the
+  file's metadata-change time, and a freshly written file is re-hashed until
+  its clocks can be trusted.
 
 ### Changed
 - Quick Mode adoption resolves by the recorded node identity instead of the

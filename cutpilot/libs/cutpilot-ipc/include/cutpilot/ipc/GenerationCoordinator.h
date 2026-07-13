@@ -148,8 +148,9 @@ private:
     static QString imageSourcePath(const core::Node &source);
 
     // The content digest of one upstream image source, cached against the
-    // file's size and modification time so an unchanged reference is never
-    // re-hashed per advance.
+    // file's size, modification time, and metadata-change time so an
+    // unchanged reference is not re-hashed per advance. A freshly written
+    // file is re-hashed unconditionally until its clocks can be trusted.
     QString sourceDigest(core::Node *source);
     bool applyCachedResult(core::Node *node, const QString &signature);
     void submitNode(core::Node *node, const ModelInfo &model,
@@ -191,8 +192,9 @@ private:
     PipelineRun m_run;
     double m_runCapUsd = 0.0;
 
-    // Reference-file digests keyed by path; the fingerprint (size + mtime)
-    // invalidates an entry when the file changes on disk.
+    // Reference-file digests keyed by path; the fingerprint (size + mtime +
+    // metadata-change time) invalidates an entry when the file changes on
+    // disk, and reconcile() drops entries no node references anymore.
     struct FileDigest {
         QString fingerprint;
         QString digest;

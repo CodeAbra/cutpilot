@@ -20,6 +20,11 @@ QString money(double usd)
     return QStringLiteral("$%1").arg(usd, 0, 'f', 3);
 }
 
+// How old a file's last write must be before size and timestamps are trusted
+// to detect change; younger files are re-hashed unconditionally, so a rewrite
+// landing inside one clock tick can never leave a stale digest behind.
+constexpr qint64 kTrustFileClockAfterMs = 2000;
+
 // SHA-256 of a file's contents, or an empty string when unreadable.
 QString hashFile(const QString &path)
 {
@@ -118,10 +123,23 @@ QString GenerationCoordinator::sourceDigest(core::Node *source)
     if (path.isEmpty())
         return QString();
     const QFileInfo info(path);
-    const QString fingerprint = QStringLiteral("%1|%2").arg(info.size()).arg(
-        info.lastModified().toMSecsSinceEpoch());
+    const QDateTime modified = info.lastModified();
+    // Size, modification time, and metadata-change time together fingerprint
+    // the file: a rewrite that forges size and mtime still bumps the metadata
+    // clock, which userland cannot set back.
+    const QString fingerprint =
+        QStringLiteral("%1|%2|%3")
+            .arg(info.size())
+            .arg(modified.toMSecsSinceEpoch())
+            .arg(info.metadataChangeTime().toMSecsSinceEpoch());
+    // A file written moments ago can be rewritten again inside the same
+    // timestamp tick; until the write is old enough for the clocks to be
+    // trusted, hash the content fresh.
+    const bool freshWrite =
+        modified.msecsTo(QDateTime::currentDateTime()) < kTrustFileClockAfterMs;
     FileDigest &entry = m_fileDigests[path];
-    if (entry.fingerprint != fingerprint || entry.digest.isEmpty()) {
+    if (freshWrite || entry.fingerprint != fingerprint
+        || entry.digest.isEmpty()) {
         entry.fingerprint = fingerprint;
         entry.digest = hashFile(path);
     }
@@ -808,6 +826,21 @@ void GenerationCoordinator::reconcile()
     for (auto it = m_disownedSubmits.begin(); it != m_disownedSubmits.end();) {
         if (!m_graph->nodeById(*it))
             it = m_disownedSubmits.erase(it);
+        else
+            ++it;
+    }
+
+    // The digest cache only saves re-hashing for files the board still
+    // references; entries whose path no longer backs any node are dropped.
+    QSet<QString> livePaths;
+    for (const core::Node &node : m_graph->nodes()) {
+        const QString source = imageSourcePath(node);
+        if (!source.isEmpty())
+            livePaths.insert(source);
+    }
+    for (auto it = m_fileDigests.begin(); it != m_fileDigests.end();) {
+        if (!livePaths.contains(it.key()))
+            it = m_fileDigests.erase(it);
         else
             ++it;
     }

@@ -1,7 +1,9 @@
 #include <QtTest/QtTest>
 
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QImage>
 #include <QSignalSpy>
@@ -67,6 +69,92 @@ QByteArray fileDigest(const QString &path)
     return QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
 }
 
+// A reference still wired into an image-consuming edit model, ready to run.
+struct ReferenceRig {
+    int stillId = -1;
+    int editId = -1;
+};
+
+ReferenceRig buildReferenceRig(core::NodeGraph &graph, const QString &refPath)
+{
+    ReferenceRig rig;
+
+    core::Node still;
+    still.kind = core::NodeKind::Still;
+    still.title = QStringLiteral("Still Image");
+    still.mediaPath = refPath;
+    still.worldSize = QSizeF(260, 180);
+    still.ports = { { QStringLiteral("image"), core::PortType::Image, false,
+                      0.5 } };
+    rig.stillId = graph.addNode(still);
+
+    core::Node edit;
+    edit.kind = core::NodeKind::Generate;
+    edit.title = QStringLiteral("Edit Image");
+    edit.promptText = QStringLiteral("weathered postcard grain");
+    edit.modelId = QStringLiteral("local/procedural-edit-v1");
+    edit.modelLabel = QStringLiteral("Procedural Edit (local)");
+    edit.worldPos = QPointF(500, 0);
+    edit.worldSize = QSizeF(280, 200);
+    edit.ports = {
+        { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
+        { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
+        { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
+    };
+    rig.editId = graph.addNode(edit);
+
+    core::Connection wire;
+    wire.fromNodeId = rig.stillId;
+    wire.fromPortIndex = 0;
+    wire.toNodeId = rig.editId;
+    wire.toPortIndex = 0;
+    graph.addConnection(wire);
+    return rig;
+}
+
+bool pinFileClock(const QString &path, const QDateTime &stamp)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadWrite))
+        return false;
+    return file.setFileTime(stamp, QFileDevice::FileModificationTime);
+}
+
+quint32 crc32Png(const QByteArray &data)
+{
+    quint32 crc = 0xFFFFFFFFu;
+    for (unsigned char byte : data) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+// The PNG with a text chunk carrying the marker inserted before IEND: the
+// pixels stay identical, so variants of the same base decode alike while
+// their file bytes — what the input digest hashes — differ at equal length.
+QByteArray pngWithComment(const QByteArray &basePng, const QByteArray &marker)
+{
+    const int iendOffset = basePng.size() - 12;
+    if (basePng.mid(iendOffset + 4, 4) != QByteArrayLiteral("IEND"))
+        return QByteArray();
+    const QByteArray body =
+        QByteArrayLiteral("tEXt") + QByteArrayLiteral("swap\x00") + marker;
+    QByteArray chunk;
+    QDataStream stream(&chunk, QIODevice::WriteOnly);
+    stream << quint32(body.size() - 4) // payload length excludes the kind
+           << quint32(0);              // placeholder, replaced by the body+crc
+    chunk = chunk.left(4) + body;
+    QByteArray crc;
+    QDataStream crcStream(&crc, QIODevice::WriteOnly);
+    crcStream << crc32Png(body);
+    chunk += crc;
+    QByteArray out = basePng;
+    out.insert(iendOffset, chunk);
+    return out;
+}
+
 } // namespace
 
 class GenerationFlowTest : public QObject {
@@ -78,6 +166,7 @@ private slots:
 
     void runsAPromptThroughTheServiceToADoneNode();
     void referenceImageFeedsAndKeysTheGeneration();
+    void rewrittenReferenceWithForgedTimestampRegenerates();
     void unchangedRerunServesTheCachedResult();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
@@ -264,6 +353,72 @@ void GenerationFlowTest::referenceImageFeedsAndKeysTheGeneration()
     QCOMPARE(bare.nodeById(loneId)->runState, core::RunState::Error);
     QCOMPARE(bare.nodeById(loneId)->statusMessage,
              QStringLiteral("Connect an image input"));
+}
+
+void GenerationFlowTest::rewrittenReferenceWithForgedTimestampRegenerates()
+{
+    // The hostile swap: the reference is rewritten with different pixels but
+    // the same byte size and the same modification time (a tool preserving
+    // timestamps, or two writes inside one clock tick). The changed content
+    // must still re-generate — never serve the stale cached result.
+    QTemporaryDir refDir;
+    QVERIFY(refDir.isValid());
+    const QString refPath = refDir.path() + QStringLiteral("/reference.png");
+    QByteArray basePng;
+    {
+        QImage base(QSize(8, 8), QImage::Format_RGB32);
+        base.fill(Qt::red);
+        QBuffer buffer(&basePng);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QVERIFY(base.save(&buffer, "PNG"));
+    }
+    const QByteArray firstBytes =
+        pngWithComment(basePng, QByteArrayLiteral("aaaa"));
+    const QByteArray secondBytes =
+        pngWithComment(basePng, QByteArrayLiteral("bbbb"));
+    QVERIFY(!firstBytes.isEmpty());
+    QCOMPARE(secondBytes.size(), firstBytes.size());
+    QVERIFY(secondBytes != firstBytes);
+
+    {
+        QFile file(refPath);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(firstBytes), qint64(firstBytes.size()));
+    }
+    const qint64 firstSize = QFileInfo(refPath).size();
+    const QDateTime pinned = QDateTime::currentDateTime().addSecs(-3600);
+    QVERIFY(pinFileClock(refPath, pinned));
+
+    core::NodeGraph graph;
+    const ReferenceRig rig = buildReferenceRig(graph, refPath);
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    QSignalSpy submissionSpy(&m_client, &ipc::GenerationClient::jobSubmitted);
+    coordinator.runNode(rig.editId);
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(rig.editId)->runState,
+                              core::RunState::Done, 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 10000);
+    QCOMPARE(submissionSpy.count(), 1);
+
+    // Rewrite: same size, same forged modification time, different pixels.
+    {
+        QFile file(refPath);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QCOMPARE(file.write(secondBytes), qint64(secondBytes.size()));
+    }
+    QVERIFY(pinFileClock(refPath, pinned));
+    QCOMPARE(QFileInfo(refPath).size(), firstSize);
+
+    coordinator.runNode(rig.editId);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 30000);
+    QCOMPARE(graph.nodeById(rig.editId)->runState, core::RunState::Done);
+    QVERIFY(graph.nodeById(rig.editId)->statusMessage
+            != QStringLiteral("Reused"));
+    QCOMPARE(submissionSpy.count(), 2);
 }
 
 void GenerationFlowTest::unchangedRerunServesTheCachedResult()
