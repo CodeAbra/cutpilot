@@ -92,6 +92,13 @@ if(Python3_FOUND)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/sidecars/generation)
     set_tests_properties(sidecar.generation PROPERTIES
         ENVIRONMENT "CUTPILOT_DISABLE_KEYCHAIN=1")
+
+    # The convert sidecar's suite: interchange writers validated by
+    # re-parsing against each format's grammar, the ComfyUI mapper's tier
+    # grading, and the Resolve bridge's refusal paths.
+    add_test(NAME sidecar.convert
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -t .
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/sidecars/convert)
 endif()
 
 # The composite inspector against the real command stack: a scrub commits one
