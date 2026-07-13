@@ -157,8 +157,12 @@ QString GenerationCoordinator::fileDigestFor(const QString &path, bool &pending)
 
     // An off-thread hash that just landed answers exactly one decision, even
     // while the file's clocks are still too young to be trusted — the same
-    // trust an inline hash computed this instant would get.
-    if (entry.freshDelivery && entry.fingerprint == fingerprint) {
+    // trust an inline hash computed this instant would get. "Just" is load
+    // bearing: a delivery nobody consumed promptly (an aborted run, a node
+    // that vanished mid-hash) ages out and must re-derive trust instead.
+    if (entry.freshDelivery && entry.fingerprint == fingerprint
+        && QDateTime::currentMSecsSinceEpoch() - entry.hashedAtMs
+            < kTrustFileClockAfterMs) {
         entry.freshDelivery = false;
         return entry.digest;
     }

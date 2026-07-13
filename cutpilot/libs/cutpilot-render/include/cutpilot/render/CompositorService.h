@@ -12,10 +12,6 @@ class QThread;
 class QTimer;
 QT_END_NAMESPACE
 
-namespace cutpilot::core {
-struct CompositePlan;
-}
-
 namespace cutpilot::render {
 
 class NodeLayerItem;
