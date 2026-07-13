@@ -520,10 +520,23 @@ void GenerationCoordinator::advanceRun()
                 progressed = true;
                 continue;
             }
-            if (model->needsInput && resolveInputPath(*node).isEmpty()) {
-                failRunNode(nodeId, QStringLiteral("Connect an image input"));
-                progressed = true;
-                continue;
+            if (model->needsInput) {
+                const QString input = resolveInputPath(*node);
+                if (input.isEmpty()) {
+                    failRunNode(nodeId,
+                                QStringLiteral("Connect an image input"));
+                    progressed = true;
+                    continue;
+                }
+                // A wired file can vanish outside the app; refuse locally
+                // with guidance instead of submitting a job that names a
+                // file nobody can read.
+                if (!QFileInfo::exists(input)) {
+                    failRunNode(nodeId,
+                                QStringLiteral("Reference file missing"));
+                    progressed = true;
+                    continue;
+                }
             }
 
             const QString signature = nodeSignature(*node, *model);

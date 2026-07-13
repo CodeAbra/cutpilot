@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer serves the stale cached result: change detection also watches the
   file's metadata-change time, and a freshly written file is re-hashed until
   its clocks can be trusted.
+- Running an image-consuming generation whose wired reference file was moved
+  or deleted outside the app now refuses locally with "Reference file
+  missing" instead of submitting a job that names an unreadable file.
 
 ### Changed
 - Quick Mode adoption resolves by the recorded node identity instead of the

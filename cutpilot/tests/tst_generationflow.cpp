@@ -167,6 +167,7 @@ private slots:
     void runsAPromptThroughTheServiceToADoneNode();
     void referenceImageFeedsAndKeysTheGeneration();
     void rewrittenReferenceWithForgedTimestampRegenerates();
+    void vanishedReferenceFileRefusesTheRunWithGuidance();
     void unchangedRerunServesTheCachedResult();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
@@ -419,6 +420,36 @@ void GenerationFlowTest::rewrittenReferenceWithForgedTimestampRegenerates()
     QVERIFY(graph.nodeById(rig.editId)->statusMessage
             != QStringLiteral("Reused"));
     QCOMPARE(submissionSpy.count(), 2);
+}
+
+void GenerationFlowTest::vanishedReferenceFileRefusesTheRunWithGuidance()
+{
+    // A wired reference whose file was moved or deleted outside the app:
+    // the run refuses locally with guidance instead of submitting a job
+    // that names a file nobody can read.
+    QTemporaryDir refDir;
+    QVERIFY(refDir.isValid());
+    const QString refPath = refDir.path() + QStringLiteral("/reference.png");
+    QImage image(QSize(8, 8), QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QVERIFY(image.save(refPath));
+
+    core::NodeGraph graph;
+    const ReferenceRig rig = buildReferenceRig(graph, refPath);
+    QVERIFY(QFile::remove(refPath));
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    QSignalSpy submissionSpy(&m_client, &ipc::GenerationClient::jobSubmitted);
+    coordinator.runNode(rig.editId);
+    QCOMPARE(graph.nodeById(rig.editId)->runState, core::RunState::Error);
+    QCOMPARE(graph.nodeById(rig.editId)->statusMessage,
+             QStringLiteral("Reference file missing"));
+    QCOMPARE(submissionSpy.count(), 0);
+    QVERIFY(!coordinator.runActive());
 }
 
 void GenerationFlowTest::unchangedRerunServesTheCachedResult()
