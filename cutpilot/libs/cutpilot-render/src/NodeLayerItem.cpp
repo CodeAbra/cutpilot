@@ -1894,14 +1894,14 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
 
     const QPointF world = worldFromLocal(event->position());
     const int hitId = pickTopMost(world);
-    if (hitId == -1) {
-        // Empty canvas: summon the command palette at the cursor's world point.
+    const core::Node *hitNode = hitId != -1 ? m_graph.nodeById(hitId) : nullptr;
+    if (!hitNode || hitNode->kind == core::NodeKind::Frame) {
+        // Empty canvas — a frame backdrop counts as empty, it is where new
+        // nodes go: summon the command palette at the cursor's world point.
         emit paletteInvoked(world);
         event->accept();
         return;
     }
-
-    const core::Node *hitNode = m_graph.nodeById(hitId);
     if (hitNode->kind == core::NodeKind::Prompt) {
         m_graph.selectOnly(hitId);
         m_geometryDirty = true;

@@ -4,6 +4,8 @@
 
 #include <QJsonArray>
 
+#include <cmath>
+
 namespace cutpilot::core {
 
 namespace {
@@ -204,7 +206,12 @@ bool nodeFromJson(const QJsonObject &json, Node &node)
                             json[QLatin1String("y")].toDouble());
     node.worldSize = QSizeF(json[QLatin1String("width")].toDouble(),
                             json[QLatin1String("height")].toDouble());
-    if (node.worldSize.width() < 0.0 || node.worldSize.height() < 0.0)
+    // Geometry must be finite: one infinite rect would poison the board
+    // bounds, the spatial index, and the camera-fit math.
+    if (!std::isfinite(node.worldPos.x()) || !std::isfinite(node.worldPos.y())
+        || !std::isfinite(node.worldSize.width())
+        || !std::isfinite(node.worldSize.height())
+        || node.worldSize.width() < 0.0 || node.worldSize.height() < 0.0)
         return false;
 
     for (const QJsonValue &value : json[QLatin1String("ports")].toArray()) {

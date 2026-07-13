@@ -165,6 +165,18 @@ target_link_libraries(tst_commandpalette PRIVATE Qt6::Test Qt6::Widgets
     cutpilot-core cutpilot-theme)
 add_test(NAME app.commandpalette COMMAND tst_commandpalette)
 
+# Reusable templates and the theme owner: selection capture strips run
+# artifacts while keeping media sources, the template document round-trips,
+# and the theme choice cycles and persists.
+qt_add_executable(tst_workflowtemplates tst_workflowtemplates.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/ThemeController.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/WorkflowTemplates.cpp)
+target_include_directories(tst_workflowtemplates PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_workflowtemplates PRIVATE Qt6::Test cutpilot-core
+    cutpilot-theme)
+add_test(NAME app.workflowtemplates COMMAND tst_workflowtemplates)
+
 # The pill, cluster, and top bar against a real layer and camera: tool
 # state round trips, history enablement, zoom/fit, minimap toggles, mode
 # tabs, and the inline name commit.

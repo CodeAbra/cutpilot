@@ -52,6 +52,10 @@ public:
     void scheduleSave();
     bool saveNow();
 
+    // Write a pending debounced save immediately — the quit path, so an edit
+    // made moments before closing never silently vanishes.
+    void flushPendingSave();
+
     // Populate the (empty) graph from the stored document. False when there is
     // no document or it fails validation.
     bool load();

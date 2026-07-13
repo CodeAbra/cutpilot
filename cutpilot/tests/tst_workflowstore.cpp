@@ -89,6 +89,28 @@ private slots:
         QCOMPARE(states.count(), 2);
     }
 
+    void flushWritesAPendingSaveImmediately()
+    {
+        QTemporaryDir dir;
+        core::NodeGraph graph = sampleBoard();
+        WorkflowStore store(&graph);
+        store.setDirectory(dir.path());
+
+        store.scheduleSave();
+        QCOMPARE(store.state(), WorkflowStore::State::Pending);
+        QVERIFY(!QFile::exists(store.filePath()));
+
+        // The quit path: the debounce window must not swallow the edit.
+        store.flushPendingSave();
+        QCOMPARE(store.state(), WorkflowStore::State::Saved);
+        QVERIFY(QFile::exists(store.filePath()));
+
+        // With nothing pending, a flush writes nothing.
+        QFile::remove(store.filePath());
+        store.flushPendingSave();
+        QVERIFY(!QFile::exists(store.filePath()));
+    }
+
     void nameFallsBackAndPersists()
     {
         QTemporaryDir dir;

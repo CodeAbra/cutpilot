@@ -255,6 +255,14 @@ private slots:
         key(board.layer, Qt::Key_Tab, Qt::NoModifier);
         QCOMPARE(spy.count(), 2);
         QCOMPARE(spy.last().first().toPointF(), QPointF(800, 500));
+
+        // A frame backdrop counts as empty canvas: double-clicking its
+        // surface summons the palette rather than doing nothing.
+        board.layer.placePrototypeAt(core::catalogPrototype(QStringLiteral("Frame")),
+                                     QPointF(500, 400));
+        doubleClick(board.layer, QPointF(300, 300));
+        QCOMPARE(spy.count(), 3);
+        QCOMPARE(spy.last().first().toPointF(), QPointF(300, 300));
     }
 
     void generateNodeDoubleClickOpensPromptEditor()

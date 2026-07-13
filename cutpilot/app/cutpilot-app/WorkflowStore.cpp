@@ -97,6 +97,12 @@ bool WorkflowStore::saveNow()
     return true;
 }
 
+void WorkflowStore::flushPendingSave()
+{
+    if (m_state == State::Pending)
+        saveNow();
+}
+
 bool WorkflowStore::load()
 {
     QFile file(filePath());

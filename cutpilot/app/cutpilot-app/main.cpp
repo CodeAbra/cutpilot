@@ -1137,6 +1137,9 @@ int main(int argc, char *argv[])
             }
             QObject::connect(layer, &NodeLayerItem::graphMutated, store,
                              &WorkflowStore::scheduleSave);
+            // Quitting inside the debounce window must not lose the edit.
+            QObject::connect(&app, &QCoreApplication::aboutToQuit, store,
+                             &WorkflowStore::flushPendingSave);
         }
 
 

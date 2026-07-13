@@ -1,4 +1,5 @@
 #include "RailPanels.h"
+#include "WorkflowTemplates.h"
 
 #include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/NodeCatalog.h"
@@ -104,88 +105,6 @@ protected:
         return mime;
     }
 };
-
-// A selection captured as a template: the selected nodes normalized to their
-// joint origin, and the connections running among them re-expressed against
-// prototype indices.
-void captureSelection(const core::NodeGraph &graph,
-                      QVector<core::Node> &prototypes,
-                      QVector<core::Connection> &indexWires)
-{
-    QHash<int, int> indexById;
-    QRectF bounds;
-    for (const core::Node &node : graph.nodes()) {
-        if (!node.selected)
-            continue;
-        indexById.insert(node.id, prototypes.size());
-        core::Node prototype = node;
-        prototype.id = 0;
-        prototype.selected = false;
-        prototype.runState = core::RunState::Idle;
-        prototype.runProgress = 0.0;
-        prototype.statusMessage.clear();
-        prototypes.push_back(prototype);
-        bounds = bounds.isNull() ? node.worldRect()
-                                 : bounds.united(node.worldRect());
-    }
-    for (core::Node &prototype : prototypes)
-        prototype.worldPos -= bounds.topLeft();
-
-    for (const core::Connection &connection : graph.connections()) {
-        if (!indexById.contains(connection.fromNodeId)
-            || !indexById.contains(connection.toNodeId))
-            continue;
-        core::Connection wire;
-        wire.fromNodeId = indexById.value(connection.fromNodeId);
-        wire.fromPortIndex = connection.fromPortIndex;
-        wire.toNodeId = indexById.value(connection.toNodeId);
-        wire.toPortIndex = connection.toPortIndex;
-        indexWires.push_back(wire);
-    }
-}
-
-// A template document reuses the workflow format: nodes and wires land in a
-// scratch graph for serialization, and load back the same way.
-QJsonObject templateToJson(const QVector<core::Node> &prototypes,
-                           const QVector<core::Connection> &indexWires,
-                           const QString &name)
-{
-    core::NodeGraph scratch;
-    QVector<int> ids;
-    for (const core::Node &prototype : prototypes)
-        ids.push_back(scratch.addNode(prototype));
-    for (const core::Connection &wire : indexWires) {
-        core::Connection connection = wire;
-        connection.fromNodeId = ids.value(wire.fromNodeId, -1);
-        connection.toNodeId = ids.value(wire.toNodeId, -1);
-        scratch.addConnection(connection);
-    }
-    return core::workflowToJson(scratch, name);
-}
-
-bool templateFromJson(const QJsonObject &json, QVector<core::Node> &prototypes,
-                      QVector<core::Connection> &indexWires, QString *name)
-{
-    core::NodeGraph scratch;
-    if (!core::workflowFromJson(json, scratch, name))
-        return false;
-    QHash<int, int> indexById;
-    for (const core::Node &node : scratch.nodes()) {
-        indexById.insert(node.id, prototypes.size());
-        core::Node prototype = node;
-        prototype.id = 0;
-        prototypes.push_back(prototype);
-    }
-    for (const core::Connection &connection : scratch.connections()) {
-        core::Connection wire;
-        wire.fromNodeId = indexById.value(connection.fromNodeId);
-        wire.fromPortIndex = connection.fromPortIndex;
-        wire.toNodeId = indexById.value(connection.toNodeId);
-        wire.toPortIndex = connection.toPortIndex;
-        indexWires.push_back(wire);
-    }
-    return true;
-}
 
 struct BuiltinTemplate {
     QString name;
@@ -678,19 +597,16 @@ void BuilderPanel::activate(QListWidgetItem *item)
     if (!file.open(QIODevice::ReadOnly))
         return;
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
-    QVector<core::Node> prototypes;
-    QVector<core::Connection> indexWires;
+    WorkflowTemplate content;
     if (document.isObject()
-        && templateFromJson(document.object(), prototypes, indexWires, nullptr))
-        emit templateChosen(prototypes, indexWires);
+        && templateFromJson(document.object(), content, nullptr))
+        emit templateChosen(content.prototypes, content.indexWires);
 }
 
 void BuilderPanel::saveSelection()
 {
-    QVector<core::Node> prototypes;
-    QVector<core::Connection> indexWires;
-    captureSelection(m_layer->graph(), prototypes, indexWires);
-    if (prototypes.isEmpty())
+    const WorkflowTemplate content = captureSelectionTemplate(m_layer->graph());
+    if (content.prototypes.isEmpty())
         return;
 
     bool accepted = false;
@@ -708,7 +624,7 @@ void BuilderPanel::saveSelection()
                    + QStringLiteral(".json"));
     if (!file.open(QIODevice::WriteOnly))
         return;
-    file.write(QJsonDocument(templateToJson(prototypes, indexWires, name))
+    file.write(QJsonDocument(templateToJson(content, name))
                    .toJson(QJsonDocument::Compact));
     file.commit();
     refresh();

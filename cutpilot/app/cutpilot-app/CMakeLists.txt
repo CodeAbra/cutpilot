@@ -21,6 +21,8 @@ qt_add_executable(cutpilot-app
     TopBar.h
     WorkflowStore.cpp
     WorkflowStore.h
+    WorkflowTemplates.cpp
+    WorkflowTemplates.h
     main.cpp)
 
 set_target_properties(cutpilot-app PROPERTIES

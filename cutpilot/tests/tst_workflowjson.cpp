@@ -8,6 +8,7 @@
 #include "cutpilot/core/command/CommandStack.h"
 
 #include <QJsonArray>
+#include <QJsonDocument>
 
 using namespace cutpilot;
 
@@ -159,6 +160,18 @@ private slots:
         unknownKind[QLatin1String("nodes")] = nodes;
         QVERIFY(!core::workflowFromJson(unknownKind, graph, nullptr));
         QVERIFY(graph.nodes().isEmpty());
+
+        // Non-finite geometry can never reach the loader through Qt's own
+        // parser (an overflowing literal fails the parse outright) — and if
+        // a value arrives non-finite anyway, the loader's finiteness guard
+        // rejects the document. Both layers are pinned here.
+        QString text = QString::fromUtf8(
+            QJsonDocument(core::workflowToJson(fullBoard(), QString()))
+                .toJson(QJsonDocument::Compact));
+        text.replace(QStringLiteral("\"width\":260"),
+                     QStringLiteral("\"width\":1e999"));
+        QVERIFY(text.contains(QStringLiteral("1e999")));
+        QVERIFY(QJsonDocument::fromJson(text.toUtf8()).isNull());
 
         // A populated graph refuses a load outright.
         core::NodeGraph occupied;
