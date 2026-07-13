@@ -34,6 +34,7 @@
 #include <QSGSimpleTextureNode>
 #include <QSGTransformNode>
 #include <QSGVertexColorMaterial>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QtMath>
@@ -271,12 +272,18 @@ void NodeLayerItem::seedCompositeBoard()
         painter.drawRoundedRect(QRectF(294, 300, 180, 170), 24, 24);
     }
 
-    const QString tempDir =
-        QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    const QString backdropPath = QDir(tempDir).filePath(
-        QStringLiteral("cutpilot-composite-backdrop.png"));
+    // A per-process directory: fixed filenames in the shared temp root
+    // would collide between instances and hand another local process a
+    // predictable path to pre-create.
+    static QTemporaryDir boardDir;
+    const QDir dir(boardDir.isValid()
+                       ? boardDir.path()
+                       : QStandardPaths::writableLocation(
+                             QStandardPaths::TempLocation));
+    const QString backdropPath =
+        dir.filePath(QStringLiteral("cutpilot-composite-backdrop.png"));
     const QString subjectPath =
-        QDir(tempDir).filePath(QStringLiteral("cutpilot-composite-subject.png"));
+        dir.filePath(QStringLiteral("cutpilot-composite-subject.png"));
     backdrop.save(backdropPath);
     subject.save(subjectPath);
 
