@@ -60,6 +60,7 @@ private slots:
     void signatureIsStable();
     void signatureFlipsOnParamAndFollowsTheChain();
     void signatureFollowsRewiringAndSourceIdentity();
+    void signatureDistinguishesSourceOutputPorts();
 };
 
 void CompositeTest::prototypesWireUnderThePortRules()
@@ -317,6 +318,32 @@ void CompositeTest::signatureFollowsRewiringAndSourceIdentity()
     runGraph.nodeById(gen)->resultPath = QStringLiteral("/results/x.png");
     runGraph.nodeById(gen)->resultDigest = QStringLiteral("abc123");
     QVERIFY(compositeSignature(runGraph, t2) != beforeResult);
+}
+
+void CompositeTest::signatureDistinguishesSourceOutputPorts()
+{
+    // A node can carry two outputs of the same port type with different
+    // content behind them; which output feeds a consumer must shape the
+    // consumer's signature, or the cache would serve one output's texture
+    // for the other.
+    NodeGraph graph;
+    Node dual;
+    dual.kind = NodeKind::Generate;
+    dual.ports = { { QStringLiteral("left"), PortType::Image, false, 0.35 },
+                   { QStringLiteral("right"), PortType::Image, false, 0.65 } };
+    const int source = graph.addNode(dual);
+    const int transform = addProto(graph, NodeKind::Transform);
+
+    wire(graph, source, 0, transform, 0);
+    const QString onFirstOutput = compositeSignature(graph, transform);
+    CompositePlan plan = buildCompositePlan(graph, transform);
+    QCOMPARE(plan.passes.last().inputs[0].fromPortIndex, 0);
+
+    graph.removeConnection(graph.connectionAtInput(transform, 0));
+    wire(graph, source, 1, transform, 0);
+    QVERIFY(compositeSignature(graph, transform) != onFirstOutput);
+    plan = buildCompositePlan(graph, transform);
+    QCOMPARE(plan.passes.last().inputs[0].fromPortIndex, 1);
 }
 
 QTEST_GUILESS_MAIN(CompositeTest)

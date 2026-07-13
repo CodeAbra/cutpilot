@@ -25,6 +25,7 @@ QVector<CompositeInput> wiredInputs(const NodeGraph &graph, const Node &node)
         if (source && edge->fromPortIndex < source->ports.size()
             && producesImage(source->kind)) {
             input.nodeId = source->id;
+            input.fromPortIndex = edge->fromPortIndex;
             input.matte = source->ports[edge->fromPortIndex].type == PortType::Mask;
         }
         inputs.push_back(input);
@@ -134,6 +135,7 @@ QByteArray canonicalForm(const NodeGraph &graph, int nodeId, QSet<int> &visiting
     appendField(canonical, number(p.rotationDeg));
 
     for (const CompositeInput &input : wiredInputs(graph, *node)) {
+        appendField(canonical, QByteArray::number(input.fromPortIndex));
         appendField(canonical, QByteArray::number(input.matte ? 1 : 0));
         if (input.nodeId == -1)
             appendField(canonical, QByteArrayLiteral("none"));

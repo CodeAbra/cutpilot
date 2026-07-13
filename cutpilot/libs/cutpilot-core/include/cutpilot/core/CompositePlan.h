@@ -7,11 +7,15 @@
 
 namespace cutpilot::core {
 
-// One wired input of a compositor pass. matte marks a Mask-typed upstream
-// output: by convention a mask signal travels in the texture's alpha channel,
-// so a consumer reads alpha where it would otherwise read color.
+// One wired input of a compositor pass. fromPortIndex identifies which of
+// the upstream node's outputs feeds it — part of the signature, so two
+// same-typed outputs of one node can never alias a cache key. matte marks a
+// Mask-typed upstream output: by convention a mask signal travels in the
+// texture's alpha channel, so a consumer reads alpha where it would
+// otherwise read color.
 struct CompositeInput {
     int nodeId = -1; // -1: unwired, treated as fully transparent
+    int fromPortIndex = -1;
     bool matte = false;
 
     bool operator==(const CompositeInput &other) const = default;
