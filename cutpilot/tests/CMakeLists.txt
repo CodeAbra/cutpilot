@@ -212,3 +212,19 @@ target_include_directories(tst_quickmode PRIVATE
 target_link_libraries(tst_quickmode PRIVATE Qt6::Test Qt6::Widgets
     cutpilot-render cutpilot-ipc)
 add_test(NAME app.quickmode COMMAND tst_quickmode)
+
+# The Node screen as one working whole: a palette pick lands on the live
+# canvas, generates through a real sidecar, shows on the minimap mapping,
+# undoes and redoes through the cluster's controls under one identity, and
+# is reachable from the rail's Content and Search panels.
+qt_add_executable(tst_nodescreen tst_nodescreen.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/CanvasCluster.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/CommandPalette.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/PaletteModel.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/RailPanels.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/WorkflowTemplates.cpp)
+target_include_directories(tst_nodescreen PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_nodescreen PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-render cutpilot-ipc)
+add_test(NAME app.nodescreen COMMAND tst_nodescreen)

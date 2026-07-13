@@ -504,6 +504,11 @@ void NodeLayerItem::seedStressBoard(int count)
         const QPointF topLeft(column * spacingX, row * spacingY);
         core::Node node = defaultNode(topLeft + centreOffset);
         node.title = QStringLiteral("Node %1").arg(i + 1);
+        // Runnable as-is on the offline model, so the frame budget can be
+        // measured while real jobs stream over the populated board.
+        node.modelId = QStringLiteral("local/procedural-v1");
+        node.modelLabel = QStringLiteral("Procedural (local)");
+        node.promptText = QStringLiteral("Stress field %1").arg(i + 1);
         const int id = m_graph.addNode(node);
 
         // Chain the board output-to-input so the stress load carries as many
