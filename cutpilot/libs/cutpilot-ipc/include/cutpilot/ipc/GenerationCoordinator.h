@@ -25,8 +25,9 @@ class GenerationClient;
 // dependency-first, refuses cycles outright, and submits every node whose
 // inputs are ready, so independent branches run concurrently. Results flow
 // along the wires: an image-consuming node receives its upstream node's
-// result file, and each finished result's digest keys the cache, so a node
-// whose effective inputs and parameters are unchanged is served its previous
+// image file — a finished generation's result or a reference still's picked
+// file — and each source's content digest keys the cache, so a node whose
+// effective inputs and parameters are unchanged is served its previous
 // result ("Reused") without a vendor call.
 //
 // Spending is governed twice: a run-wide cap pauses the whole run before a
@@ -141,6 +142,15 @@ private:
     static QSize requestedSize(const core::Node &node);
     QString resolveInputPath(const core::Node &node) const;
     QVector<QString> inputDigests(const core::Node &node);
+
+    // The image file an upstream node feeds downstream: a finished
+    // generation's result, or a reference still's picked file.
+    static QString imageSourcePath(const core::Node &source);
+
+    // The content digest of one upstream image source, cached against the
+    // file's size and modification time so an unchanged reference is never
+    // re-hashed per advance.
+    QString sourceDigest(core::Node *source);
     bool applyCachedResult(core::Node *node, const QString &signature);
     void submitNode(core::Node *node, const ModelInfo &model,
                     const QString &signature);
@@ -180,6 +190,14 @@ private:
     ResultCache m_cache;
     PipelineRun m_run;
     double m_runCapUsd = 0.0;
+
+    // Reference-file digests keyed by path; the fingerprint (size + mtime)
+    // invalidates an entry when the file changes on disk.
+    struct FileDigest {
+        QString fingerprint;
+        QString digest;
+    };
+    QHash<QString, FileDigest> m_fileDigests;
 };
 
 } // namespace cutpilot::ipc

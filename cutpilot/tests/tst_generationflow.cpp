@@ -77,6 +77,7 @@ private slots:
     void cleanupTestCase();
 
     void runsAPromptThroughTheServiceToADoneNode();
+    void referenceImageFeedsAndKeysTheGeneration();
     void unchangedRerunServesTheCachedResult();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
@@ -172,6 +173,97 @@ void GenerationFlowTest::runsAPromptThroughTheServiceToADoneNode()
     QTRY_COMPARE_WITH_TIMEOUT(mediaSpy.count(), 1, 10000);
     QCOMPARE(mediaSpy.first().at(0).toInt(), pipeline.generateId);
     QVERIFY(!mediaSpy.first().at(1).value<QImage>().isNull());
+}
+
+void GenerationFlowTest::referenceImageFeedsAndKeysTheGeneration()
+{
+    // A reference still wired into an image-consuming model: the picked file
+    // travels into the job, keys the cache, and swapping the file on disk
+    // re-generates instead of serving the stale result.
+    QTemporaryDir refDir;
+    QVERIFY(refDir.isValid());
+    const QString refPath = refDir.path() + QStringLiteral("/reference.png");
+    QImage(QSize(8, 8), QImage::Format_RGB32).save(refPath);
+
+    core::NodeGraph graph;
+    core::Node still;
+    still.kind = core::NodeKind::Still;
+    still.title = QStringLiteral("Still Image");
+    still.mediaPath = refPath;
+    still.worldSize = QSizeF(260, 180);
+    still.ports = { { QStringLiteral("image"), core::PortType::Image, false,
+                      0.5 } };
+    const int stillId = graph.addNode(still);
+
+    core::Node edit;
+    edit.kind = core::NodeKind::Generate;
+    edit.title = QStringLiteral("Edit Image");
+    edit.promptText = QStringLiteral("weathered postcard grain");
+    edit.modelId = QStringLiteral("local/procedural-edit-v1");
+    edit.modelLabel = QStringLiteral("Procedural Edit (local)");
+    edit.worldPos = QPointF(500, 0);
+    edit.worldSize = QSizeF(280, 200);
+    edit.ports = {
+        { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
+        { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
+        { QStringLiteral("result"), core::PortType::Image, false, 0.5 },
+    };
+    const int editId = graph.addNode(edit);
+
+    core::Connection wire;
+    wire.fromNodeId = stillId;
+    wire.fromPortIndex = 0;
+    wire.toNodeId = editId;
+    wire.toPortIndex = 0;
+    QVERIFY(graph.addConnection(wire) != -1);
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    QSignalSpy submissionSpy(&m_client, &ipc::GenerationClient::jobSubmitted);
+    coordinator.runNode(editId);
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(editId)->runState,
+                              core::RunState::Done, 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 10000);
+    QCOMPARE(submissionSpy.count(), 1);
+    const QByteArray fromFirstReference =
+        fileDigest(graph.nodeById(editId)->resultPath);
+    QVERIFY(!fromFirstReference.isEmpty());
+
+    // Unchanged reference, unchanged everything: served from cache.
+    coordinator.runNode(editId);
+    QCOMPARE(graph.nodeById(editId)->statusMessage, QStringLiteral("Reused"));
+    QCOMPARE(submissionSpy.count(), 1);
+    QVERIFY(!coordinator.runActive());
+
+    // A different reference is a different generation: the swap re-submits
+    // and the produced image genuinely derives from the new pixels.
+    QImage swapped(QSize(16, 16), QImage::Format_RGB32);
+    swapped.fill(Qt::blue);
+    QVERIFY(swapped.save(refPath));
+    coordinator.runNode(editId);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 30000);
+    QCOMPARE(graph.nodeById(editId)->runState, core::RunState::Done);
+    QCOMPARE(submissionSpy.count(), 2);
+    QVERIFY(fileDigest(graph.nodeById(editId)->resultPath)
+            != fromFirstReference);
+
+    // An image-consuming model with nothing wired in refuses locally with
+    // guidance instead of submitting.
+    core::NodeGraph bare;
+    core::Node lone = edit;
+    const int loneId = bare.addNode(lone);
+    ipc::GenerationCoordinator loneCoordinator(&bare, &m_client);
+    QSignalSpy loneModels(&loneCoordinator,
+                          &ipc::GenerationCoordinator::modelsReady);
+    loneCoordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(loneModels.count(), 1, 10000);
+    loneCoordinator.runNode(loneId);
+    QCOMPARE(bare.nodeById(loneId)->runState, core::RunState::Error);
+    QCOMPARE(bare.nodeById(loneId)->statusMessage,
+             QStringLiteral("Connect an image input"));
 }
 
 void GenerationFlowTest::unchangedRerunServesTheCachedResult()

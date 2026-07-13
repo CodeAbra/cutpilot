@@ -5,7 +5,9 @@
 #include "cutpilot/ipc/GenerationClient.h"
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 
@@ -93,6 +95,39 @@ QString GenerationCoordinator::resolvePrompt(const core::Node &node) const
     return node.promptText.trimmed();
 }
 
+QString GenerationCoordinator::imageSourcePath(const core::Node &source)
+{
+    if (!source.resultPath.isEmpty())
+        return source.resultPath;
+    // A reference still feeds its picked file downstream exactly as a
+    // finished generation feeds its result.
+    if (source.kind == core::NodeKind::Still && !source.mediaPath.isEmpty())
+        return source.mediaPath;
+    return QString();
+}
+
+QString GenerationCoordinator::sourceDigest(core::Node *source)
+{
+    if (!source->resultPath.isEmpty()) {
+        if (source->resultDigest.isEmpty())
+            source->resultDigest = hashFile(source->resultPath);
+        return source->resultDigest;
+    }
+
+    const QString path = imageSourcePath(*source);
+    if (path.isEmpty())
+        return QString();
+    const QFileInfo info(path);
+    const QString fingerprint = QStringLiteral("%1|%2").arg(info.size()).arg(
+        info.lastModified().toMSecsSinceEpoch());
+    FileDigest &entry = m_fileDigests[path];
+    if (entry.fingerprint != fingerprint || entry.digest.isEmpty()) {
+        entry.fingerprint = fingerprint;
+        entry.digest = hashFile(path);
+    }
+    return entry.digest;
+}
+
 QString GenerationCoordinator::resolveInputPath(const core::Node &node) const
 {
     for (int i = 0; i < node.ports.size(); ++i) {
@@ -104,8 +139,11 @@ QString GenerationCoordinator::resolveInputPath(const core::Node &node) const
             continue;
         const core::Connection *edge = m_graph->connectionById(connectionId);
         const core::Node *source = edge ? m_graph->nodeById(edge->fromNodeId) : nullptr;
-        if (source && !source->resultPath.isEmpty())
-            return source->resultPath;
+        if (!source)
+            continue;
+        const QString path = imageSourcePath(*source);
+        if (!path.isEmpty())
+            return path;
     }
     return QString();
 }
@@ -125,11 +163,12 @@ QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node)
             continue;
         const core::Connection *edge = m_graph->connectionById(connectionId);
         core::Node *source = edge ? m_graph->nodeById(edge->fromNodeId) : nullptr;
-        if (!source || source->resultPath.isEmpty())
+        if (!source)
             continue;
-        if (source->resultDigest.isEmpty())
-            source->resultDigest = hashFile(source->resultPath);
-        digests.push_back(QStringLiteral("%1=%2").arg(i).arg(source->resultDigest));
+        const QString digest = sourceDigest(source);
+        if (digest.isEmpty())
+            continue;
+        digests.push_back(QStringLiteral("%1=%2").arg(i).arg(digest));
     }
     return digests;
 }

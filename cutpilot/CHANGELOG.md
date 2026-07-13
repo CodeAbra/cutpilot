@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The workflow document records which node the Quick Mode surface owns
   (`quickNode`), so reopening a project re-adopts the same node.
 
+### Fixed
+- A reference image (Still Image node) wired into an image-consuming
+  generation now genuinely feeds the run: the picked file travels into the
+  job and its content keys the result cache, so swapping the file
+  re-generates while an unchanged reference is served from cache. Previously
+  only a finished generation's result could feed an image input, and an
+  image-consuming model fed by a reference alone refused to run.
+
 ### Changed
 - Quick Mode adoption resolves by the recorded node identity instead of the
   node title. Renaming the quick node no longer detaches the surface, and a
