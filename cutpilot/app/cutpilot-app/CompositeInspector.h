@@ -34,6 +34,8 @@ public:
 
     void openFor(int nodeId);
 
+    void retheme(const theme::ThemeTable &theme);
+
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 

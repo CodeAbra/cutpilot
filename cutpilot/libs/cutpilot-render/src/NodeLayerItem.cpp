@@ -236,6 +236,15 @@ QRectF NodeLayerItem::contentWorldBounds() const
     return bounds;
 }
 
+void NodeLayerItem::graphReloaded()
+{
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    updatePulseTimer();
+    update();
+    emit graphMutated();
+}
+
 int NodeLayerItem::placePrototypeAt(const core::Node &prototype,
                                     const QPointF &worldCentre)
 {
@@ -1985,6 +1994,20 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Space) {
         m_spaceHeld = true;
         setCursor(Qt::OpenHandCursor);
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_M) {
+        emit minimapToggleRequested();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_F
+        && !event->modifiers().testAnyFlags(Qt::ControlModifier
+                                            | Qt::MetaModifier)) {
+        emit fitAllRequested();
         event->accept();
         return;
     }

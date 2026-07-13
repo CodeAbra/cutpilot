@@ -16,8 +16,9 @@ namespace cutpilot::render {
 // It repaints on board or camera changes only, never per frame.
 class MinimapItem : public QQuickItem {
     Q_OBJECT
-    Q_PROPERTY(cutpilot::render::NodeLayerItem *layer READ layer WRITE setLayer
-                   NOTIFY layerChanged)
+    // Named nodeLayer because QQuickItem already carries a "layer" property.
+    Q_PROPERTY(cutpilot::render::NodeLayerItem *nodeLayer READ layer
+                   WRITE setLayer NOTIFY layerChanged)
     Q_PROPERTY(cutpilot::render::CanvasController *controller READ controller
                    WRITE setController NOTIFY controllerChanged)
 

@@ -1,5 +1,13 @@
+#include "CanvasCluster.h"
+#include "CommandPalette.h"
 #include "CompositeInspector.h"
 #include "ExportController.h"
+#include "RailPanels.h"
+#include "ThemeController.h"
+#include "ToolPill.h"
+#include "ToolRail.h"
+#include "TopBar.h"
+#include "WorkflowStore.h"
 
 #include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/NodeGraph.h"
@@ -7,8 +15,11 @@
 #include "cutpilot/ipc/GenerationClient.h"
 #include "cutpilot/ipc/GenerationCoordinator.h"
 #include "cutpilot/ipc/SidecarHost.h"
+#include "cutpilot/core/NodeCatalog.h"
+#include "cutpilot/core/WorkflowJson.h"
 #include "cutpilot/render/CanvasController.h"
 #include "cutpilot/render/CanvasItem.h"
+#include "cutpilot/render/MinimapItem.h"
 #include "cutpilot/render/NodeLayerItem.h"
 #include "cutpilot/render/CompositorService.h"
 #include "cutpilot/render/PreviewController.h"
@@ -19,7 +30,18 @@
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
+#include <QClipboard>
 #include <QCursor>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QJsonDocument>
+#include <QMimeData>
+#include <QRadioButton>
+#include <QStackedWidget>
+#include <QUrl>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFileDialog>
@@ -41,6 +63,7 @@
 #include <QResizeEvent>
 #include <QSlider>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -55,8 +78,17 @@ using cutpilot::ipc::ConvertClient;
 using cutpilot::ipc::GenerationClient;
 using cutpilot::ipc::GenerationCoordinator;
 using cutpilot::ipc::SidecarHost;
+using cutpilot::app::CanvasCluster;
+using cutpilot::app::CommandPalette;
+using cutpilot::app::PaletteModel;
+using cutpilot::app::ThemeController;
+using cutpilot::app::ToolPill;
+using cutpilot::app::ToolRail;
+using cutpilot::app::TopBar;
+using cutpilot::app::WorkflowStore;
 using cutpilot::render::CanvasController;
 using cutpilot::render::CanvasItem;
+using cutpilot::render::MinimapItem;
 using cutpilot::render::CompositorService;
 using cutpilot::render::NodeLayerItem;
 using cutpilot::render::PreviewController;
@@ -67,49 +99,6 @@ using cutpilot::theme::ThemeTable;
 namespace core = cutpilot::core;
 
 namespace {
-
-// A frameless live readout pinned to the bottom-left of the canvas, mirroring the
-// design's bottom-left cluster. It shows the current zoom as a percentage in the
-// monospace numeric style.
-class ZoomReadout : public QLabel {
-public:
-    explicit ZoomReadout(const ThemeTable &theme, QWidget *parent)
-        : QLabel(parent)
-    {
-        QFont mono;
-        mono.setFamilies({ QStringLiteral("SF Mono"),
-                           QStringLiteral("Menlo"),
-                           QStringLiteral("Cascadia Code") });
-        mono.setStyleHint(QFont::Monospace);
-        mono.setPixelSize(12);
-        setFont(mono);
-
-        const QColor text = theme.textSecondary();
-        const QColor surface = theme.bgCanvas().lighter(125);
-        const QColor border = theme.borderSubtle();
-        setStyleSheet(QStringLiteral(
-                          "QLabel {"
-                          "  color: %1;"
-                          "  background-color: rgba(%2,%3,%4,200);"
-                          "  border: 1px solid %5;"
-                          "  border-radius: 4px;"
-                          "  padding: 3px 8px;"
-                          "}")
-                          .arg(text.name())
-                          .arg(surface.red())
-                          .arg(surface.green())
-                          .arg(surface.blue())
-                          .arg(border.name()));
-        setText(QStringLiteral("100%"));
-        adjustSize();
-    }
-
-    void setZoomPercent(qreal percent)
-    {
-        setText(QStringLiteral("%1%").arg(qRound(percent)));
-        adjustSize();
-    }
-};
 
 // The pipeline's control strip, floated over the canvas: run everything,
 // resume held work or abort while paused, the run-wide spending cap, and the
@@ -125,26 +114,7 @@ public:
     explicit RunPanel(const ThemeTable &theme, QWidget *parent)
         : QWidget(parent)
     {
-        const QColor surface = theme.bgCanvas().lighter(125);
-        setStyleSheet(QStringLiteral(
-                          "QWidget { color: %1; }"
-                          "QLabel { color: %1; }"
-                          "QPushButton {"
-                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
-                          "  border: 1px solid %5; border-radius: 4px;"
-                          "  padding: 3px 10px;"
-                          "}"
-                          "QPushButton:disabled { color: %6; }"
-                          "QDoubleSpinBox {"
-                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
-                          "  border: 1px solid %5; border-radius: 4px; padding: 2px;"
-                          "}")
-                          .arg(theme.textPrimary().name())
-                          .arg(surface.red())
-                          .arg(surface.green())
-                          .arg(surface.blue())
-                          .arg(theme.borderSubtle().name(),
-                               theme.textSecondary().name()));
+        retheme(theme);
 
         auto *row = new QHBoxLayout(this);
         row->setContentsMargins(8, 6, 8, 6);
@@ -171,6 +141,30 @@ public:
         row->addWidget(status);
 
         showSummary(cutpilot::ipc::RunSummary());
+    }
+
+    void retheme(const ThemeTable &theme)
+    {
+        const QColor surface = theme.bgCanvas().lighter(125);
+        setStyleSheet(QStringLiteral(
+                          "QWidget { color: %1; }"
+                          "QLabel { color: %1; }"
+                          "QPushButton {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px;"
+                          "  padding: 3px 10px;"
+                          "}"
+                          "QPushButton:disabled { color: %6; }"
+                          "QDoubleSpinBox {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px; padding: 2px;"
+                          "}")
+                          .arg(theme.textPrimary().name())
+                          .arg(surface.red())
+                          .arg(surface.green())
+                          .arg(surface.blue())
+                          .arg(theme.borderSubtle().name(),
+                               theme.textSecondary().name()));
     }
 
     void showSummary(const cutpilot::ipc::RunSummary &summary)
@@ -204,9 +198,7 @@ public:
         status->setText(parts.join(QStringLiteral(" · ")));
         adjustSize();
         if (parentWidget()) {
-            const int margin = 12;
-            move(parentWidget()->width() - width() - margin,
-                 parentWidget()->height() - height() - margin);
+            move((parentWidget()->width() - width()) / 2, 12);
             raise();
         }
     }
@@ -224,24 +216,7 @@ public:
         , m_previews(previews)
         , m_layer(layer)
     {
-        const QColor surface = theme.bgCanvas().lighter(125);
-        setStyleSheet(QStringLiteral(
-                          "QWidget { color: %1; }"
-                          "QLabel { color: %1; background: transparent; "
-                          "border: none; }"
-                          "QPushButton {"
-                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
-                          "  border: 1px solid %5; border-radius: 4px;"
-                          "  padding: 2px 8px;"
-                          "}"
-                          "QPushButton:checked { border-color: %6; color: %6; }"
-                          "QSlider { background: transparent; }")
-                          .arg(theme.textPrimary().name())
-                          .arg(surface.red())
-                          .arg(surface.green())
-                          .arg(surface.blue())
-                          .arg(theme.borderSubtle().name(),
-                               theme.textPrimary().name()));
+        retheme(theme);
 
         auto *column = new QVBoxLayout(this);
         column->setContentsMargins(6, 6, 6, 6);
@@ -345,6 +320,32 @@ public:
 
     PreviewItem *previewItem() const { return m_preview; }
 
+    void retheme(const ThemeTable &theme)
+    {
+        const QColor surface = theme.bgCanvas().lighter(125);
+        setStyleSheet(QStringLiteral(
+                          "QWidget { color: %1; }"
+                          "QLabel { color: %1; background: transparent; "
+                          "border: none; }"
+                          "QPushButton {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px;"
+                          "  padding: 2px 8px;"
+                          "}"
+                          "QPushButton:checked { border-color: %6; color: %6; }"
+                          "QSlider { background: transparent; }")
+                          .arg(theme.textPrimary().name())
+                          .arg(surface.red())
+                          .arg(surface.green())
+                          .arg(surface.blue())
+                          .arg(theme.borderSubtle().name(),
+                               theme.textPrimary().name()));
+        if (m_preview) {
+            m_preview->setSurroundColor(theme.bgCanvas());
+            m_preview->setDividerColor(theme.emphasis());
+        }
+    }
+
     // Drive the compare strip programmatically, keeping the buttons in step.
     void selectMode(PreviewItem::CompareMode mode)
     {
@@ -400,8 +401,10 @@ private:
     QPushButton *m_fit = nullptr;
 };
 
-// Hosts the GPU canvas (grid + node layers, sharing one camera) and overlays the
-// zoom readout in the bottom-left corner.
+// Hosts the GPU canvas (grid, node, and minimap layers, sharing one camera)
+// with the floating chrome — the tool pill, the bottom-left cluster, the rail
+// panels, and the run strip — overlaid on top. Media files dropped anywhere
+// on it land as still or video nodes at the drop point.
 class CanvasView : public QWidget {
 public:
     explicit CanvasView(QWidget *parent = nullptr)
@@ -411,6 +414,7 @@ public:
         qmlRegisterType<CanvasController>("CutPilot.Render", 1, 0, "CanvasController");
         qmlRegisterType<CanvasItem>("CutPilot.Render", 1, 0, "CanvasItem");
         qmlRegisterType<NodeLayerItem>("CutPilot.Render", 1, 0, "NodeLayerItem");
+        qmlRegisterType<MinimapItem>("CutPilot.Render", 1, 0, "MinimapItem");
         qmlRegisterType<PreviewItem>("CutPilot.Render", 1, 0, "PreviewItem");
 
         m_quick = new QQuickWidget(this);
@@ -420,73 +424,124 @@ public:
         QQuickItem *root = m_quick->rootObject();
         if (root) {
             m_controller = root->findChild<CanvasController *>();
-            if (auto *layer = root->findChild<NodeLayerItem *>()) {
-                m_layer = layer;
-                // CUTPILOT_STRESS_NODES seeds a wide stress board for the
-                // frame-budget check; CUTPILOT_COMPOSITE_BOARD seeds the local
-                // compositing chain; otherwise the wired starter pair.
-                bool ok = false;
-                const int stressCount =
-                    qEnvironmentVariableIntValue("CUTPILOT_STRESS_NODES", &ok);
-                if (ok && stressCount > 0)
-                    layer->seedStressBoard(stressCount);
-                else if (qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0)
-                    layer->seedCompositeBoard();
-                else
-                    layer->seedStarterNode();
-
-                // Dropping a fresh connector on empty canvas asks the chrome for a
-                // node palette; a plain menu stands in for the command palette. The
-                // queued hop lets the release event finish before the menu blocks.
-                QObject::connect(
-                    layer, &NodeLayerItem::paletteRequested, this,
-                    [this] {
-                        const QStringList titles = m_layer->paletteEntryTitles();
-                        if (titles.isEmpty()) {
-                            m_layer->cancelPalette();
-                            return;
-                        }
-                        QMenu menu(this);
-                        for (int i = 0; i < titles.size(); ++i)
-                            menu.addAction(titles[i])->setData(i);
-                        if (QAction *chosen = menu.exec(QCursor::pos()))
-                            m_layer->placePaletteEntry(chosen->data().toInt());
-                        else
-                            m_layer->cancelPalette();
-                    },
-                    Qt::QueuedConnection);
-            }
+            m_layer = root->findChild<NodeLayerItem *>();
+            m_minimap = root->findChild<MinimapItem *>();
+            m_grid = root->findChild<CanvasItem *>();
         }
 
-        m_readout = new ZoomReadout(m_theme, this);
         m_runPanel = new RunPanel(m_theme, this);
-
-        if (m_controller) {
-            QObject::connect(m_controller, &CanvasController::cameraChanged, this,
-                             [this] {
-                                 m_readout->setZoomPercent(m_controller->zoomPercent());
-                             });
-            m_readout->setZoomPercent(m_controller->zoomPercent());
-        }
+        setAcceptDrops(true);
     }
 
     CanvasController *controller() const { return m_controller; }
     NodeLayerItem *layer() const { return m_layer; }
+    MinimapItem *minimap() const { return m_minimap; }
     QQuickWidget *quickWidget() const { return m_quick; }
     RunPanel *runPanel() const { return m_runPanel; }
+
+    // The floating chrome this view keeps anchored: the pill bottom-center,
+    // the cluster bottom-left, and any rail panels along the left edge.
+    void setFloatingChrome(QWidget *pill, QWidget *cluster,
+                           const QVector<QWidget *> &panels)
+    {
+        m_pill = pill;
+        m_cluster = cluster;
+        m_panels = panels;
+        // Created after this view was shown, so visibility is explicit:
+        // the pill and cluster are always up, panels wait for their rail item.
+        if (m_pill)
+            m_pill->show();
+        if (m_cluster)
+            m_cluster->show();
+        layoutOverlays();
+    }
+
+    void layoutOverlays()
+    {
+        const int margin = 12;
+        if (m_pill) {
+            m_pill->adjustSize();
+            m_pill->move((width() - m_pill->width()) / 2,
+                         height() - m_pill->height() - margin);
+            m_pill->raise();
+        }
+        if (m_cluster) {
+            m_cluster->adjustSize();
+            m_cluster->move(margin, height() - m_cluster->height() - margin);
+            m_cluster->raise();
+        }
+        for (QWidget *panel : m_panels) {
+            panel->setFixedHeight(qMax(200, height() - 2 * margin));
+            panel->move(margin, margin);
+            if (panel->isVisible())
+                panel->raise();
+        }
+        m_runPanel->move((width() - m_runPanel->width()) / 2, margin);
+        m_runPanel->raise();
+    }
+
+    // Push one theme into every GPU layer this view hosts.
+    void applyCanvasTheme(cutpilot::theme::Theme themeId)
+    {
+        m_theme.setTheme(themeId);
+        setStyleSheet(QStringLiteral("background-color: %1;")
+                          .arg(m_theme.bgCanvas().name()));
+        if (m_layer)
+            m_layer->setTheme(themeId);
+        if (m_grid)
+            m_grid->setTheme(themeId);
+        if (m_minimap)
+            m_minimap->setTheme(themeId);
+    }
+
+    // The world point under a view-local position, for drops.
+    QPointF worldAtPos(const QPointF &localPos) const
+    {
+        if (!m_controller)
+            return localPos;
+        const qreal dpr = devicePixelRatioF();
+        return m_controller->worldFromScreen(localPos * dpr, dpr);
+    }
 
 protected:
     void resizeEvent(QResizeEvent *event) override
     {
         QWidget::resizeEvent(event);
         m_quick->setGeometry(rect());
-        const int margin = 12;
-        m_readout->move(margin,
-                        height() - m_readout->height() - margin);
-        m_readout->raise();
-        m_runPanel->move(width() - m_runPanel->width() - margin,
-                         height() - m_runPanel->height() - margin);
-        m_runPanel->raise();
+        layoutOverlays();
+    }
+
+    void dragEnterEvent(QDragEnterEvent *event) override
+    {
+        if (!m_layer || !event->mimeData()->hasUrls())
+            return;
+        for (const QUrl &url : event->mimeData()->urls()) {
+            if (url.isLocalFile()
+                && cutpilot::app::AssetsPanel::isMediaFile(url.toLocalFile())) {
+                event->acceptProposedAction();
+                return;
+            }
+        }
+    }
+
+    void dropEvent(QDropEvent *event) override
+    {
+        if (!m_layer)
+            return;
+        int placed = 0;
+        for (const QUrl &url : event->mimeData()->urls()) {
+            if (!url.isLocalFile()
+                || !cutpilot::app::AssetsPanel::isMediaFile(url.toLocalFile()))
+                continue;
+            // Fan multiple files out so they never stack invisibly.
+            const QPointF offset(placed * 40.0, placed * 40.0);
+            m_layer->placePrototypeAt(
+                cutpilot::app::AssetsPanel::prototypeForFile(url.toLocalFile()),
+                worldAtPos(event->position()) + offset);
+            ++placed;
+        }
+        if (placed > 0)
+            event->acceptProposedAction();
     }
 
 private:
@@ -494,8 +549,12 @@ private:
     QQuickWidget *m_quick = nullptr;
     CanvasController *m_controller = nullptr;
     NodeLayerItem *m_layer = nullptr;
-    ZoomReadout *m_readout = nullptr;
+    MinimapItem *m_minimap = nullptr;
+    CanvasItem *m_grid = nullptr;
     RunPanel *m_runPanel = nullptr;
+    QWidget *m_pill = nullptr;
+    QWidget *m_cluster = nullptr;
+    QVector<QWidget *> m_panels;
 };
 
 // An inline prompt editor floated over a prompt node's body. Committing on
@@ -509,6 +568,11 @@ public:
         : QPlainTextEdit(parent)
     {
         hide();
+        retheme(theme);
+    }
+
+    void retheme(const ThemeTable &theme)
+    {
         setStyleSheet(QStringLiteral(
                           "QPlainTextEdit {"
                           "  color: %1;"
@@ -582,22 +646,7 @@ public:
         , m_layer(layer)
         , m_media(media)
     {
-        const QColor surface = theme.bgCanvas().lighter(125);
-        setStyleSheet(QStringLiteral(
-                          "QWidget { color: %1; }"
-                          "QLabel { color: %1; background: transparent; "
-                          "border: none; }"
-                          "QPushButton {"
-                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
-                          "  border: 1px solid %5; border-radius: 4px;"
-                          "  padding: 2px 10px;"
-                          "}"
-                          "QSlider { background: transparent; }")
-                          .arg(theme.textPrimary().name())
-                          .arg(surface.red())
-                          .arg(surface.green())
-                          .arg(surface.blue())
-                          .arg(theme.borderSubtle().name()));
+        retheme(theme);
 
         auto *row = new QHBoxLayout(this);
         row->setContentsMargins(8, 6, 8, 6);
@@ -640,6 +689,26 @@ public:
             parent->installEventFilter(this);
         setFixedWidth(520);
         hide();
+    }
+
+    void retheme(const ThemeTable &theme)
+    {
+        const QColor surface = theme.bgCanvas().lighter(125);
+        setStyleSheet(QStringLiteral(
+                          "QWidget { color: %1; }"
+                          "QLabel { color: %1; background: transparent; "
+                          "border: none; }"
+                          "QPushButton {"
+                          "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                          "  border: 1px solid %5; border-radius: 4px;"
+                          "  padding: 2px 10px;"
+                          "}"
+                          "QSlider { background: transparent; }")
+                          .arg(theme.textPrimary().name())
+                          .arg(surface.red())
+                          .arg(surface.green())
+                          .arg(surface.blue())
+                          .arg(theme.borderSubtle().name()));
     }
 
     void openFor(int nodeId)
@@ -824,6 +893,8 @@ public:
             layer->setGateLimit(nodeId, limit);
     }
 
+    // With a node in hand the stored key immediately reruns it; from the
+    // settings surface (no node) it only lands in the keychain.
     void promptAddKey(int nodeId, const QString &provider)
     {
         bool accepted = false;
@@ -847,14 +918,57 @@ public:
             return;
         }
         m_coordinator->refreshModels();
-        m_coordinator->runNode(nodeId);
+        if (nodeId != -1)
+            m_coordinator->runNode(nodeId);
     }
+
+    void retheme(const ThemeTable &theme) { m_editor->retheme(theme); }
 
 private:
     CanvasView *m_view = nullptr;
     GenerationCoordinator *m_coordinator = nullptr;
     PreviewController *m_previews = nullptr;
     PromptEditor *m_editor = nullptr;
+};
+
+// An honest surface for a mode whose work area is not built yet: the switch
+// itself is real, the page says exactly what it is.
+class ModePage : public QWidget {
+public:
+    ModePage(const QString &name, const ThemeTable &theme,
+             QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_StyledBackground, true);
+        auto *column = new QVBoxLayout(this);
+        column->addStretch(2);
+        m_title = new QLabel(name, this);
+        m_title->setAlignment(Qt::AlignCenter);
+        m_hint = new QLabel(
+            QStringLiteral("This mode's work area isn't built yet.\n"
+                           "Node is the live screen."),
+            this);
+        m_hint->setAlignment(Qt::AlignCenter);
+        column->addWidget(m_title);
+        column->addWidget(m_hint);
+        column->addStretch(3);
+        retheme(theme);
+    }
+
+    void retheme(const ThemeTable &theme)
+    {
+        setStyleSheet(QStringLiteral("background-color: %1;")
+                          .arg(theme.bgCanvas().name()));
+        m_title->setStyleSheet(
+            QStringLiteral("color: %1; font-size: 20px; font-weight: 600;")
+                .arg(theme.textPrimary().name()));
+        m_hint->setStyleSheet(QStringLiteral("color: %1; font-size: 13px;")
+                                  .arg(theme.textSecondary().name()));
+    }
+
+private:
+    QLabel *m_title = nullptr;
+    QLabel *m_hint = nullptr;
 };
 
 // Continuously pans the camera while timing the gaps between rendered frames, then
@@ -921,7 +1035,8 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("CutPilot"));
     app.setOrganizationName(QStringLiteral("CutPilot"));
 
-    const ThemeTable theme(cutpilot::theme::Theme::Dark);
+    ThemeController themes;
+    const ThemeTable &theme = themes.table();
 
     // Declared before the window so they outlive the coordinator and chrome
     // parented into its widget tree, which hold pointers to them.
@@ -934,11 +1049,46 @@ int main(int argc, char *argv[])
     QMainWindow window;
     window.setWindowTitle(QStringLiteral("CutPilot"));
 
-    auto *view = new CanvasView(&window);
-    view->setStyleSheet(QStringLiteral("background-color: %1;")
-                            .arg(theme.bgCanvas().name()));
-    window.setCentralWidget(view);
-    window.resize(1280, 800);
+    // The frame: the top chrome over a body of icon rail + mode pages, with
+    // the Node screen's canvas as the live page.
+    auto *frame = new QWidget(&window);
+    auto *frameColumn = new QVBoxLayout(frame);
+    frameColumn->setContentsMargins(0, 0, 0, 0);
+    frameColumn->setSpacing(0);
+
+    auto *topBar = new TopBar(theme, frame);
+    frameColumn->addWidget(topBar);
+
+    auto *body = new QWidget(frame);
+    auto *bodyRow = new QHBoxLayout(body);
+    bodyRow->setContentsMargins(0, 0, 0, 0);
+    bodyRow->setSpacing(0);
+    auto *rail = new ToolRail(theme, body);
+    auto *modeStack = new QStackedWidget(body);
+    bodyRow->addWidget(rail);
+    bodyRow->addWidget(modeStack, 1);
+    frameColumn->addWidget(body, 1);
+
+    auto *view = new CanvasView(modeStack);
+    const int nodeModeIndex = TopBar::modeNames().indexOf(QStringLiteral("Node"));
+    QVector<ModePage *> modePages;
+    for (int i = 0; i < TopBar::modeNames().size(); ++i) {
+        if (i == nodeModeIndex) {
+            modeStack->addWidget(view);
+        } else {
+            auto *page = new ModePage(TopBar::modeNames()[i], theme, modeStack);
+            modePages.push_back(page);
+            modeStack->addWidget(page);
+        }
+    }
+    modeStack->setCurrentIndex(nodeModeIndex);
+    topBar->setActiveMode(nodeModeIndex);
+    QObject::connect(topBar, &TopBar::modeSelected, modeStack,
+                     &QStackedWidget::setCurrentIndex);
+
+    view->applyCanvasTheme(themes.theme());
+    window.setCentralWidget(frame);
+    window.resize(1440, 900);
     window.show();
 
     // The generation stack: the service process, its client, and the
@@ -951,7 +1101,41 @@ int main(int argc, char *argv[])
     PreviewController *previews = nullptr;
     PreviewPanel *previewPanel = nullptr;
     ExportController *exporter = nullptr;
+    WorkflowStore *store = nullptr;
     if (layer) {
+        // CUTPILOT_STRESS_NODES seeds a wide stress board for the frame-budget
+        // check; CUTPILOT_COMPOSITE_BOARD seeds the local compositing chain.
+        // Both are throwaway demo boards, so autosave stays out of their way.
+        // Otherwise the stored workflow loads — its saved generation results
+        // decode back into the cards — or a fresh board starts wired.
+        bool stressRequested = false;
+        const int stressCount =
+            qEnvironmentVariableIntValue("CUTPILOT_STRESS_NODES", &stressRequested);
+        const bool demoBoard = (stressRequested && stressCount > 0)
+            || qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0;
+        if (stressRequested && stressCount > 0) {
+            layer->seedStressBoard(stressCount);
+        } else if (qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0) {
+            layer->seedCompositeBoard();
+        } else {
+            store = new WorkflowStore(&layer->graph(), view);
+            if (store->load()) {
+                layer->graphReloaded();
+                for (const core::Node &node : layer->graph().nodes()) {
+                    if (node.resultPath.isEmpty())
+                        continue;
+                    const QImage media(node.resultPath);
+                    if (!media.isNull())
+                        layer->setNodeMedia(node.id, media);
+                }
+            } else {
+                layer->seedStarterNode();
+                store->scheduleSave();
+            }
+            QObject::connect(layer, &NodeLayerItem::graphMutated, store,
+                             &WorkflowStore::scheduleSave);
+        }
+
         coordinator = new GenerationCoordinator(&layer->graph(), &client, view);
         previews = new PreviewController(view);
         previews->setLayer(layer);
@@ -1121,6 +1305,500 @@ int main(int argc, char *argv[])
                              panel->adjustSize();
                          });
         convertHost.start();
+
+        // ------- The screen frame: palette, rail panels, pill, cluster -------
+
+        const auto viewCenterWorld = [view] {
+            return view->worldAtPos(
+                QPointF(view->width() / 2.0, view->height() / 2.0));
+        };
+        const auto modelEntries = [coordinator] {
+            QVector<PaletteModel::ModelEntry> entries;
+            for (const auto &model : coordinator->models())
+                entries.push_back(
+                    { model.id, model.label, model.provider, model.hasKey });
+            return entries;
+        };
+
+        // The command palette serves every entry point. A summons remembers
+        // where the pick should land; connector drops open the typed offers.
+        auto *palette = new CommandPalette(theme, view);
+        auto pendingWorld = std::make_shared<QPointF>();
+        auto pendingWorldValid = std::make_shared<bool>(false);
+        const auto openPaletteAt = [palette, pendingWorld,
+                                    pendingWorldValid](const QPointF &world) {
+            *pendingWorld = world;
+            *pendingWorldValid = true;
+            palette->open();
+        };
+        QObject::connect(
+            layer, &NodeLayerItem::paletteInvoked, palette,
+            [openPaletteAt](QPointF world) { openPaletteAt(world); },
+            Qt::QueuedConnection);
+        QObject::connect(
+            layer, &NodeLayerItem::paletteRequested, palette,
+            [palette, layer] {
+                const QStringList titles = layer->paletteEntryTitles();
+                if (titles.isEmpty()) {
+                    layer->cancelPalette();
+                    return;
+                }
+                palette->openOffers(titles);
+            },
+            Qt::QueuedConnection);
+        QObject::connect(palette, &CommandPalette::offerChosen, layer,
+                         [layer](const QString &title) {
+                             const int index =
+                                 layer->paletteEntryTitles().indexOf(title);
+                             if (index >= 0)
+                                 layer->placePaletteEntry(index);
+                             else
+                                 layer->cancelPalette();
+                         });
+        QObject::connect(palette, &CommandPalette::prototypeChosen, layer,
+                         [layer, viewCenterWorld, pendingWorld,
+                          pendingWorldValid](const core::Node &prototype) {
+                             const QPointF world = *pendingWorldValid
+                                 ? *pendingWorld
+                                 : viewCenterWorld();
+                             *pendingWorldValid = false;
+                             layer->placePrototypeAt(prototype, world);
+                         });
+        QObject::connect(palette, &CommandPalette::dismissed, layer,
+                         [layer] { layer->cancelPalette(); });
+        QObject::connect(coordinator, &GenerationCoordinator::modelsReady,
+                         palette, [palette, modelEntries] {
+                             palette->model().setModels(modelEntries());
+                         });
+
+        // The tool pill drives the canvas tools; upload and quick land here.
+        auto *pill = new ToolPill(theme, layer, view);
+        QObject::connect(pill, &ToolPill::paletteRequested, palette,
+                         [openPaletteAt, viewCenterWorld] {
+                             openPaletteAt(viewCenterWorld());
+                         });
+        QObject::connect(
+            pill, &ToolPill::uploadRequested, view,
+            [view, layer, viewCenterWorld] {
+                const QString path = QFileDialog::getOpenFileName(
+                    view, QStringLiteral("Bring in a file"), QString(),
+                    QStringLiteral("Media (*.png *.jpg *.jpeg *.webp *.bmp "
+                                   "*.tif *.tiff *.mp4 *.mov *.m4v *.webm)"));
+                if (!path.isEmpty())
+                    layer->placePrototypeAt(
+                        cutpilot::app::AssetsPanel::prototypeForFile(path),
+                        viewCenterWorld());
+            });
+
+        // Quick Mode: one self-contained generate node — type the prompt in
+        // its body, pick a model on its chip, press its run control. The
+        // toggle places it (or refocuses the existing one).
+        auto quickNodeId = std::make_shared<int>(-1);
+        QObject::connect(
+            pill, &ToolPill::quickModeToggled, view,
+            [view, layer, viewCenterWorld, quickNodeId](bool active) {
+                if (!active)
+                    return;
+                const core::Node *existing = *quickNodeId != -1
+                    ? layer->graph().nodeById(*quickNodeId)
+                    : nullptr;
+                if (existing) {
+                    view->controller()->centerOnWorld(
+                        existing->worldRect().center(),
+                        QSizeF(layer->width(), layer->height())
+                            * view->devicePixelRatioF(),
+                        view->devicePixelRatioF());
+                    return;
+                }
+                core::Node prototype =
+                    core::catalogPrototype(QStringLiteral("Generate Image"));
+                prototype.title = QStringLiteral("Quick Generate");
+                *quickNodeId =
+                    layer->placePrototypeAt(prototype, viewCenterWorld());
+            });
+        QObject::connect(layer, &NodeLayerItem::graphMutated, pill,
+                         [pill, layer, quickNodeId] {
+                             if (*quickNodeId == -1
+                                 || layer->graph().nodeById(*quickNodeId))
+                                 return;
+                             *quickNodeId = -1;
+                             pill->setQuickModeActive(false);
+                         });
+
+        // The bottom-left cluster: minimap toggle, history, zoom.
+        auto *cluster =
+            new CanvasCluster(theme, layer, view->controller(), view);
+        QObject::connect(cluster, &CanvasCluster::minimapToggled, view,
+                         [view](bool visible) {
+                             if (auto *minimap = view->minimap())
+                                 minimap->setVisible(visible);
+                         });
+        QObject::connect(layer, &NodeLayerItem::minimapToggleRequested, cluster,
+                         [cluster] {
+                             cluster->setMinimapVisible(
+                                 !cluster->minimapVisible());
+                         });
+        QObject::connect(layer, &NodeLayerItem::fitAllRequested, cluster,
+                         [cluster] { cluster->fitAll(); });
+
+        // The rail's panels operate on the live board.
+        const QString templatesDirectory =
+            (store ? store->directory() : WorkflowStore::defaultDirectory())
+            + QStringLiteral("/templates");
+        auto *contentPanel = new cutpilot::app::ContentPanel(theme, layer, view);
+        auto *searchPanel =
+            new cutpilot::app::SearchPanel(theme, layer, modelEntries, view);
+        auto *assetsPanel = new cutpilot::app::AssetsPanel(theme, view);
+        auto *builderPanel = new cutpilot::app::BuilderPanel(
+            theme, layer, templatesDirectory, view);
+        view->setFloatingChrome(pill, cluster,
+                                { contentPanel, searchPanel, assetsPanel,
+                                  builderPanel });
+
+        const auto panelFor =
+            [contentPanel, searchPanel, assetsPanel,
+             builderPanel](ToolRail::Item item) -> cutpilot::app::RailPanel * {
+            switch (item) {
+            case ToolRail::Item::Content:
+                return contentPanel;
+            case ToolRail::Item::Search:
+                return searchPanel;
+            case ToolRail::Item::Assets:
+                return assetsPanel;
+            case ToolRail::Item::Builder:
+                return builderPanel;
+            }
+            return nullptr;
+        };
+        QObject::connect(
+            rail, &ToolRail::panelToggled, view,
+            [view, panelFor, contentPanel](ToolRail::Item item, bool open) {
+                cutpilot::app::RailPanel *panel = panelFor(item);
+                if (!panel)
+                    return;
+                if (open) {
+                    if (panel == contentPanel)
+                        contentPanel->refresh();
+                    panel->show();
+                    view->layoutOverlays();
+                } else {
+                    panel->hide();
+                }
+            });
+        for (cutpilot::app::RailPanel *panel :
+             { static_cast<cutpilot::app::RailPanel *>(contentPanel),
+               static_cast<cutpilot::app::RailPanel *>(searchPanel),
+               static_cast<cutpilot::app::RailPanel *>(assetsPanel),
+               static_cast<cutpilot::app::RailPanel *>(builderPanel) }) {
+            QObject::connect(panel, &cutpilot::app::RailPanel::closeRequested,
+                             rail, &ToolRail::closeAll);
+        }
+
+        const auto jumpToNode = [view, layer](int nodeId) {
+            const core::Node *node = layer->graph().nodeById(nodeId);
+            if (!node)
+                return;
+            const qreal dpr = view->devicePixelRatioF();
+            view->controller()->centerOnWorld(
+                node->worldRect().center(),
+                QSizeF(layer->width(), layer->height()) * dpr, dpr);
+            layer->graph().selectOnly(nodeId);
+            layer->refreshNode(nodeId);
+        };
+        QObject::connect(contentPanel, &cutpilot::app::ContentPanel::nodeActivated,
+                         view, jumpToNode);
+        QObject::connect(searchPanel, &cutpilot::app::SearchPanel::nodeActivated,
+                         view, jumpToNode);
+        QObject::connect(searchPanel,
+                         &cutpilot::app::SearchPanel::prototypeChosen, layer,
+                         [layer, viewCenterWorld](const core::Node &prototype) {
+                             layer->placePrototypeAt(prototype,
+                                                     viewCenterWorld());
+                         });
+        QObject::connect(assetsPanel, &cutpilot::app::AssetsPanel::assetChosen,
+                         layer, [layer, viewCenterWorld](const QString &path) {
+                             layer->placePrototypeAt(
+                                 cutpilot::app::AssetsPanel::prototypeForFile(
+                                     path),
+                                 viewCenterWorld());
+                         });
+        QObject::connect(
+            builderPanel, &cutpilot::app::BuilderPanel::templateChosen, layer,
+            [layer, viewCenterWorld](const QVector<core::Node> &prototypes,
+                                     const QVector<core::Connection> &wires) {
+                layer->placeSubgraphAt(prototypes, wires, viewCenterWorld());
+            });
+        QObject::connect(rail, &ToolRail::nodesRequested, palette,
+                         [openPaletteAt, viewCenterWorld] {
+                             openPaletteAt(viewCenterWorld());
+                         });
+        QObject::connect(
+            rail, &ToolRail::helpRequested, &window, [&window] {
+                QMessageBox::information(
+                    &window, QStringLiteral("Shortcuts"),
+                    QStringLiteral(
+                        "Tab — command palette\n"
+                        "Double-click empty canvas — command palette\n"
+                        "Space-drag / middle-drag — pan\n"
+                        "Ctrl+scroll — zoom toward cursor\n"
+                        "Ctrl+0 — reset zoom · F — fit all · M — minimap\n"
+                        "Delete — remove selection\n"
+                        "Ctrl+Z / Ctrl+Shift+Z — undo / redo\n"
+                        "Esc — cancel a wire, tool, or selection"));
+            });
+
+        // ------- Top bar: name, autosave state, share, settings, account ---
+
+        std::function<void()> showSyncState;
+        if (store) {
+            topBar->setWorkflowName(store->name());
+            window.setWindowTitle(
+                QStringLiteral("%1 — CutPilot").arg(store->name()));
+            QObject::connect(topBar, &TopBar::workflowNameCommitted, store,
+                             &WorkflowStore::setName);
+            QObject::connect(store, &WorkflowStore::nameChanged, topBar,
+                             [topBar, store, &window] {
+                                 topBar->setWorkflowName(store->name());
+                                 window.setWindowTitle(
+                                     QStringLiteral("%1 — CutPilot")
+                                         .arg(store->name()));
+                             });
+            showSyncState = [topBar, store, &themes] {
+                const ThemeTable &table = themes.table();
+                switch (store->state()) {
+                case WorkflowStore::State::Pending:
+                    topBar->setSyncState(table.statusRunning(),
+                                         QStringLiteral("Saving…"));
+                    break;
+                case WorkflowStore::State::Saved:
+                    topBar->setSyncState(
+                        table.statusDone(),
+                        QStringLiteral("Saved %1").arg(
+                            store->savedAt().toString(
+                                QStringLiteral("HH:mm"))));
+                    break;
+                case WorkflowStore::State::Failed:
+                    topBar->setSyncState(table.statusError(),
+                                         QStringLiteral("Save failed"));
+                    break;
+                case WorkflowStore::State::Idle:
+                    topBar->setSyncState(table.textSecondary(),
+                                         QStringLiteral("Autosave on"));
+                    break;
+                }
+            };
+            QObject::connect(store, &WorkflowStore::stateChanged, topBar,
+                             showSyncState);
+            showSyncState();
+        } else {
+            topBar->setWorkflowName(QStringLiteral("Demo board"));
+            topBar->setSyncState(theme.statusWarning(),
+                                 QStringLiteral("Autosave off"));
+        }
+
+        auto *shareMenu = new QMenu(topBar);
+        QObject::connect(
+            shareMenu->addAction(QStringLiteral("Copy workflow JSON")),
+            &QAction::triggered, view, [layer, store] {
+                const QJsonDocument document(core::workflowToJson(
+                    layer->graph(),
+                    store ? store->name() : QStringLiteral("Demo board")));
+                QGuiApplication::clipboard()->setText(
+                    QString::fromUtf8(document.toJson()));
+            });
+        if (store) {
+            QObject::connect(
+                shareMenu->addAction(QStringLiteral("Reveal workflow file")),
+                &QAction::triggered, view, [store] {
+                    store->saveNow();
+                    QDesktopServices::openUrl(
+                        QUrl::fromLocalFile(store->directory()));
+                });
+        }
+        shareMenu->addSeparator();
+        QObject::connect(
+            shareMenu->addAction(QStringLiteral("Export Timeline…")),
+            &QAction::triggered, exporter, [exporter, view] {
+                exporter->exportTimelineInteractive(view);
+            });
+        QObject::connect(
+            shareMenu->addAction(QStringLiteral("Send to DaVinci Resolve")),
+            &QAction::triggered, exporter,
+            [exporter] { exporter->sendToResolve(); });
+        topBar->shareButton->setMenu(shareMenu);
+
+        QObject::connect(topBar->themeButton, &QToolButton::clicked, &themes,
+                         [&themes] { themes.cycle(); });
+
+        QObject::connect(
+            topBar->settingsButton, &QToolButton::clicked, &window,
+            [&window, &themes, chrome, coordinator, store] {
+                QDialog dialog(&window);
+                dialog.setWindowTitle(QStringLiteral("Settings"));
+                auto *column = new QVBoxLayout(&dialog);
+
+                auto *appearance =
+                    new QLabel(QStringLiteral("Appearance"), &dialog);
+                appearance->setStyleSheet(
+                    QStringLiteral("font-weight: 700;"));
+                column->addWidget(appearance);
+                auto *dark = new QRadioButton(QStringLiteral("Dark"), &dialog);
+                auto *light =
+                    new QRadioButton(QStringLiteral("Light"), &dialog);
+                auto *dim =
+                    new QRadioButton(QStringLiteral("Dark Dim"), &dialog);
+                switch (themes.theme()) {
+                case cutpilot::theme::Theme::Dark:
+                    dark->setChecked(true);
+                    break;
+                case cutpilot::theme::Theme::Light:
+                    light->setChecked(true);
+                    break;
+                case cutpilot::theme::Theme::DarkDim:
+                    dim->setChecked(true);
+                    break;
+                }
+                QObject::connect(dark, &QRadioButton::clicked, &themes, [&themes] {
+                    themes.setTheme(cutpilot::theme::Theme::Dark);
+                });
+                QObject::connect(light, &QRadioButton::clicked, &themes, [&themes] {
+                    themes.setTheme(cutpilot::theme::Theme::Light);
+                });
+                QObject::connect(dim, &QRadioButton::clicked, &themes, [&themes] {
+                    themes.setTheme(cutpilot::theme::Theme::DarkDim);
+                });
+                column->addWidget(dark);
+                column->addWidget(light);
+                column->addWidget(dim);
+
+                auto *keys = new QLabel(QStringLiteral("API keys (BYOK)"),
+                                        &dialog);
+                keys->setStyleSheet(QStringLiteral("font-weight: 700;"));
+                column->addSpacing(8);
+                column->addWidget(keys);
+                QStringList providers;
+                for (const auto &model : coordinator->models()) {
+                    if (!model.needsKey || providers.contains(model.provider))
+                        continue;
+                    providers.push_back(model.provider);
+                    auto *row = new QHBoxLayout;
+                    row->addWidget(new QLabel(
+                        QStringLiteral("%1 — %2").arg(
+                            model.provider,
+                            model.hasKey
+                                ? QStringLiteral("key configured")
+                                : QStringLiteral("no key")),
+                        &dialog));
+                    auto *add = new QPushButton(
+                        model.hasKey ? QStringLiteral("Replace key…")
+                                     : QStringLiteral("Add key…"),
+                        &dialog);
+                    QObject::connect(add, &QPushButton::clicked, chrome,
+                                     [chrome, provider = model.provider] {
+                                         chrome->promptAddKey(-1, provider);
+                                     });
+                    row->addWidget(add);
+                    row->addStretch(1);
+                    column->addLayout(row);
+                }
+                if (providers.isEmpty())
+                    column->addWidget(new QLabel(
+                        QStringLiteral(
+                            "No keyed vendors registered yet — the model "
+                            "registry loads when the service is up."),
+                        &dialog));
+
+                if (store) {
+                    column->addSpacing(8);
+                    auto *workspace = new QLabel(
+                        QStringLiteral("Workspace: %1").arg(store->directory()),
+                        &dialog);
+                    workspace->setWordWrap(true);
+                    column->addWidget(workspace);
+                }
+
+                auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close,
+                                                     &dialog);
+                QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                                 &QDialog::reject);
+                QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
+                                 &QDialog::accept);
+                column->addWidget(buttons);
+                dialog.exec();
+            });
+
+        // Account: per-provider key state from the live registry, and the
+        // add-key flow — BYOK usage state, not a hosted balance.
+        auto *accountMenu = new QMenu(topBar);
+        QObject::connect(accountMenu, &QMenu::aboutToShow, accountMenu,
+                         [accountMenu, coordinator, chrome] {
+                             accountMenu->clear();
+                             QStringList providers;
+                             for (const auto &model : coordinator->models()) {
+                                 if (!model.needsKey
+                                     || providers.contains(model.provider))
+                                     continue;
+                                 providers.push_back(model.provider);
+                                 QAction *state = accountMenu->addAction(
+                                     QStringLiteral("%1 — %2").arg(
+                                         model.provider,
+                                         model.hasKey
+                                             ? QStringLiteral("key configured")
+                                             : QStringLiteral("no key")));
+                                 state->setEnabled(false);
+                                 QObject::connect(
+                                     accountMenu->addAction(
+                                         QStringLiteral("    Add %1 key…")
+                                             .arg(model.provider)),
+                                     &QAction::triggered, chrome,
+                                     [chrome, provider = model.provider] {
+                                         chrome->promptAddKey(-1, provider);
+                                     });
+                             }
+                             if (providers.isEmpty()) {
+                                 QAction *empty = accountMenu->addAction(
+                                     QStringLiteral(
+                                         "Model registry not loaded yet"));
+                                 empty->setEnabled(false);
+                             }
+                         });
+        topBar->accountButton->setMenu(accountMenu);
+
+        // ------- One theme repaints the widget chrome and the GPU canvas ---
+
+        QObject::connect(
+            &themes, &ThemeController::themeChanged, &window,
+            [&themes, view, topBar, rail, pill, cluster, palette, contentPanel,
+             searchPanel, assetsPanel, builderPanel, previewPanel, chrome,
+             modePages, inspector, transport] {
+                const ThemeTable &table = themes.table();
+                topBar->retheme(table);
+                rail->retheme(table);
+                pill->retheme(table);
+                cluster->retheme(table);
+                palette->retheme(table);
+                contentPanel->retheme(table);
+                searchPanel->retheme(table);
+                assetsPanel->retheme(table);
+                builderPanel->retheme(table);
+                view->runPanel()->retheme(table);
+                if (previewPanel)
+                    previewPanel->retheme(table);
+                if (chrome)
+                    chrome->retheme(table);
+                inspector->retheme(table);
+                transport->retheme(table);
+                for (ModePage *page : modePages)
+                    page->retheme(table);
+                view->applyCanvasTheme(themes.theme());
+                view->layoutOverlays();
+            });
+        // Re-tint the sync dot into the new theme.
+        QObject::connect(&themes, &ThemeController::themeChanged, topBar,
+                         [showSyncState] {
+                             if (showSyncState)
+                                 showSyncState();
+                         });
 
         // On the seeded compositing board, open the preview ready to compare:
         // the final blend in A, the raw backdrop in B, wipe engaged.

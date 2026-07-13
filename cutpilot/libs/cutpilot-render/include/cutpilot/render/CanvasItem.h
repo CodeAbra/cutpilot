@@ -39,6 +39,16 @@ public:
 
     const theme::ThemeTable &themeTable() const { return m_theme; }
 
+    // Switch the grid's theme and repaint; the renderer reads the table
+    // during the next synchronize.
+    void setTheme(theme::Theme themeId)
+    {
+        if (m_theme.theme() == themeId)
+            return;
+        m_theme.setTheme(themeId);
+        update();
+    }
+
 signals:
     void controllerChanged();
 

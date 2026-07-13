@@ -22,9 +22,24 @@ Item {
     // The node layer is stacked over the grid, owns pointer and keyboard input, and
     // writes the shared camera. It carries focus so Space-pan and zoom-reset reach it.
     NodeLayerItem {
+        id: nodesLayer
         objectName: "nodes"
         anchors.fill: parent
         controller: camera
         focus: true
+    }
+
+    // The board overview floats over the canvas's bottom-right corner, reading
+    // the same node model and camera the main canvas uses.
+    MinimapItem {
+        objectName: "minimap"
+        width: 220
+        height: 150
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.rightMargin: 12
+        anchors.bottomMargin: 12
+        nodeLayer: nodesLayer
+        controller: camera
     }
 }

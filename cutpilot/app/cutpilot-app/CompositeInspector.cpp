@@ -30,23 +30,7 @@ CompositeInspector::CompositeInspector(const ThemeTable &theme,
     , m_layer(layer)
     , m_previews(previews)
 {
-    const QColor surface = theme.bgCanvas().lighter(125);
-    setStyleSheet(QStringLiteral(
-                      "QWidget { color: %1; }"
-                      "QLabel { color: %1; background: transparent; "
-                      "border: none; }"
-                      "QPushButton, QComboBox {"
-                      "  color: %1; background-color: rgba(%2,%3,%4,220);"
-                      "  border: 1px solid %5; border-radius: 4px;"
-                      "  padding: 2px 8px;"
-                      "}"
-                      "QCheckBox { color: %1; background: transparent; }"
-                      "QSlider { background: transparent; }")
-                      .arg(theme.textPrimary().name())
-                      .arg(surface.red())
-                      .arg(surface.green())
-                      .arg(surface.blue())
-                      .arg(theme.borderSubtle().name()));
+    retheme(theme);
 
     auto *column = new QVBoxLayout(this);
     column->setContentsMargins(8, 8, 8, 8);
@@ -91,6 +75,27 @@ CompositeInspector::CompositeInspector(const ThemeTable &theme,
         parent->installEventFilter(this);
     setFixedWidth(280);
     hide();
+}
+
+void CompositeInspector::retheme(const ThemeTable &theme)
+{
+    const QColor surface = theme.bgCanvas().lighter(125);
+    setStyleSheet(QStringLiteral(
+                      "QWidget { color: %1; }"
+                      "QLabel { color: %1; background: transparent; "
+                      "border: none; }"
+                      "QPushButton, QComboBox {"
+                      "  color: %1; background-color: rgba(%2,%3,%4,220);"
+                      "  border: 1px solid %5; border-radius: 4px;"
+                      "  padding: 2px 8px;"
+                      "}"
+                      "QCheckBox { color: %1; background: transparent; }"
+                      "QSlider { background: transparent; }")
+                      .arg(theme.textPrimary().name())
+                      .arg(surface.red())
+                      .arg(surface.green())
+                      .arg(surface.blue())
+                      .arg(theme.borderSubtle().name()));
 }
 
 void CompositeInspector::openFor(int nodeId)

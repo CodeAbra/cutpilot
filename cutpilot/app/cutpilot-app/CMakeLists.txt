@@ -1,8 +1,26 @@
 qt_add_executable(cutpilot-app
+    CanvasCluster.cpp
+    CanvasCluster.h
+    CommandPalette.cpp
+    CommandPalette.h
     CompositeInspector.cpp
     CompositeInspector.h
     ExportController.cpp
     ExportController.h
+    PaletteModel.cpp
+    PaletteModel.h
+    RailPanels.cpp
+    RailPanels.h
+    ThemeController.cpp
+    ThemeController.h
+    ToolPill.cpp
+    ToolPill.h
+    ToolRail.cpp
+    ToolRail.h
+    TopBar.cpp
+    TopBar.h
+    WorkflowStore.cpp
+    WorkflowStore.h
     main.cpp)
 
 set_target_properties(cutpilot-app PROPERTIES

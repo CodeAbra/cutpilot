@@ -83,6 +83,10 @@ public:
     // The union of every node's world rect; a null rect on an empty board.
     QRectF contentWorldBounds() const;
 
+    // The graph was populated outside the command stack (a workflow loaded
+    // from disk): resync the index, repaint, and announce the mutation.
+    void graphReloaded();
+
     // The node's media average color for the minimap block, or an invalid
     // color when the node has no decoded media.
     QColor nodeAverageColor(int nodeId) const
@@ -191,6 +195,11 @@ signals:
 
     // Anything the minimap shows moved: graph structure, a live drag, media.
     void boardChanged();
+
+    // Canvas-focused view shortcuts, served by the chrome: M toggles the
+    // minimap, F frames the whole board.
+    void minimapToggleRequested();
+    void fitAllRequested();
 
     // The run control on a generation node was pressed.
     void runRequested(int nodeId);
