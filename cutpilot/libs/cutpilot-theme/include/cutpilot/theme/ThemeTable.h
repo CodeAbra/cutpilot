@@ -40,9 +40,41 @@ public:
     // Control outline at rest (fields, buttons, cards).
     QColor borderDefault() const { return m_borderDefault; }
 
+    // Hovered dividers and hovered control outlines.
+    QColor borderStrong() const { return m_borderStrong; }
+
+    // The keyboard focus ring — the one colored element in the chrome.
+    QColor borderFocus() const { return m_borderFocus; }
+
     // Numeric readout text (zoom percentage, and later cost, resolution, timecode).
     QColor textPrimary() const { return m_textPrimary; }
     QColor textSecondary() const { return m_textSecondary; }
+
+    // Hints, placeholders, and metadata — labels only, never body text.
+    QColor textTertiary() const { return m_textTertiary; }
+    QColor textDisabled() const { return m_textDisabled; }
+
+    // Text or icon sitting on an emphasis fill (active tab, primary button).
+    QColor textOnEmphasis() const { return m_textOnEmphasis; }
+
+    // The chrome surface ramp: window base, panels, raised chrome (toolbar,
+    // mode switcher), sunken wells, the hover and pressed washes, and floating
+    // overlays (menus, popovers, panels).
+    QColor surface0() const { return m_surface0; }
+    QColor surface1() const { return m_surface1; }
+    QColor surface2() const { return m_surface2; }
+    QColor surface3() const { return m_surface3; }
+    QColor surfaceHover() const { return m_surfaceHover; }
+    QColor surfaceActive() const { return m_surfaceActive; }
+    QColor surfaceOverlay() const { return m_surfaceOverlay; }
+
+    // Emphasis fill states and the low-emphasis neutral wash.
+    QColor emphasisHover() const { return m_emphasisHover; }
+    QColor emphasisActive() const { return m_emphasisActive; }
+    QColor emphasisMuted() const { return m_emphasisMuted; }
+
+    // Neutral information: cached/reused results, the sync readout.
+    QColor statusInfo() const { return m_statusInfo; }
 
     // Node card surfaces: the resting body and the slim header strip over it.
     QColor nodeBody() const { return m_nodeBody; }
@@ -87,8 +119,24 @@ private:
     QColor m_gridDotMajor;
     QColor m_borderSubtle;
     QColor m_borderDefault;
+    QColor m_borderStrong;
+    QColor m_borderFocus;
     QColor m_textPrimary;
     QColor m_textSecondary;
+    QColor m_textTertiary;
+    QColor m_textDisabled;
+    QColor m_textOnEmphasis;
+    QColor m_surface0;
+    QColor m_surface1;
+    QColor m_surface2;
+    QColor m_surface3;
+    QColor m_surfaceHover;
+    QColor m_surfaceActive;
+    QColor m_surfaceOverlay;
+    QColor m_emphasisHover;
+    QColor m_emphasisActive;
+    QColor m_emphasisMuted;
+    QColor m_statusInfo;
     QColor m_nodeBody;
     QColor m_nodeHeader;
     QColor m_selection;

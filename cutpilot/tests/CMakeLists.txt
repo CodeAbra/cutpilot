@@ -4,6 +4,16 @@
 # bottom drives the canvas layer's wiring gestures with synthesized events on the
 # offscreen platform — still windowless, but linked against the render library.
 
+qt_add_executable(tst_theme tst_theme.cpp)
+target_link_libraries(tst_theme PRIVATE Qt6::Test cutpilot-theme)
+add_test(NAME theme.tokens COMMAND tst_theme)
+
+# The pure camera/minimap mapping math: header-only value types from the render
+# library, exercised without any GUI.
+qt_add_executable(tst_minimap tst_minimap.cpp)
+target_link_libraries(tst_minimap PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.minimap COMMAND tst_minimap)
+
 qt_add_executable(tst_nodegraph tst_nodegraph.cpp)
 target_link_libraries(tst_nodegraph PRIVATE Qt6::Test cutpilot-core)
 add_test(NAME core.nodegraph COMMAND tst_nodegraph)
