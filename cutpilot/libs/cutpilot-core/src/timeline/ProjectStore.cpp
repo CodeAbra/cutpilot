@@ -1,6 +1,8 @@
 #include "cutpilot/core/timeline/ProjectStore.h"
 
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QSaveFile>
@@ -23,6 +25,12 @@ bool saveProject(const TimelineProject &project, const QString &path,
     const QString invalid = project.validate();
     if (!invalid.isEmpty()) {
         setError(error, invalid);
+        return false;
+    }
+    const QDir parent = QFileInfo(path).dir();
+    if (!parent.exists() && !QDir().mkpath(parent.absolutePath())) {
+        setError(error, QStringLiteral("could not create %1")
+                            .arg(parent.absolutePath()));
         return false;
     }
     QSaveFile file(path);

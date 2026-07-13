@@ -33,8 +33,8 @@ QString reportText(const core::ComfyImportOutcome &outcome)
                  .arg(outcome.nodeIds.size())
                  .arg(outcome.connectionCount);
     if (outcome.droppedEdges > 0)
-        lines << QStringLiteral("%1 link(s) had no compatible ports and were "
-                                "dropped.")
+        lines << QStringLiteral("%1 link(s) had no free compatible port and "
+                                "were dropped.")
                      .arg(outcome.droppedEdges);
     lines << QString();
     for (const core::ComfyImportRow &row : outcome.report) {
@@ -261,6 +261,17 @@ void ExportController::importComfyInteractive(QWidget *parent)
         QStringLiteral("ComfyUI workflows (*.json)"));
     if (path.isEmpty())
         return;
+    importComfyFromFile(path, parent);
+}
+
+void ExportController::importComfyFromFile(const QString &path,
+                                           QWidget *dialogParent)
+{
+    if (m_comfyBusy) {
+        emit statusChanged(
+            QStringLiteral("A workflow import is already running"));
+        return;
+    }
 
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -277,12 +288,19 @@ void ExportController::importComfyInteractive(QWidget *parent)
         return;
     }
 
-    QPointer<QWidget> guard(parent);
-    auto connection = std::make_shared<QMetaObject::Connection>();
-    *connection = connect(
+    m_comfyBusy = true;
+    QPointer<QWidget> guard(dialogParent);
+    auto imported = std::make_shared<QMetaObject::Connection>();
+    auto failed = std::make_shared<QMetaObject::Connection>();
+    auto settle = [this, imported, failed] {
+        QObject::disconnect(*imported);
+        QObject::disconnect(*failed);
+        m_comfyBusy = false;
+    };
+    *imported = connect(
         m_convert, &ipc::ConvertClient::comfyImported, this,
-        [this, guard, connection](const QJsonObject &result) {
-            QObject::disconnect(*connection);
+        [this, guard, settle](const QJsonObject &result) {
+            settle();
             const core::ComfyImportOutcome outcome =
                 m_layer->importComfyWorkflow(result, QPointF(0, 0));
             if (!outcome.ok) {
@@ -299,23 +317,36 @@ void ExportController::importComfyInteractive(QWidget *parent)
                                          QStringLiteral("Workflow imported"),
                                          reportText(outcome));
         });
+    *failed = connect(m_convert, &ipc::ConvertClient::comfyImportFailed, this,
+                      [this, settle](const QString &error) {
+                          settle();
+                          emit statusChanged(
+                              QStringLiteral("Import failed: %1").arg(error));
+                      });
     m_convert->importComfyWorkflow(document.object());
 }
 
 void ExportController::sendToResolve()
 {
+    if (m_resolveBusy) {
+        emit statusChanged(
+            QStringLiteral("A Resolve hand-off is already running"));
+        return;
+    }
     if (!m_bundle.ok || !QFileInfo::exists(m_bundle.fcpxmlPath)) {
         emit statusChanged(
             QStringLiteral("Export the timeline first, then send it to "
                            "Resolve"));
         return;
     }
+    m_resolveBusy = true;
     auto connection = std::make_shared<QMetaObject::Connection>();
     *connection = connect(
         m_convert, &ipc::ConvertClient::resolveImportFinished, this,
         [this, connection](bool ok, const QString &reason,
                            const QString &detail) {
             QObject::disconnect(*connection);
+            m_resolveBusy = false;
             if (ok) {
                 emit statusChanged(
                     QStringLiteral("Timeline imported into Resolve"));

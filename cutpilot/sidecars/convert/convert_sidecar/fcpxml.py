@@ -28,6 +28,14 @@ def build_fcpxml(spec: TimelineSpec) -> ET.Element:
         height=str(spec.height),
     )
 
+    # One asset per unique file. Its declared duration must cover every
+    # segment cut from it, whichever order the segments arrive in.
+    asset_frames: dict[str, int] = {}
+    for segment in spec.segments:
+        asset_frames[segment.path] = max(
+            asset_frames.get(segment.path, 0), segment.source_out
+        )
+
     asset_ids: dict[str, str] = {}
     for segment in spec.segments:
         if segment.path in asset_ids:
@@ -40,7 +48,7 @@ def build_fcpxml(spec: TimelineSpec) -> ET.Element:
             id=asset_id,
             name=segment.name,
             start="0s",
-            duration=spec.frames_to_seconds(segment.source_out),
+            duration=spec.frames_to_seconds(asset_frames[segment.path]),
             hasVideo="1",
             format="r1",
         )

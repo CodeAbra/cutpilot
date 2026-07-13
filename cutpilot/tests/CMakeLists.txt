@@ -112,6 +112,17 @@ if(Python3_FOUND)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/sidecars/convert)
 endif()
 
+# The export controller over a live convert sidecar: a headless bundle
+# export, results landing in the project store as Generator segments, and
+# the one-import-at-a-time guard on the shared convert client.
+qt_add_executable(tst_exportcontroller tst_exportcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/ExportController.cpp)
+target_include_directories(tst_exportcontroller PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_exportcontroller PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-ipc cutpilot-render)
+add_test(NAME app.exportcontroller COMMAND tst_exportcontroller)
+
 # The composite inspector against the real command stack: a scrub commits one
 # undo step, and an undo taken while the panel stays open must survive the
 # panel's next gesture untouched.

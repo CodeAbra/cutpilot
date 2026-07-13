@@ -44,6 +44,11 @@ public:
     void exportTimelineInteractive(QWidget *parent);
     void importComfyInteractive(QWidget *parent);
 
+    // Import a ComfyUI workflow file onto the board. One import runs at a
+    // time; a call while one is outstanding is refused through the status.
+    // With a dialogParent the tier report is raised as a dialog.
+    void importComfyFromFile(const QString &path, QWidget *dialogParent);
+
     // Append the board's shots to the project model as segments (produced
     // media lands as Generator) and persist it. Returns the project path,
     // empty on failure with the reason in status.
@@ -86,4 +91,9 @@ private:
     cutpilot::core::timeline::ExportBundle m_bundle;
     int m_pendingWriters = 0;
     bool m_exportFailed = false;
+
+    // The convert client is shared; an unguarded second request would fan
+    // its answer into every listener. One outstanding request per flow.
+    bool m_comfyBusy = false;
+    bool m_resolveBusy = false;
 };

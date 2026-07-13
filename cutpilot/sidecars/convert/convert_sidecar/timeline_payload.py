@@ -113,8 +113,10 @@ def parse_timeline_payload(payload: dict) -> TimelineSpec:
         if source_out <= source_in:
             raise PayloadError(f"segments[{index}] source span is empty")
         path = entry.get("path")
-        if not isinstance(path, str) or not path:
-            raise PayloadError(f"segments[{index}] path must be set")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise PayloadError(
+                f"segments[{index}] path must be an absolute path"
+            )
         cursor = timeline_out
         spec.segments.append(
             SegmentSpec(

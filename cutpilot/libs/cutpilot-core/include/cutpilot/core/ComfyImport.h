@@ -26,7 +26,9 @@ struct ComfyImportOutcome {
     QVector<int> nodeIds;
     int connectionCount = 0;
 
-    // Workflow links whose types fit no port pairing on the mapped nodes.
+    // Workflow links that could not become wires: their types fit no port
+    // pairing on the mapped nodes, or every compatible input was already
+    // claimed by an earlier link (an input holds at most one edge).
     int droppedEdges = 0;
 
     QVector<ComfyImportRow> report;

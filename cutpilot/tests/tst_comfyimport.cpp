@@ -51,6 +51,8 @@ private slots:
     void unknownNodesArePreservedWhole();
     void importIsOneUndoStepAndRedoRestoresIt();
     void emptyResultRefusesWithoutTouchingTheGraph();
+    void secondLinkOntoATakenInputIsDroppedNotDuplicated();
+    void twoImageLinksSpreadAcrossABlendsInputs();
 };
 
 void ComfyImportTest::importLandsMappedNodesAndWires()
@@ -148,6 +150,78 @@ void ComfyImportTest::emptyResultRefusesWithoutTouchingTheGraph()
     QVERIFY(!outcome.error.isEmpty());
     QVERIFY(graph.nodes().isEmpty());
     QCOMPARE(commands.depth(), 0);
+}
+
+void ComfyImportTest::secondLinkOntoATakenInputIsDroppedNotDuplicated()
+{
+    // Two prompts into one sampler — the everyday positive/negative
+    // conditioning pair. The mapped generate node has one text input, so
+    // exactly one link lands and the other is counted, never stacked onto
+    // the taken port.
+    const QJsonObject result = QJsonDocument::fromJson(R"({
+        "nodes": [
+            {"comfy_id": 1, "comfy_type": "CLIPTextEncode", "tier": "exact",
+             "kind": "prompt", "pos": [0, 0], "prompt": "positive"},
+            {"comfy_id": 2, "comfy_type": "CLIPTextEncode", "tier": "exact",
+             "kind": "prompt", "pos": [0, 300], "prompt": "negative"},
+            {"comfy_id": 3, "comfy_type": "KSampler", "tier": "substituted",
+             "kind": "generate", "pos": [400, 150]}
+        ],
+        "connections": [
+            {"from": 1, "to": 3},
+            {"from": 2, "to": 3}
+        ],
+        "report": []
+    })")
+                                    .object();
+
+    NodeGraph graph;
+    CommandStack commands;
+    const ComfyImportOutcome outcome =
+        applyComfyImport(graph, commands, result);
+    QVERIFY(outcome.ok);
+    QCOMPARE(outcome.connectionCount, 1);
+    QCOMPARE(outcome.droppedEdges, 1);
+    QCOMPARE(graph.connections().size(), 1);
+
+    // The surviving wire is the only edge on that input.
+    const Connection &wire = graph.connections().first();
+    QCOMPARE(graph.connectionAtInput(wire.toNodeId, wire.toPortIndex), wire.id);
+}
+
+void ComfyImportTest::twoImageLinksSpreadAcrossABlendsInputs()
+{
+    const QJsonObject result = QJsonDocument::fromJson(R"({
+        "nodes": [
+            {"comfy_id": 1, "comfy_type": "LoadImage", "tier": "exact",
+             "kind": "still", "pos": [0, 0]},
+            {"comfy_id": 2, "comfy_type": "LoadImage", "tier": "exact",
+             "kind": "still", "pos": [0, 300]},
+            {"comfy_id": 3, "comfy_type": "ImageBlend", "tier": "substituted",
+             "kind": "blend", "pos": [400, 150]}
+        ],
+        "connections": [
+            {"from": 1, "to": 3},
+            {"from": 2, "to": 3}
+        ],
+        "report": []
+    })")
+                                    .object();
+
+    NodeGraph graph;
+    CommandStack commands;
+    const ComfyImportOutcome outcome =
+        applyComfyImport(graph, commands, result);
+    QVERIFY(outcome.ok);
+    QCOMPARE(outcome.connectionCount, 2);
+    QCOMPARE(outcome.droppedEdges, 0);
+    QCOMPARE(graph.connections().size(), 2);
+
+    // Both image layers landed, each on its own input port.
+    const Connection &first = graph.connections().at(0);
+    const Connection &second = graph.connections().at(1);
+    QCOMPARE(first.toNodeId, second.toNodeId);
+    QVERIFY(first.toPortIndex != second.toPortIndex);
 }
 
 QTEST_GUILESS_MAIN(ComfyImportTest)

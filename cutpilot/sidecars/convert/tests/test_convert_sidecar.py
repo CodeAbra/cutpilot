@@ -184,11 +184,15 @@ class ConvertTestCase(unittest.TestCase):
         payload = timeline_payload(out_path, self.tmp.name)
         payload["segments"][1]["path"] = payload["segments"][0]["path"]
         payload["segments"][1]["name"] = payload["segments"][0]["name"]
+        # The later segment cuts deeper into the shared file than the first;
+        # the single asset must still cover it.
+        payload["segments"][1]["source_out"] = 200
         status, _ = self.request("POST", "/timeline/fcpxml", body=payload)
         self.assertEqual(status, 200)
         root = ET.parse(out_path).getroot()
         assets = root.findall("resources/asset")
         self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].get("duration"), "200/24s")
         clips = root.findall(".//spine/asset-clip")
         self.assertEqual(len(clips), 2)
         for clip in clips:
@@ -211,6 +215,14 @@ class ConvertTestCase(unittest.TestCase):
         payload["segments"][0]["timeline_out"] = 0
         status, body = self.request("POST", "/timeline/fcpxml", body=payload)
         self.assertEqual(status, 400)
+
+        # A relative media path would silently resolve against the service's
+        # own working directory; it is refused instead.
+        payload = timeline_payload(out_path, self.tmp.name)
+        payload["segments"][0]["path"] = "relative/shot.png"
+        status, body = self.request("POST", "/timeline/fcpxml", body=payload)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_payload")
 
     # -- OTIO ---------------------------------------------------------------
 

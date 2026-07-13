@@ -7,6 +7,8 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QPair>
+#include <QSet>
 
 #include <memory>
 
@@ -171,16 +173,20 @@ Node nodeForSpec(const QJsonObject &spec, const QPointF &origin)
     return node;
 }
 
-// The first type-compatible output→input pairing between the two nodes;
-// direct matches win over converted ones. {-1, -1} when nothing fits.
-QPair<int, int> pickPorts(const Node &from, const Node &to)
+// The first type-compatible output→input pairing between the two nodes
+// whose input port no earlier link already claimed — an input holds at most
+// one edge, so a taken port never absorbs a second link. Direct matches win
+// over converted ones. {-1, -1} when nothing free fits.
+QPair<int, int> pickPorts(const Node &from, const Node &to, int toIndex,
+                          const QSet<QPair<int, int>> &takenInputs)
 {
     QPair<int, int> converted{ -1, -1 };
     for (int f = 0; f < from.ports.size(); ++f) {
         if (from.ports.at(f).isInput)
             continue;
         for (int t = 0; t < to.ports.size(); ++t) {
-            if (!to.ports.at(t).isInput)
+            if (!to.ports.at(t).isInput
+                || takenInputs.contains({ toIndex, t }))
                 continue;
             const PortMatch match =
                 portMatch(from.ports.at(f).type, to.ports.at(t).type);
@@ -217,6 +223,7 @@ ComfyImportOutcome applyComfyImport(NodeGraph &graph, CommandStack &commands,
     }
 
     QVector<ImportWorkflowCommand::Edge> edges;
+    QSet<QPair<int, int>> takenInputs;
     const QJsonArray links =
         result.value(QStringLiteral("connections")).toArray();
     for (const QJsonValue &value : links) {
@@ -229,12 +236,13 @@ ComfyImportOutcome applyComfyImport(NodeGraph &graph, CommandStack &commands,
             ++outcome.droppedEdges;
             continue;
         }
-        const QPair<int, int> ports =
-            pickPorts(nodes.at(fromIndex), nodes.at(toIndex));
+        const QPair<int, int> ports = pickPorts(
+            nodes.at(fromIndex), nodes.at(toIndex), toIndex, takenInputs);
         if (ports.first < 0) {
             ++outcome.droppedEdges;
             continue;
         }
+        takenInputs.insert({ toIndex, ports.second });
         edges.append({ fromIndex, ports.first, toIndex, ports.second });
     }
 
