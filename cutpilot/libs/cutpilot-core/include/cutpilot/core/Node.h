@@ -134,6 +134,12 @@ struct Node {
     QString modelId;
     QString modelLabel;
 
+    // The requested output size for a generation, in pixels. Zero means the
+    // model's default. A document parameter edited through an undoable
+    // command; it keys the result cache, so changing it re-generates.
+    int outputWidth = 0;
+    int outputHeight = 0;
+
     // A cost gate's user-set spend limit for its downstream branch, in USD.
     // A real parameter, edited through an undoable command.
     double gateLimitUsd = 0.05;

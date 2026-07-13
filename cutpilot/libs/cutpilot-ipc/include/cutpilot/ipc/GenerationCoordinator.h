@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QObject>
 #include <QSet>
+#include <QSize>
 #include <QString>
 #include <QVector>
 
@@ -137,6 +138,7 @@ private:
     bool dependenciesSettled(int nodeId, const QHash<int, QSet<int>> &dependencies,
                              bool &upstreamFailed) const;
     QString nodeSignature(const core::Node &node, const ModelInfo &model);
+    static QSize requestedSize(const core::Node &node);
     QString resolveInputPath(const core::Node &node) const;
     QVector<QString> inputDigests(const core::Node &node);
     bool applyCachedResult(core::Node *node, const QString &signature);

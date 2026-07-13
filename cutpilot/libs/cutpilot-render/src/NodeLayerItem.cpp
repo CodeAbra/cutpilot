@@ -21,6 +21,7 @@
 #include "cutpilot/core/command/SetGateLimitCommand.h"
 #include "cutpilot/core/command/SetMediaPathCommand.h"
 #include "cutpilot/core/command/SetModelCommand.h"
+#include "cutpilot/core/command/SetOutputFormatCommand.h"
 
 #include <QDir>
 #include <QKeyEvent>
@@ -567,6 +568,20 @@ void NodeLayerItem::setNodeModel(int nodeId, const QString &modelId,
         return;
     m_commands.push(std::make_unique<core::SetModelCommand>(nodeId, modelId, modelLabel),
                     m_graph);
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+void NodeLayerItem::setNodeOutputFormat(int nodeId, int width, int height)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || node->kind != core::NodeKind::Generate || width < 0 || height < 0
+        || (node->outputWidth == width && node->outputHeight == height))
+        return;
+    m_commands.push(
+        std::make_unique<core::SetOutputFormatCommand>(nodeId, width, height),
+        m_graph);
     m_geometryDirty = true;
     update();
     emit graphMutated();

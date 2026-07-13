@@ -290,9 +290,20 @@ bool GenerationCoordinator::dependenciesSettled(
 QString GenerationCoordinator::nodeSignature(const core::Node &node,
                                              const ModelInfo &model)
 {
-    GenerationRequest request;
-    return ResultCache::signature(model.id, resolvePrompt(node), request.width,
-                                  request.height, node.id, inputDigests(node));
+    const QSize size = requestedSize(node);
+    return ResultCache::signature(model.id, resolvePrompt(node), size.width(),
+                                  size.height(), node.id, inputDigests(node));
+}
+
+// The node's requested output size, falling back to the request defaults when
+// unset. One resolver feeds both the submission and the cache signature, so a
+// format change can never be served a stale cached result.
+QSize GenerationCoordinator::requestedSize(const core::Node &node)
+{
+    const GenerationRequest defaults;
+    if (node.outputWidth > 0 && node.outputHeight > 0)
+        return QSize(node.outputWidth, node.outputHeight);
+    return QSize(defaults.width, defaults.height);
 }
 
 bool GenerationCoordinator::applyCachedResult(core::Node *node,
@@ -322,6 +333,9 @@ void GenerationCoordinator::submitNode(core::Node *node, const ModelInfo &model,
     request.modelId = model.id;
     request.prompt = resolvePrompt(*node);
     request.inputPath = resolveInputPath(*node);
+    const QSize size = requestedSize(*node);
+    request.width = size.width();
+    request.height = size.height();
     request.seed = node->id; // stable per node, so a re-run reproduces its result
 
     m_run.signatures.insert(node->id, signature);

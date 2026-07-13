@@ -14,6 +14,7 @@ add_library(cutpilot-core STATIC
     src/command/AddConnectedNodeCommand.cpp
     src/command/EditPromptCommand.cpp
     src/command/SetModelCommand.cpp
+    src/command/SetOutputFormatCommand.cpp
     src/command/SetGateLimitCommand.cpp
     src/command/SetCompositeParamsCommand.cpp
     src/command/SetMediaPathCommand.cpp

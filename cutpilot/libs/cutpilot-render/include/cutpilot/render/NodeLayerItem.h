@@ -131,6 +131,7 @@ public:
     // picker, gate limit dialog, file picker, and parameter inspector.
     void setNodePrompt(int nodeId, const QString &text);
     void setNodeModel(int nodeId, const QString &modelId, const QString &modelLabel);
+    void setNodeOutputFormat(int nodeId, int width, int height);
     void setGateLimit(int nodeId, double limitUsd);
     void setNodeMediaPath(int nodeId, const QString &mediaPath);
 

@@ -173,6 +173,10 @@ QJsonObject nodeToJson(const Node &node)
         json[QLatin1String("modelId")] = node.modelId;
         json[QLatin1String("modelLabel")] = node.modelLabel;
     }
+    if (node.outputWidth > 0 && node.outputHeight > 0) {
+        json[QLatin1String("outputWidth")] = node.outputWidth;
+        json[QLatin1String("outputHeight")] = node.outputHeight;
+    }
     json[QLatin1String("gateLimitUsd")] = node.gateLimitUsd;
     if (!node.mediaPath.isEmpty())
         json[QLatin1String("mediaPath")] = node.mediaPath;
@@ -228,6 +232,8 @@ bool nodeFromJson(const QJsonObject &json, Node &node)
     node.promptText = json[QLatin1String("promptText")].toString();
     node.modelId = json[QLatin1String("modelId")].toString();
     node.modelLabel = json[QLatin1String("modelLabel")].toString();
+    node.outputWidth = qMax(0, json[QLatin1String("outputWidth")].toInt());
+    node.outputHeight = qMax(0, json[QLatin1String("outputHeight")].toInt());
     node.gateLimitUsd =
         json[QLatin1String("gateLimitUsd")].toDouble(node.gateLimitUsd);
     node.mediaPath = json[QLatin1String("mediaPath")].toString();

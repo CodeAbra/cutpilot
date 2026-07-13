@@ -29,6 +29,8 @@ core::NodeGraph fullBoard()
     generate.worldPos = QPointF(400.0, 60.0);
     generate.modelId = QStringLiteral("vendor/model-x");
     generate.modelLabel = QStringLiteral("Model X");
+    generate.outputWidth = 1080;
+    generate.outputHeight = 1440;
     generate.resultPath = QStringLiteral("/tmp/result.png");
     generate.resultDigest = QStringLiteral("abc123");
     generate.costUsd = 0.42;
@@ -81,7 +83,8 @@ bool sameNode(const core::Node &a, const core::Node &b)
     if (a.id != b.id || a.title != b.title || a.kind != b.kind
         || a.worldPos != b.worldPos || a.worldSize != b.worldSize
         || a.promptText != b.promptText || a.modelId != b.modelId
-        || a.modelLabel != b.modelLabel || a.gateLimitUsd != b.gateLimitUsd
+        || a.modelLabel != b.modelLabel || a.outputWidth != b.outputWidth
+        || a.outputHeight != b.outputHeight || a.gateLimitUsd != b.gateLimitUsd
         || a.mediaPath != b.mediaPath || a.externalType != b.externalType
         || a.externalData != b.externalData || !(a.comp == b.comp)
         || a.resultPath != b.resultPath || a.resultDigest != b.resultDigest

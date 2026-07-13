@@ -4,6 +4,7 @@
 #include "cutpilot/core/command/CommandStack.h"
 #include "cutpilot/core/command/EditPromptCommand.h"
 #include "cutpilot/core/command/SetModelCommand.h"
+#include "cutpilot/core/command/SetOutputFormatCommand.h"
 
 #include <memory>
 
@@ -15,6 +16,7 @@ class GenerationCommandsTest : public QObject {
 private slots:
     void editPromptAppliesAndUndoes();
     void setModelAppliesAndUndoes();
+    void setOutputFormatAppliesAndUndoes();
     void redoReplaysTheEdit();
     void contentRevisionAdvancesOnEveryDirection();
     void missingNodeIsANoOp();
@@ -72,6 +74,28 @@ void GenerationCommandsTest::setModelAppliesAndUndoes()
     stack.undo(graph);
     QVERIFY(graph.nodeById(id)->modelId.isEmpty());
     QVERIFY(graph.nodeById(id)->modelLabel.isEmpty());
+}
+
+void GenerationCommandsTest::setOutputFormatAppliesAndUndoes()
+{
+    NodeGraph graph;
+    CommandStack stack;
+    const int id = addGenerateNode(graph);
+
+    int lastRevision = graph.nodeById(id)->contentRevision;
+    stack.push(std::make_unique<SetOutputFormatCommand>(id, 1080, 1440), graph);
+    QCOMPARE(graph.nodeById(id)->outputWidth, 1080);
+    QCOMPARE(graph.nodeById(id)->outputHeight, 1440);
+    QVERIFY(graph.nodeById(id)->contentRevision > lastRevision);
+
+    // Undo restores the model-default marker, not merely a smaller size.
+    stack.undo(graph);
+    QCOMPARE(graph.nodeById(id)->outputWidth, 0);
+    QCOMPARE(graph.nodeById(id)->outputHeight, 0);
+
+    stack.redo(graph);
+    QCOMPARE(graph.nodeById(id)->outputWidth, 1080);
+    QCOMPARE(graph.nodeById(id)->outputHeight, 1440);
 }
 
 void GenerationCommandsTest::redoReplaysTheEdit()
