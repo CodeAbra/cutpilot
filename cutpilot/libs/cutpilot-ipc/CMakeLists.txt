@@ -1,10 +1,12 @@
 qt_add_library(cutpilot-ipc STATIC
     include/cutpilot/ipc/GenerationTypes.h
     include/cutpilot/ipc/GenerationClient.h
+    include/cutpilot/ipc/ConvertClient.h
     include/cutpilot/ipc/SidecarHost.h
     include/cutpilot/ipc/GenerationCoordinator.h
     include/cutpilot/ipc/ResultCache.h
     src/GenerationClient.cpp
+    src/ConvertClient.cpp
     src/SidecarHost.cpp
     src/GenerationCoordinator.cpp
     src/ResultCache.cpp)

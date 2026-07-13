@@ -82,6 +82,13 @@ qt_add_executable(tst_pipelineflow tst_pipelineflow.cpp)
 target_link_libraries(tst_pipelineflow PRIVATE Qt6::Test cutpilot-ipc)
 add_test(NAME ipc.pipelineflow COMMAND tst_pipelineflow)
 
+# The export path over a live convert sidecar: the bundle on disk, FCPXML
+# and OTIO re-parsed structurally, the ComfyUI tier report, and the Resolve
+# bridge's refusals.
+qt_add_executable(tst_convertflow tst_convertflow.cpp)
+target_link_libraries(tst_convertflow PRIVATE Qt6::Test cutpilot-ipc)
+add_test(NAME ipc.convertflow COMMAND tst_convertflow)
+
 # The generation sidecar's own suite, run against a live loopback server.
 # Keychain lookups are disabled so key-presence checks are driven by the
 # test environment alone.

@@ -23,7 +23,8 @@ add_library(cutpilot-core STATIC
     src/timeline/Timeline.cpp
     src/timeline/EdlWriter.cpp
     src/timeline/GraphTimeline.cpp
-    src/timeline/ProjectStore.cpp)
+    src/timeline/ProjectStore.cpp
+    src/timeline/ExportBundle.cpp)
 
 target_include_directories(cutpilot-core PUBLIC include)
 

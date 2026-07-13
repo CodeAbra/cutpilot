@@ -34,10 +34,19 @@ QByteArray freshToken()
 } // namespace
 
 SidecarHost::SidecarHost(QObject *parent)
+    : SidecarHost(QStringLiteral("sidecars/generation"),
+                  QStringLiteral("generation"), parent)
+{
+}
+
+SidecarHost::SidecarHost(const QString &relativeDir, const QString &label,
+                         QObject *parent)
     : QObject(parent)
     , m_process(new QProcess(this))
     , m_network(new QNetworkAccessManager(this))
     , m_healthTimer(new QTimer(this))
+    , m_relativeDir(relativeDir)
+    , m_label(label)
 {
     m_healthTimer->setInterval(kHealthIntervalMs);
     connect(m_healthTimer, &QTimer::timeout, this, &SidecarHost::probeHealth);
@@ -46,12 +55,13 @@ SidecarHost::SidecarHost(QObject *parent)
     connect(m_process, &QProcess::readyReadStandardError, this,
             &SidecarHost::onStandardError);
     connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-        fail(QStringLiteral("Generation service failed to launch: %1")
-                 .arg(m_process->errorString()));
+        fail(QStringLiteral("The %1 service failed to launch: %2")
+                 .arg(m_label, m_process->errorString()));
     });
     connect(m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
         if (!m_settled)
-            fail(QStringLiteral("Generation service exited during startup (code %1)")
+            fail(QStringLiteral("The %1 service exited during startup (code %2)")
+                     .arg(m_label)
                      .arg(code));
     });
 }
@@ -71,8 +81,11 @@ QString SidecarHost::locatePython() const
 
 QString SidecarHost::locateEntryScript() const
 {
+    // The override points at one service's directory; it only stands in for
+    // the service it was aimed at, never for every host in the process.
     const QString override = qEnvironmentVariable("CUTPILOT_SIDECAR_DIR");
-    if (!override.isEmpty()) {
+    if (!override.isEmpty()
+        && QDir(override).dirName() == QDir(m_relativeDir).dirName()) {
         const QString candidate = QDir(override).filePath(QStringLiteral("main.py"));
         return QFile::exists(candidate) ? candidate : QString();
     }
@@ -82,7 +95,7 @@ QString SidecarHost::locateEntryScript() const
     QDir dir(QCoreApplication::applicationDirPath());
     for (int depth = 0; depth < 10; ++depth) {
         const QString candidate =
-            dir.filePath(QStringLiteral("sidecars/generation/main.py"));
+            dir.filePath(m_relativeDir + QStringLiteral("/main.py"));
         if (QFile::exists(candidate))
             return candidate;
         if (!dir.cdUp())
@@ -99,28 +112,34 @@ void SidecarHost::start()
 
     const QString python = locatePython();
     if (python.isEmpty()) {
-        fail(QStringLiteral("No python3 interpreter found for the generation service"));
+        fail(QStringLiteral("No python3 interpreter found for the %1 service")
+                 .arg(m_label));
         return;
     }
     const QString script = locateEntryScript();
     if (script.isEmpty()) {
-        fail(QStringLiteral("Generation service sources not found"));
+        fail(QStringLiteral("The %1 service sources were not found").arg(m_label));
         return;
     }
 
     m_token = freshToken();
-    m_generationDir = qEnvironmentVariable("CUTPILOT_GEN_DIR");
-    if (m_generationDir.isEmpty()) {
-        m_generationDir =
-            QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-            + QStringLiteral("/generations");
-    }
-    QDir().mkpath(m_generationDir);
 
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     environment.insert(QStringLiteral("CUTPILOT_IPC_TOKEN"),
                        QString::fromLatin1(m_token));
-    environment.insert(QStringLiteral("CUTPILOT_GEN_DIR"), m_generationDir);
+
+    // Only the generation service writes media; it alone gets a media
+    // directory prepared and announced.
+    if (m_relativeDir == QStringLiteral("sidecars/generation")) {
+        m_generationDir = qEnvironmentVariable("CUTPILOT_GEN_DIR");
+        if (m_generationDir.isEmpty()) {
+            m_generationDir = QStandardPaths::writableLocation(
+                                  QStandardPaths::AppLocalDataLocation)
+                + QStringLiteral("/generations");
+        }
+        QDir().mkpath(m_generationDir);
+        environment.insert(QStringLiteral("CUTPILOT_GEN_DIR"), m_generationDir);
+    }
     m_process->setProcessEnvironment(environment);
 
     m_process->start(python, { QStringLiteral("-u"), script });
@@ -142,8 +161,8 @@ void SidecarHost::onStandardOutput()
     m_stdoutBuffer += m_process->readAllStandardOutput();
     if (m_port == 0 && m_stdoutBuffer.size() > kMaxAnnounceBufferBytes) {
         m_stdoutBuffer.clear();
-        fail(QStringLiteral(
-            "Generation service produced no port announcement"));
+        fail(QStringLiteral("The %1 service produced no port announcement")
+                 .arg(m_label));
         return;
     }
     int newline = -1;
@@ -166,7 +185,7 @@ void SidecarHost::onStandardError()
     const QList<QByteArray> lines = m_process->readAllStandardError().split('\n');
     for (const QByteArray &line : lines) {
         if (!line.trimmed().isEmpty())
-            qWarning("generation sidecar: %s", line.constData());
+            qWarning("%s sidecar: %s", qPrintable(m_label), line.constData());
     }
 }
 
@@ -185,7 +204,7 @@ void SidecarHost::probeHealth()
     }
     if (--m_healthAttemptsLeft < 0) {
         m_healthTimer->stop();
-        fail(QStringLiteral("Generation service did not become healthy"));
+        fail(QStringLiteral("The %1 service did not become healthy").arg(m_label));
         return;
     }
 
