@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`quickNode`), so reopening a project re-adopts the same node.
 
 ### Fixed
+- The one-time title-based Quick Mode adoption now applies only to documents
+  genuinely written before node identities existed (no `uid` stored on any
+  node). A current document with no recorded binding stays unbound: a node
+  coincidentally titled "Quick Generate" — for example a placed template
+  carrying a saved copy — is no longer silently adopted as the Quick Mode
+  node on load. A recorded binding is also validated to name a generate
+  node; a binding of any other kind is dropped on load and refused by the
+  Quick Mode surface.
 - Redoing an undone node placement (or ComfyUI import) restores the node
   exactly as the undo removed it. Previously a generation result or picked
   file that arrived after the placement was dropped from the document by the

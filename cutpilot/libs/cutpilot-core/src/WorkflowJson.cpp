@@ -312,6 +312,13 @@ bool workflowFromJson(const QJsonObject &json, NodeGraph &graph, QString *name,
         nodes.push_back(node);
     }
 
+    // A document that stores an identity on any node is current; one storing
+    // none predates identities entirely. Decided before minting fills the
+    // gaps, because the distinction gates the quick-binding fallback below.
+    bool storedIdentityEra = false;
+    for (const Node &node : nodes)
+        storedIdentityEra = storedIdentityEra || !node.uid.isEmpty();
+
     // Every node leaves the loader with its own durable identity: a document
     // written before uids existed gets them assigned here, and a duplicated
     // uid (a hand-edited or merged file) keeps only its first holder.
@@ -364,19 +371,23 @@ bool workflowFromJson(const QJsonObject &json, NodeGraph &graph, QString *name,
     if (quickNodeUid) {
         quickNodeUid->clear();
         if (json.contains(QLatin1String("quickNode"))) {
-            // A recorded binding must still name a node in this document; a
-            // dangling one is dropped rather than adopted blindly later.
+            // A recorded binding must still name a generate node in this
+            // document; a dangling or wrong-kind one is dropped rather than
+            // adopted blindly later.
             const QString stored = json[QLatin1String("quickNode")].toString();
             for (const Node &node : nodes) {
                 if (!stored.isEmpty() && node.uid == stored) {
-                    *quickNodeUid = stored;
+                    if (node.kind == NodeKind::Generate)
+                        *quickNodeUid = stored;
                     break;
                 }
             }
-        } else {
-            // A document from before the binding existed identified its quick
-            // node by title alone; carry that node's identity forward once so
-            // the title never has to be matched again.
+        } else if (!storedIdentityEra) {
+            // A document from before identities existed named its quick node
+            // by title alone; carry that node's identity forward once so the
+            // title never has to be matched again. On a current document an
+            // absent binding means none: a look-alike wearing the title (a
+            // placed template carrying a saved copy) is never adopted.
             const Node *legacy = nullptr;
             for (const Node &node : nodes) {
                 if (node.kind == NodeKind::Generate

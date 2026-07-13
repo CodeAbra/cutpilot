@@ -22,10 +22,12 @@ QJsonObject workflowToJson(const NodeGraph &graph, const QString &name,
 // graph untouched — when the payload is not a workflow document or any node or
 // connection fails validation. Nodes missing a uid (documents written before
 // uids existed, or duplicated by hand) leave with a freshly assigned one that
-// then persists. quickNodeUid, when requested, is the validated stored
-// binding; a document without one yields the oldest generate node still
-// titled by the quick surface's original name, carrying the legacy binding
-// forward once.
+// then persists. quickNodeUid, when requested, is the stored binding
+// validated to name a generate node in this document. Only a document
+// carrying no uid anywhere — one from before identities existed — may yield
+// its binding by the legacy title rule instead: the oldest generate node
+// titled by the quick surface's original name, carried forward once. On a
+// current document an absent binding means none.
 bool workflowFromJson(const QJsonObject &json, NodeGraph &graph,
                       QString *name = nullptr,
                       QString *quickNodeUid = nullptr);

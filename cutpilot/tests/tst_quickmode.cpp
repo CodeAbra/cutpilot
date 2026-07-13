@@ -219,6 +219,19 @@ void QuickModeTest::adoptionResolvesByDurableIdentityNotTitle()
     second.openAt(QPointF(0.0, 0.0));
     QCOMPARE(second.nodeId(), ownId);
     QCOMPARE(rig.layer.graph().nodes().size(), 3);
+
+    // A binding naming a node of the wrong kind — a hand-edited document —
+    // is refused: the surface materializes its own generate node instead of
+    // rendering over a node it cannot run.
+    const int frameId = rig.layer.placePrototypeAt(
+        core::catalogPrototype(QStringLiteral("Frame")), QPointF(0.0, 900.0));
+    QuickPanel third(rig.table, &rig.layer, &rig.coordinator, nullptr);
+    third.setBoundNodeUid(rig.layer.graph().nodeById(frameId)->uid);
+    third.openAt(QPointF(400.0, 400.0));
+    QVERIFY(third.nodeId() != frameId);
+    QCOMPARE(rig.layer.graph().nodeById(third.nodeId())->kind,
+             core::NodeKind::Generate);
+    QCOMPARE(rig.layer.graph().nodes().size(), 5);
 }
 
 void QuickModeTest::editsLandOnTheNodeThroughTheUndoablePath()

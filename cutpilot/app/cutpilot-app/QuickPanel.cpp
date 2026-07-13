@@ -336,9 +336,12 @@ void QuickPanel::openAt(const QPointF &worldCentre)
     if (m_nodeId == -1 || !m_layer->graph().nodeById(m_nodeId)) {
         // Adopt by the durable identity the document records, never by
         // title: a rename cannot orphan the surface and a duplicate (a
-        // placed template carrying a copy) can never steal it.
+        // placed template carrying a copy) can never steal it. Only a
+        // generate node can back the surface; a binding of any other kind
+        // (a hand-edited document) is refused.
         m_nodeId = -1;
-        if (const core::Node *bound = m_layer->graph().nodeByUid(m_boundUid))
+        const core::Node *bound = m_layer->graph().nodeByUid(m_boundUid);
+        if (bound && bound->kind == core::NodeKind::Generate)
             m_nodeId = bound->id;
         if (m_nodeId == -1) {
             core::Node prototype =

@@ -78,6 +78,19 @@ core::NodeGraph fullBoard()
     return graph;
 }
 
+// The document as the pre-identity format wrote it: no uid on any node.
+QJsonObject withoutUids(QJsonObject json)
+{
+    QJsonArray nodes = json[QLatin1String("nodes")].toArray();
+    for (int i = 0; i < nodes.size(); ++i) {
+        QJsonObject node = nodes[i].toObject();
+        node.remove(QLatin1String("uid"));
+        nodes.replace(i, node);
+    }
+    json[QLatin1String("nodes")] = nodes;
+    return json;
+}
+
 bool sameNode(const core::Node &a, const core::Node &b)
 {
     if (a.id != b.id || a.uid != b.uid || a.title != b.title || a.kind != b.kind
@@ -238,14 +251,8 @@ private slots:
         // A document written before durable identities existed loads with a
         // fresh unique uid on every node, and those uids then persist: a
         // save/reload round trip returns the identical identities.
-        QJsonObject json = core::workflowToJson(fullBoard(), QString());
-        QJsonArray nodes = json[QLatin1String("nodes")].toArray();
-        for (int i = 0; i < nodes.size(); ++i) {
-            QJsonObject node = nodes[i].toObject();
-            node.remove(QLatin1String("uid"));
-            nodes.replace(i, node);
-        }
-        json[QLatin1String("nodes")] = nodes;
+        const QJsonObject json =
+            withoutUids(core::workflowToJson(fullBoard(), QString()));
 
         core::NodeGraph migrated;
         QVERIFY(core::workflowFromJson(json, migrated, nullptr));
@@ -301,8 +308,18 @@ private slots:
             dangling, nullptr, &binding));
         QVERIFY(binding.isEmpty());
 
-        // A document from before the binding existed carries its quick node
-        // forward by the legacy title rule — once, and the oldest id wins.
+        // A binding naming a node of the wrong kind is dropped too: only a
+        // generate node can back the quick surface.
+        QCOMPARE(board.nodes()[0].kind, core::NodeKind::Prompt);
+        core::NodeGraph wrongKind;
+        QVERIFY(core::workflowFromJson(
+            core::workflowToJson(board, QString(), board.nodes()[0].uid),
+            wrongKind, nullptr, &binding));
+        QVERIFY(binding.isEmpty());
+
+        // A document from before identities existed — no uid stored on any
+        // node — carries its quick node forward by the legacy title rule:
+        // once, and the oldest id wins.
         core::NodeGraph legacyBoard;
         core::Node younger =
             core::catalogPrototype(QStringLiteral("Generate Image"));
@@ -310,11 +327,23 @@ private slots:
         core::Node older = younger;
         const int firstId = legacyBoard.addNode(younger);
         legacyBoard.addNode(older);
-        QJsonObject legacyJson = core::workflowToJson(legacyBoard, QString());
+        const QJsonObject legacyJson =
+            withoutUids(core::workflowToJson(legacyBoard, QString()));
         QVERIFY(!legacyJson.contains(QLatin1String("quickNode")));
         core::NodeGraph adopted;
         QVERIFY(core::workflowFromJson(legacyJson, adopted, nullptr, &binding));
         QCOMPARE(binding, adopted.nodeById(firstId)->uid);
+
+        // A current document stores identities; on one of those an absent
+        // binding means exactly that. A look-alike node wearing the quick
+        // title — a placed template carrying a saved copy — is never adopted.
+        const QJsonObject lookAlike =
+            core::workflowToJson(legacyBoard, QString());
+        QVERIFY(!lookAlike.contains(QLatin1String("quickNode")));
+        core::NodeGraph unclaimed;
+        QVERIFY(core::workflowFromJson(lookAlike, unclaimed, nullptr,
+                                       &binding));
+        QVERIFY(binding.isEmpty());
 
         // No quick node at all: the binding stays empty.
         core::NodeGraph plain;

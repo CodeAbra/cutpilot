@@ -1,11 +1,15 @@
 #include <QtTest/QtTest>
 
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 
 #include "WorkflowStore.h"
 #include "cutpilot/core/NodeCatalog.h"
 #include "cutpilot/core/NodeGraph.h"
+#include "cutpilot/core/WorkflowJson.h"
 
 using namespace cutpilot;
 using cutpilot::app::WorkflowStore;
@@ -155,14 +159,48 @@ private slots:
 
     void legacyQuickTitleMigratesIntoTheBinding()
     {
-        // A stored document from before the binding existed named its quick
-        // node only by title; loading it adopts that node's identity once.
+        // A stored document from before durable identities existed — no uid
+        // on any node — named its quick node only by title; loading it
+        // adopts that node's identity once.
         QTemporaryDir dir;
         core::NodeGraph graph = sampleBoard();
         core::Node quick =
             core::catalogPrototype(QStringLiteral("Generate Image"));
         quick.title = QStringLiteral("Quick Generate");
         const int quickId = graph.addNode(quick);
+
+        QJsonObject json =
+            core::workflowToJson(graph, QStringLiteral("Legacy Reel"));
+        QJsonArray nodes = json[QLatin1String("nodes")].toArray();
+        for (int i = 0; i < nodes.size(); ++i) {
+            QJsonObject node = nodes[i].toObject();
+            node.remove(QLatin1String("uid"));
+            nodes.replace(i, node);
+        }
+        json[QLatin1String("nodes")] = nodes;
+        QFile legacyFile(dir.path() + QStringLiteral("/workflow.json"));
+        QVERIFY(legacyFile.open(QIODevice::WriteOnly));
+        legacyFile.write(QJsonDocument(json).toJson(QJsonDocument::Compact));
+        legacyFile.close();
+
+        core::NodeGraph restored;
+        WorkflowStore reader(&restored);
+        reader.setDirectory(dir.path());
+        QVERIFY(reader.load());
+        QCOMPARE(reader.quickNodeUid(), restored.nodeById(quickId)->uid);
+    }
+
+    void currentDocumentNeverAdoptsALookAlikeQuickNode()
+    {
+        // A current document stores identities on its nodes; when it has no
+        // binding, none exists. A node wearing the quick title — a placed
+        // template carrying a saved copy — must not be adopted on load.
+        QTemporaryDir dir;
+        core::NodeGraph graph = sampleBoard();
+        core::Node lookAlike =
+            core::catalogPrototype(QStringLiteral("Generate Image"));
+        lookAlike.title = QStringLiteral("Quick Generate");
+        graph.addNode(lookAlike);
 
         WorkflowStore store(&graph);
         store.setDirectory(dir.path());
@@ -173,7 +211,7 @@ private slots:
         WorkflowStore reader(&restored);
         reader.setDirectory(dir.path());
         QVERIFY(reader.load());
-        QCOMPARE(reader.quickNodeUid(), restored.nodeById(quickId)->uid);
+        QVERIFY(reader.quickNodeUid().isEmpty());
     }
 
     void unwritableDirectoryReportsFailure()
