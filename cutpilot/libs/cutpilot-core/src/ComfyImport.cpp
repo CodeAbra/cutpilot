@@ -70,8 +70,13 @@ public:
     {
         for (int i = m_connections.size() - 1; i >= 0; --i)
             graph.removeConnection(m_connections.at(i).id);
-        for (int i = m_nodes.size() - 1; i >= 0; --i)
+        for (int i = m_nodes.size() - 1; i >= 0; --i) {
+            // Re-capture each node so redo restores exactly what this undo
+            // removes, including results written after the import.
+            if (const Node *current = graph.nodeById(m_nodes.at(i).id))
+                m_nodes[i] = *current;
             graph.removeNode(m_nodes.at(i).id);
+        }
     }
 
     QVector<int> nodeIds() const

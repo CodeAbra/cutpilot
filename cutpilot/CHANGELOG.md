@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`quickNode`), so reopening a project re-adopts the same node.
 
 ### Fixed
+- Redoing an undone node placement (or ComfyUI import) restores the node
+  exactly as the undo removed it. Previously a generation result or picked
+  file that arrived after the placement was dropped from the document by the
+  undo/redo round trip.
 - A reference image (Still Image node) wired into an image-consuming
   generation now genuinely feeds the run: the picked file travels into the
   job and its content keys the result cache, so swapping the file

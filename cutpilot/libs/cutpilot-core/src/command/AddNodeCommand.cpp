@@ -26,9 +26,14 @@ void AddNodeCommand::apply(NodeGraph &graph)
 
 void AddNodeCommand::revert(NodeGraph &graph)
 {
-    // Leave m_index at the position captured on the first apply. Re-deriving it here
-    // would read whatever z the node currently sits at, so an intervening raise-to-top
-    // would make redo restore the node at the wrong z.
+    // Re-capture the node's current value so redo restores exactly what this
+    // undo removes — results and parameters written after the add (a finished
+    // generation, a picked file) live on the node, not in later commands.
+    // m_index stays at the position captured on the first apply: re-deriving
+    // it here would read whatever z the node currently sits at, so an
+    // intervening raise-to-top would make redo restore the wrong z.
+    if (const Node *current = graph.nodeById(m_node.id))
+        m_node = *current;
     graph.removeNode(m_node.id);
 }
 

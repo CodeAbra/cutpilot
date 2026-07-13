@@ -204,6 +204,14 @@ void TstCommandStack::addUndoRedoPreservesUid()
     stack.redo(graph);
     QVERIFY(graph.nodeByUid(uid));
     QCOMPARE(graph.nodeByUid(uid)->id, id);
+
+    // Content written onto the node after the add — a finished result lands
+    // outside the command stack — survives the same walk: redo restores what
+    // undo removed, not the value captured at add time.
+    graph.nodeById(id)->resultPath = QStringLiteral("/tmp/result.png");
+    stack.undo(graph);
+    stack.redo(graph);
+    QCOMPARE(graph.nodeById(id)->resultPath, QStringLiteral("/tmp/result.png"));
 }
 
 void TstCommandStack::addRaiseUndoRedoKeepsAddZOrder()
