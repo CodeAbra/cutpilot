@@ -106,6 +106,9 @@ void CompositorService::refreshNow()
         if (!m_layer->graph().nodeById(it.key())) {
             if (m_engine)
                 m_engine->releaseNode(it.key());
+            // The frame lambda captures this playback raw; the plain delete
+            // is safe only while the sink delivers on this same thread, so
+            // destruction disconnects before any next delivery.
             delete it.value();
             it = m_videos.erase(it);
         } else {
