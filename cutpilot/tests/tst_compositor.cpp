@@ -148,7 +148,7 @@ private slots:
     void matteConsumedAsImageReadsGray();
     void transformTranslatesRotatesAndScales();
     void cacheServesUnchangedPassesAndScrubOnlyTheTail();
-
+    void pipelineOutlivesItsFoundingNodesDescriptor();
 };
 
 // Node ids restart per test graph, and the engine caches by node id, so each
@@ -409,6 +409,33 @@ void CompositorTest::cacheServesUnchangedPassesAndScrubOnlyTheTail()
     engine.setSource(stillB, uniformImage(8, 8, QColor(90, 10, 10)), 2);
     QVERIFY(!engine.evaluateToImage(buildCompositePlan(graph, blend)).isNull());
     QCOMPARE(engine.lastPassCount(), 2);
+}
+
+void CompositorTest::pipelineOutlivesItsFoundingNodesDescriptor()
+{
+    REQUIRE_ENGINE(engine);
+    // A kind's pipeline is created once, against the render-pass descriptor
+    // of the first node of that kind, and reused for every later node of
+    // the kind through format compatibility — object identity must not
+    // matter, even after the founding node's descriptor is destroyed.
+    NodeGraph graph;
+    const int stillA = addProto(graph, NodeKind::Still);
+    const int maskA = addProto(graph, NodeKind::Mask);
+    wire(graph, stillA, 0, maskA, 0);
+    const int stillB = addProto(graph, NodeKind::Still);
+    const int maskB = addProto(graph, NodeKind::Mask);
+    wire(graph, stillB, 0, maskB, 0);
+
+    engine.setSource(stillA, uniformImage(4, 4, QColor(10, 20, 30)), 1);
+    engine.setSource(stillB, uniformImage(4, 4, QColor(200, 100, 50)), 1);
+
+    QVERIFY(!engine.evaluateToImage(buildCompositePlan(graph, maskA)).isNull());
+    engine.releaseNode(maskA);
+    engine.releaseNode(stillA);
+
+    const QImage out = engine.evaluateToImage(buildCompositePlan(graph, maskB));
+    QCOMPARE(engine.lastPassCount(), 1);
+    CHECK_PIXEL(out, 2, 2, fromColor(QColor(200, 100, 50, 255)), 0);
 }
 
 int main(int argc, char *argv[])
