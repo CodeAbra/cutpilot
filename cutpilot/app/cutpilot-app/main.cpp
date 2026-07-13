@@ -480,12 +480,14 @@ public:
         m_runPanel->raise();
     }
 
-    // Push one theme into every GPU layer this view hosts.
+    // Push one theme into every GPU layer this view hosts, and into the run
+    // strip it owns.
     void applyCanvasTheme(cutpilot::theme::Theme themeId)
     {
         m_theme.setTheme(themeId);
         setStyleSheet(QStringLiteral("background-color: %1;")
                           .arg(m_theme.bgCanvas().name()));
+        m_runPanel->retheme(m_theme);
         if (m_layer)
             m_layer->setTheme(themeId);
         if (m_grid)
@@ -775,13 +777,14 @@ private:
 // preview-pin actions.
 class GenerationChrome : public QObject {
 public:
-    GenerationChrome(CanvasView *view, GenerationCoordinator *coordinator,
+    GenerationChrome(const ThemeTable &theme, CanvasView *view,
+                     GenerationCoordinator *coordinator,
                      PreviewController *previews)
         : QObject(view)
         , m_view(view)
         , m_coordinator(coordinator)
         , m_previews(previews)
-        , m_editor(new PromptEditor(ThemeTable(cutpilot::theme::Theme::Dark), view))
+        , m_editor(new PromptEditor(theme, view))
     {
         NodeLayerItem *layer = view->layer();
         m_editor->onCommit = [layer](int nodeId, const QString &text) {
@@ -1136,12 +1139,19 @@ int main(int argc, char *argv[])
                              &WorkflowStore::scheduleSave);
         }
 
+
         coordinator = new GenerationCoordinator(&layer->graph(), &client, view);
+        if (store) {
+            // Run results land outside the command stack; a finished result
+            // still belongs in the document, or a reopened board forgets it.
+            QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady,
+                             store, [store] { store->scheduleSave(); });
+        }
         previews = new PreviewController(view);
         previews->setLayer(layer);
         previewPanel = new PreviewPanel(theme, previews, layer, view);
         previews->setPreviewItem(previewPanel->previewItem());
-        chrome = new GenerationChrome(view, coordinator, previews);
+        chrome = new GenerationChrome(theme, view, coordinator, previews);
 
         // Card pixels off the scrub path: still decodes and composite
         // thumbnails land debounced; the preview follows fresh stills.
@@ -1781,7 +1791,6 @@ int main(int argc, char *argv[])
                 searchPanel->retheme(table);
                 assetsPanel->retheme(table);
                 builderPanel->retheme(table);
-                view->runPanel()->retheme(table);
                 if (previewPanel)
                     previewPanel->retheme(table);
                 if (chrome)

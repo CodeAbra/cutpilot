@@ -10,7 +10,11 @@ const QLatin1String kThemeKey("appearance/theme");
 
 theme::Theme storedTheme()
 {
-    const QString value = QSettings().value(kThemeKey).toString();
+    // CUTPILOT_THEME forces a theme for this launch without touching the
+    // stored choice.
+    QString value = qEnvironmentVariable("CUTPILOT_THEME");
+    if (value.isEmpty())
+        value = QSettings().value(kThemeKey).toString();
     if (value == QLatin1String("light"))
         return theme::Theme::Light;
     if (value == QLatin1String("dark-dim"))
