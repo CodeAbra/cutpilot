@@ -40,6 +40,16 @@ public:
     void zoomAbout(const QPointF &anchorPx, qreal factor, qreal dpr);
     void reset();
 
+    // Absolute zoom (as a percentage) about an anchor in physical pixels.
+    void setZoomPercent(qreal percent, const QPointF &anchorPx, qreal dpr);
+
+    // Frame a world rect in a viewport given in physical pixels.
+    void fitWorldRect(const QRectF &world, const QSizeF &viewportPx, qreal dpr,
+                      qreal marginFrac = 0.08);
+
+    // Pan so a world point lands at the viewport center, keeping the zoom.
+    void centerOnWorld(const QPointF &world, const QSizeF &viewportPx, qreal dpr);
+
 signals:
     void cameraChanged();
 

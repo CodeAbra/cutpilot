@@ -27,4 +27,25 @@ void CanvasController::reset()
     emit cameraChanged();
 }
 
+void CanvasController::setZoomPercent(qreal percent, const QPointF &anchorPx,
+                                      qreal dpr)
+{
+    if (m_camera.setZoomAbout(anchorPx, percent / 100.0, dpr))
+        emit cameraChanged();
+}
+
+void CanvasController::fitWorldRect(const QRectF &world, const QSizeF &viewportPx,
+                                    qreal dpr, qreal marginFrac)
+{
+    m_camera.fitRect(world, viewportPx, dpr, marginFrac);
+    emit cameraChanged();
+}
+
+void CanvasController::centerOnWorld(const QPointF &world, const QSizeF &viewportPx,
+                                     qreal dpr)
+{
+    m_camera.centerOn(world, viewportPx, dpr);
+    emit cameraChanged();
+}
+
 } // namespace cutpilot::render

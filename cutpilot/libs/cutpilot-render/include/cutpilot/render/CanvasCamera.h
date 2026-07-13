@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QPointF>
+#include <QRectF>
+#include <QSizeF>
 #include <algorithm>
 
 namespace cutpilot::render {
@@ -49,6 +51,44 @@ struct CanvasCamera {
         zoom = newZoom;
         panPixels = anchorPx - world * (zoom * dpr);
         return true;
+    }
+
+    // Set an absolute zoom about an anchor in physical pixels, keeping the world
+    // point under the anchor fixed on screen. Returns true if the zoom changed.
+    bool setZoomAbout(const QPointF &anchorPx, qreal newZoom, qreal dpr)
+    {
+        const qreal clamped = std::clamp(newZoom, kMinZoom, kMaxZoom);
+        if (clamped == zoom)
+            return false;
+        const QPointF world = worldFromScreen(anchorPx, dpr);
+        zoom = clamped;
+        panPixels = anchorPx - world * (zoom * dpr);
+        return true;
+    }
+
+    // Pan so the given world point lands at the viewport center, keeping the zoom.
+    // The viewport size is in physical pixels.
+    void centerOn(const QPointF &world, const QSizeF &viewportPx, qreal dpr)
+    {
+        const QPointF centre(viewportPx.width() / 2.0, viewportPx.height() / 2.0);
+        panPixels = centre - world * (zoom * dpr);
+    }
+
+    // Frame a world rect in the viewport with a fractional margin on every side,
+    // clamped to the zoom range. A degenerate rect only recenters.
+    void fitRect(const QRectF &world, const QSizeF &viewportPx, qreal dpr,
+                 qreal marginFrac = 0.08)
+    {
+        if (viewportPx.isEmpty())
+            return;
+        if (world.width() > 1e-9 && world.height() > 1e-9) {
+            const qreal usableW = viewportPx.width() * (1.0 - 2.0 * marginFrac);
+            const qreal usableH = viewportPx.height() * (1.0 - 2.0 * marginFrac);
+            const qreal fitted = std::min(usableW / (world.width() * dpr),
+                                          usableH / (world.height() * dpr));
+            zoom = std::clamp(fitted, kMinZoom, kMaxZoom);
+        }
+        centerOn(world.center(), viewportPx, dpr);
     }
 
     void reset()
