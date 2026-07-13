@@ -35,7 +35,7 @@ private slots:
     void outputSizeMathIsExact();
     void outputFormatSetterHoldsTheServiceBounds();
     void openMaterializesOneRealGenerateNode();
-    void adoptionPrefersTheOldestQuickNode();
+    void adoptionResolvesByDurableIdentityNotTitle();
     void editsLandOnTheNodeThroughTheUndoablePath();
     void runProducesASizedResultAndTheCacheStaysHonest();
     void missingVendorKeySurfacesTheAddKeyAffordance();
@@ -181,30 +181,43 @@ void QuickModeTest::openMaterializesOneRealGenerateNode()
     QVERIFY(!rig.panel.isVisible());
 }
 
-void QuickModeTest::adoptionPrefersTheOldestQuickNode()
+void QuickModeTest::adoptionResolvesByDurableIdentityNotTitle()
 {
     Rig rig(&m_client);
     QVERIFY(waitForModels(rig));
 
-    // Duplicates can reach the board — a placed template can carry a saved
-    // quick node — so adoption must stay with the oldest match instead of
-    // jumping to whichever duplicate arrived last.
+    // Look-alikes wearing the quick title (a placed template can carry a
+    // saved copy) can never stand in for the surface's own node.
     core::Node prototype =
         core::catalogPrototype(QStringLiteral("Generate Image"));
     prototype.title = QStringLiteral("Quick Generate");
-    const int oldest = rig.layer.placePrototypeAt(prototype, QPointF(0.0, 0.0));
+    rig.layer.placePrototypeAt(prototype, QPointF(0.0, 0.0));
     rig.layer.placePrototypeAt(prototype, QPointF(500.0, 0.0));
 
+    // With no recorded binding the surface materializes its own node and
+    // announces the identity for the document to keep.
+    QSignalSpy bindings(&rig.panel, &QuickPanel::boundNodeUidChanged);
     rig.panel.openAt(QPointF(250.0, 250.0));
-    QCOMPARE(rig.panel.nodeId(), oldest);
-    QCOMPARE(rig.layer.graph().nodes().size(), 2);
+    const int ownId = rig.panel.nodeId();
+    QCOMPARE(rig.layer.graph().nodes().size(), 3);
+    QCOMPARE(bindings.count(), 1);
+    const QString uid = bindings.first().first().toString();
+    QCOMPARE(rig.layer.graph().nodeById(ownId)->uid, uid);
+    QCOMPARE(rig.panel.boundNodeUid(), uid);
 
-    // Re-opening after a dismissal lands on the same node again, even with
-    // yet another duplicate in between.
+    // A rename cannot orphan the surface: identity binds, not the title.
+    rig.layer.graph().nodeById(ownId)->title = QStringLiteral("Hero shot");
     rig.panel.dismiss();
-    rig.layer.placePrototypeAt(prototype, QPointF(0.0, 500.0));
-    rig.panel.openAt(QPointF(250.0, 250.0));
-    QCOMPARE(rig.panel.nodeId(), oldest);
+    rig.panel.openAt(QPointF(900.0, 900.0));
+    QCOMPARE(rig.panel.nodeId(), ownId);
+    QCOMPARE(rig.layer.graph().nodes().size(), 3);
+
+    // A fresh panel seeded with the stored binding — the relaunch path —
+    // adopts the same node by uid, never a duplicate.
+    QuickPanel second(rig.table, &rig.layer, &rig.coordinator, nullptr);
+    second.setBoundNodeUid(uid);
+    second.openAt(QPointF(0.0, 0.0));
+    QCOMPARE(second.nodeId(), ownId);
     QCOMPARE(rig.layer.graph().nodes().size(), 3);
 }
 

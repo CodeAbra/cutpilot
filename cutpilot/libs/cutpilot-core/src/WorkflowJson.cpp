@@ -149,6 +149,8 @@ QJsonObject nodeToJson(const Node &node)
 {
     QJsonObject json;
     json[QLatin1String("id")] = node.id;
+    if (!node.uid.isEmpty())
+        json[QLatin1String("uid")] = node.uid;
     json[QLatin1String("title")] = node.title;
     json[QLatin1String("kind")] = kindKey(node.kind);
     json[QLatin1String("x")] = node.worldPos.x();
@@ -205,6 +207,7 @@ bool nodeFromJson(const QJsonObject &json, Node &node)
     if (!kindFromKey(json[QLatin1String("kind")].toString(), node.kind))
         return false;
 
+    node.uid = json[QLatin1String("uid")].toString();
     node.title = json[QLatin1String("title")].toString();
     node.worldPos = QPointF(json[QLatin1String("x")].toDouble(),
                             json[QLatin1String("y")].toDouble());
@@ -259,11 +262,14 @@ bool nodeFromJson(const QJsonObject &json, Node &node)
 
 } // namespace
 
-QJsonObject workflowToJson(const NodeGraph &graph, const QString &name)
+QJsonObject workflowToJson(const NodeGraph &graph, const QString &name,
+                           const QString &quickNodeUid)
 {
     QJsonObject json;
     json[kFormatKey] = kFormatVersion;
     json[QLatin1String("name")] = name;
+    if (!quickNodeUid.isEmpty())
+        json[QLatin1String("quickNode")] = quickNodeUid;
 
     QJsonArray nodes;
     for (const Node &node : graph.nodes())
@@ -284,7 +290,8 @@ QJsonObject workflowToJson(const NodeGraph &graph, const QString &name)
     return json;
 }
 
-bool workflowFromJson(const QJsonObject &json, NodeGraph &graph, QString *name)
+bool workflowFromJson(const QJsonObject &json, NodeGraph &graph, QString *name,
+                      QString *quickNodeUid)
 {
     if (json[kFormatKey].toInt() != kFormatVersion)
         return false;
@@ -303,6 +310,17 @@ bool workflowFromJson(const QJsonObject &json, NodeGraph &graph, QString *name)
                 return false;
         }
         nodes.push_back(node);
+    }
+
+    // Every node leaves the loader with its own durable identity: a document
+    // written before uids existed gets them assigned here, and a duplicated
+    // uid (a hand-edited or merged file) keeps only its first holder.
+    for (int i = 0; i < nodes.size(); ++i) {
+        bool taken = false;
+        for (int j = 0; j < i && !taken; ++j)
+            taken = !nodes[i].uid.isEmpty() && nodes[j].uid == nodes[i].uid;
+        if (nodes[i].uid.isEmpty() || taken)
+            nodes[i].uid = NodeGraph::mintUid();
     }
 
     const auto endpointValid = [&nodes](int nodeId, int portIndex) {
@@ -342,6 +360,34 @@ bool workflowFromJson(const QJsonObject &json, NodeGraph &graph, QString *name)
 
     if (name)
         *name = json[QLatin1String("name")].toString();
+
+    if (quickNodeUid) {
+        quickNodeUid->clear();
+        if (json.contains(QLatin1String("quickNode"))) {
+            // A recorded binding must still name a node in this document; a
+            // dangling one is dropped rather than adopted blindly later.
+            const QString stored = json[QLatin1String("quickNode")].toString();
+            for (const Node &node : nodes) {
+                if (!stored.isEmpty() && node.uid == stored) {
+                    *quickNodeUid = stored;
+                    break;
+                }
+            }
+        } else {
+            // A document from before the binding existed identified its quick
+            // node by title alone; carry that node's identity forward once so
+            // the title never has to be matched again.
+            const Node *legacy = nullptr;
+            for (const Node &node : nodes) {
+                if (node.kind == NodeKind::Generate
+                    && node.title == QLatin1String("Quick Generate")
+                    && (!legacy || node.id < legacy->id))
+                    legacy = &node;
+            }
+            if (legacy)
+                *quickNodeUid = legacy->uid;
+        }
+    }
     return true;
 }
 

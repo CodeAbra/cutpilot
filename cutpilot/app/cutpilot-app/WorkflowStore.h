@@ -44,6 +44,12 @@ public:
     QString name() const { return m_name; }
     void setName(const QString &name);
 
+    // The durable identity of the node the quick surface owns, persisted in
+    // the document so adoption survives relaunches, renames, and duplicates.
+    // Empty when the document has no quick node.
+    QString quickNodeUid() const { return m_quickNodeUid; }
+    void setQuickNodeUid(const QString &uid);
+
     State state() const { return m_state; }
     QDateTime savedAt() const { return m_savedAt; }
     QString failureReason() const { return m_failureReason; }
@@ -70,6 +76,7 @@ private:
     core::NodeGraph *m_graph = nullptr;
     QString m_directory;
     QString m_name;
+    QString m_quickNodeUid;
     QTimer *m_saveTimer = nullptr;
     State m_state = State::Idle;
     QDateTime m_savedAt;

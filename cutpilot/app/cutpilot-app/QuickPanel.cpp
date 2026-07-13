@@ -334,17 +334,12 @@ void QuickPanel::retheme(const theme::ThemeTable &theme)
 void QuickPanel::openAt(const QPointF &worldCentre)
 {
     if (m_nodeId == -1 || !m_layer->graph().nodeById(m_nodeId)) {
-        // Adopt the board's live quick node before making another, so the
-        // surface never leaves duplicates behind. The oldest match wins:
-        // duplicates can arrive (a placed template may carry a saved quick
-        // node), and adoption must not jump to whichever came last.
+        // Adopt by the durable identity the document records, never by
+        // title: a rename cannot orphan the surface and a duplicate (a
+        // placed template carrying a copy) can never steal it.
         m_nodeId = -1;
-        for (const core::Node &node : m_layer->graph().nodes()) {
-            if (node.kind == core::NodeKind::Generate && node.title == kQuickTitle) {
-                m_nodeId = node.id;
-                break;
-            }
-        }
+        if (const core::Node *bound = m_layer->graph().nodeByUid(m_boundUid))
+            m_nodeId = bound->id;
         if (m_nodeId == -1) {
             core::Node prototype =
                 core::catalogPrototype(QStringLiteral("Generate Image"));
@@ -357,6 +352,8 @@ void QuickPanel::openAt(const QPointF &worldCentre)
                 prototype.modelLabel = m_coordinator->models().first().label;
             }
             m_nodeId = m_layer->placePrototypeAt(prototype, worldCentre);
+            m_boundUid = m_layer->graph().nodeById(m_nodeId)->uid;
+            emit boundNodeUidChanged(m_boundUid);
         }
         m_resultImage = m_layer->nodeMediaImage(m_nodeId);
     }

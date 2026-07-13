@@ -39,6 +39,8 @@ public:
         if (!m_applied) {
             for (Node &node : m_nodes) {
                 node.id = graph.addNode(node);
+                // Capture the minted uid so redo restores the same identity.
+                node.uid = graph.nodeById(node.id)->uid;
                 m_nodeIndices.append(graph.indexOfId(node.id));
             }
             for (const Edge &edge : m_edges) {

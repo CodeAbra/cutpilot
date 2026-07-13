@@ -62,6 +62,7 @@ private slots:
     void boundedDepthDropsOldest();
 
     void addUndoRedoPreservesId();
+    void addUndoRedoPreservesUid();
     void addRaiseUndoRedoKeepsAddZOrder();
     void deleteUndoRestoresIdAndZOrder();
     void moveDoUndoRedoRoundTrip();
@@ -182,6 +183,27 @@ void TstCommandStack::addUndoRedoPreservesId()
     stack.redo(graph);
     QVERIFY(graph.nodeById(id) != nullptr);
     QCOMPARE(graph.nodeById(id)->id, id); // same id, not a fresh one
+}
+
+void TstCommandStack::addUndoRedoPreservesUid()
+{
+    NodeGraph graph;
+    CommandStack stack;
+
+    auto add = std::make_unique<AddNodeCommand>(makeNode(QPointF(100, 100)));
+    AddNodeCommand *addPtr = add.get();
+    stack.push(std::move(add), graph);
+    const int id = addPtr->nodeId();
+    const QString uid = graph.nodeById(id)->uid;
+    QVERIFY(!uid.isEmpty());
+
+    // The durable identity survives the history walk exactly like the id:
+    // anything bound to the node finds it again after undo/redo.
+    stack.undo(graph);
+    QVERIFY(!graph.nodeByUid(uid));
+    stack.redo(graph);
+    QVERIFY(graph.nodeByUid(uid));
+    QCOMPARE(graph.nodeByUid(uid)->id, id);
 }
 
 void TstCommandStack::addRaiseUndoRedoKeepsAddZOrder()

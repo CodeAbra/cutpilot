@@ -132,6 +132,50 @@ private slots:
         QCOMPARE(reader.name(), QStringLiteral("Night Shoot"));
     }
 
+    void quickBindingPersistsAcrossSaveAndLoad()
+    {
+        QTemporaryDir dir;
+        core::NodeGraph graph = sampleBoard();
+        const QString boundUid = graph.nodes().last().uid;
+        QVERIFY(!boundUid.isEmpty());
+
+        WorkflowStore store(&graph);
+        store.setDirectory(dir.path());
+        store.setQuickNodeUid(boundUid);
+        QVERIFY(store.saveNow());
+
+        core::NodeGraph restored;
+        WorkflowStore reader(&restored);
+        reader.setDirectory(dir.path());
+        QVERIFY(reader.load());
+        QCOMPARE(reader.quickNodeUid(), boundUid);
+        QVERIFY(restored.nodeByUid(boundUid));
+        QCOMPARE(restored.nodeByUid(boundUid)->id, graph.nodes().last().id);
+    }
+
+    void legacyQuickTitleMigratesIntoTheBinding()
+    {
+        // A stored document from before the binding existed named its quick
+        // node only by title; loading it adopts that node's identity once.
+        QTemporaryDir dir;
+        core::NodeGraph graph = sampleBoard();
+        core::Node quick =
+            core::catalogPrototype(QStringLiteral("Generate Image"));
+        quick.title = QStringLiteral("Quick Generate");
+        const int quickId = graph.addNode(quick);
+
+        WorkflowStore store(&graph);
+        store.setDirectory(dir.path());
+        QVERIFY(store.saveNow());
+        QVERIFY(store.quickNodeUid().isEmpty());
+
+        core::NodeGraph restored;
+        WorkflowStore reader(&restored);
+        reader.setDirectory(dir.path());
+        QVERIFY(reader.load());
+        QCOMPARE(reader.quickNodeUid(), restored.nodeById(quickId)->uid);
+    }
+
     void unwritableDirectoryReportsFailure()
     {
         QTemporaryDir dir;

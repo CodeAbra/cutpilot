@@ -13,6 +13,9 @@ void AddNodeCommand::apply(NodeGraph &graph)
 {
     if (!m_hasId) {
         m_node.id = graph.addNode(m_node);
+        // The graph may mint the uid on add; capture it so redo restores the
+        // node under the same durable identity.
+        m_node.uid = graph.nodeById(m_node.id)->uid;
         m_hasId = true;
         m_index = graph.indexOfId(m_node.id);
     } else {

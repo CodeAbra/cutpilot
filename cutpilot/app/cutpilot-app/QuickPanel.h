@@ -57,6 +57,12 @@ public:
     // The bound node's id, or -1 while no quick node exists.
     int nodeId() const { return m_nodeId; }
 
+    // The durable identity the surface adopts by. The document's stored
+    // binding is seeded here on load; materializing or re-adopting announces
+    // the binding through boundNodeUidChanged so the document can keep it.
+    QString boundNodeUid() const { return m_boundUid; }
+    void setBoundNodeUid(const QString &uid) { m_boundUid = uid; }
+
     // Hand the field's text to the node through the undoable prompt command.
     void commitPrompt();
 
@@ -78,6 +84,10 @@ signals:
     // The bound node's model wants a vendor key.
     void addKeyRequested(int nodeId, const QString &provider);
 
+    // The surface owns a different node than before; the document records
+    // the identity so adoption survives a relaunch.
+    void boundNodeUidChanged(const QString &uid);
+
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
@@ -98,6 +108,7 @@ private:
     ipc::GenerationCoordinator *m_coordinator = nullptr;
     theme::ThemeTable m_theme{ theme::Theme::Dark };
     int m_nodeId = -1;
+    QString m_boundUid;
     QImage m_resultImage;
 
     QToolButton *m_close = nullptr;

@@ -23,6 +23,7 @@ class TstNodeGraph : public QObject {
 
 private slots:
     void addAssignsIncreasingIds();
+    void addMintsUniqueDurableUids();
     void hitTestReturnsTopMostAndMiss();
     void selectOnlyMarksExactlyOne();
     void moveRepositionsWorldRect();
@@ -45,6 +46,34 @@ void TstNodeGraph::addAssignsIncreasingIds()
 
     QVERIFY(idB > idA);
     QCOMPARE(graph.nodes().size(), 2);
+}
+
+void TstNodeGraph::addMintsUniqueDurableUids()
+{
+    NodeGraph graph;
+    const int idA = graph.addNode(makeNode(QPointF(0, 0)));
+    const int idB = graph.addNode(makeNode(QPointF(400, 0)));
+
+    // Every added node leaves with its own non-empty identity.
+    const QString uidA = graph.nodeById(idA)->uid;
+    const QString uidB = graph.nodeById(idB)->uid;
+    QVERIFY(!uidA.isEmpty());
+    QVERIFY(!uidB.isEmpty());
+    QVERIFY(uidA != uidB);
+    QCOMPARE(graph.nodeByUid(uidA)->id, idA);
+    QCOMPARE(graph.nodeByUid(uidB)->id, idB);
+    QVERIFY(!graph.nodeByUid(QString()));
+    QVERIFY(!graph.nodeByUid(QStringLiteral("absent")));
+
+    // A caller-provided identity is kept when unique; a copy carrying a
+    // taken uid gets its own instead of impersonating the original.
+    Node preset = makeNode(QPointF(0, 400));
+    preset.uid = QStringLiteral("caller-chosen");
+    const int idC = graph.addNode(preset);
+    QCOMPARE(graph.nodeById(idC)->uid, QStringLiteral("caller-chosen"));
+    const int idD = graph.addNode(preset);
+    QVERIFY(!graph.nodeById(idD)->uid.isEmpty());
+    QVERIFY(graph.nodeById(idD)->uid != QStringLiteral("caller-chosen"));
 }
 
 void TstNodeGraph::hitTestReturnsTopMostAndMiss()

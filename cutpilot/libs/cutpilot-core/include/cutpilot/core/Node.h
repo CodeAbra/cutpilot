@@ -123,6 +123,15 @@ inline constexpr int kOutputSideMax = 2048;
 // renderer draws this; the node never becomes a per-instance widget.
 struct Node {
     int id = 0;
+
+    // The node's durable identity: a UUID string persisted in the workflow
+    // document, unlike the session-scoped integer id. Anything that must
+    // recognize a node across save/reload or rename (the quick surface's
+    // binding, external references) resolves by uid, never by title.
+    // Minted by NodeGraph::addNode when empty; preserved exactly by
+    // undo/redo restore and by the document round-trip.
+    QString uid;
+
     QString title;
     QPointF worldPos{0, 0};   // top-left of the card, in world units
     QSizeF worldSize{0, 0};   // card size, in world units

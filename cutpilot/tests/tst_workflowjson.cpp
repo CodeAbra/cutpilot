@@ -80,7 +80,7 @@ core::NodeGraph fullBoard()
 
 bool sameNode(const core::Node &a, const core::Node &b)
 {
-    if (a.id != b.id || a.title != b.title || a.kind != b.kind
+    if (a.id != b.id || a.uid != b.uid || a.title != b.title || a.kind != b.kind
         || a.worldPos != b.worldPos || a.worldSize != b.worldSize
         || a.promptText != b.promptText || a.modelId != b.modelId
         || a.modelLabel != b.modelLabel || a.outputWidth != b.outputWidth
@@ -231,6 +231,97 @@ private slots:
         core::NodeGraph halfSet;
         loadWithSize(1080, 0, halfSet);
         QCOMPARE(restoredSize(halfSet), QSize(0, 0));
+    }
+
+    void documentsWithoutUidsGainStableOnes()
+    {
+        // A document written before durable identities existed loads with a
+        // fresh unique uid on every node, and those uids then persist: a
+        // save/reload round trip returns the identical identities.
+        QJsonObject json = core::workflowToJson(fullBoard(), QString());
+        QJsonArray nodes = json[QLatin1String("nodes")].toArray();
+        for (int i = 0; i < nodes.size(); ++i) {
+            QJsonObject node = nodes[i].toObject();
+            node.remove(QLatin1String("uid"));
+            nodes.replace(i, node);
+        }
+        json[QLatin1String("nodes")] = nodes;
+
+        core::NodeGraph migrated;
+        QVERIFY(core::workflowFromJson(json, migrated, nullptr));
+        QStringList uids;
+        for (const core::Node &node : migrated.nodes()) {
+            QVERIFY(!node.uid.isEmpty());
+            QVERIFY(!uids.contains(node.uid));
+            uids.push_back(node.uid);
+        }
+
+        core::NodeGraph reloaded;
+        QVERIFY(core::workflowFromJson(
+            core::workflowToJson(migrated, QString()), reloaded, nullptr));
+        for (int i = 0; i < migrated.nodes().size(); ++i)
+            QCOMPARE(reloaded.nodes()[i].uid, migrated.nodes()[i].uid);
+    }
+
+    void duplicatedUidsKeepOnlyTheirFirstHolder()
+    {
+        QJsonObject json = core::workflowToJson(fullBoard(), QString());
+        QJsonArray nodes = json[QLatin1String("nodes")].toArray();
+        QJsonObject second = nodes[1].toObject();
+        second[QLatin1String("uid")] = nodes[0].toObject()[QLatin1String("uid")];
+        nodes.replace(1, second);
+        json[QLatin1String("nodes")] = nodes;
+
+        core::NodeGraph restored;
+        QVERIFY(core::workflowFromJson(json, restored, nullptr));
+        QCOMPARE(restored.nodes()[0].uid,
+                 nodes[0].toObject()[QLatin1String("uid")].toString());
+        QVERIFY(!restored.nodes()[1].uid.isEmpty());
+        QVERIFY(restored.nodes()[1].uid != restored.nodes()[0].uid);
+    }
+
+    void quickBindingRoundTripsValidatesAndMigrates()
+    {
+        // The stored binding survives the round trip.
+        const core::NodeGraph board = fullBoard();
+        const QString boundUid = board.nodes()[1].uid;
+        QVERIFY(!boundUid.isEmpty());
+        core::NodeGraph restored;
+        QString binding;
+        QVERIFY(core::workflowFromJson(
+            core::workflowToJson(board, QString(), boundUid), restored,
+            nullptr, &binding));
+        QCOMPARE(binding, boundUid);
+
+        // A binding naming no node in the document is dropped, not adopted.
+        core::NodeGraph dangling;
+        QVERIFY(core::workflowFromJson(
+            core::workflowToJson(board, QString(),
+                                 QStringLiteral("no-such-node")),
+            dangling, nullptr, &binding));
+        QVERIFY(binding.isEmpty());
+
+        // A document from before the binding existed carries its quick node
+        // forward by the legacy title rule — once, and the oldest id wins.
+        core::NodeGraph legacyBoard;
+        core::Node younger =
+            core::catalogPrototype(QStringLiteral("Generate Image"));
+        younger.title = QStringLiteral("Quick Generate");
+        core::Node older = younger;
+        const int firstId = legacyBoard.addNode(younger);
+        legacyBoard.addNode(older);
+        QJsonObject legacyJson = core::workflowToJson(legacyBoard, QString());
+        QVERIFY(!legacyJson.contains(QLatin1String("quickNode")));
+        core::NodeGraph adopted;
+        QVERIFY(core::workflowFromJson(legacyJson, adopted, nullptr, &binding));
+        QCOMPARE(binding, adopted.nodeById(firstId)->uid);
+
+        // No quick node at all: the binding stays empty.
+        core::NodeGraph plain;
+        QVERIFY(core::workflowFromJson(
+            core::workflowToJson(fullBoard(), QString()), plain, nullptr,
+            &binding));
+        QVERIFY(binding.isEmpty());
     }
 
     void catalogTitlesAreUniqueAndPlaceable()

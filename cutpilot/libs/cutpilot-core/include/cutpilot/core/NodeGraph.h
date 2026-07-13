@@ -29,6 +29,15 @@ public:
     Node *nodeById(int id);
     const Node *nodeById(int id) const;
 
+    // The node carrying the durable document identity, or null (always null
+    // for an empty uid). Uniqueness is upheld by addNode and the document
+    // loader, so one uid resolves to at most one node.
+    Node *nodeByUid(const QString &uid);
+    const Node *nodeByUid(const QString &uid) const;
+
+    // A fresh durable identity for a node's uid field.
+    static QString mintUid();
+
     // The id of the top-most node containing the world point, or -1 if none.
     int hitTest(const QPointF &world) const;
 

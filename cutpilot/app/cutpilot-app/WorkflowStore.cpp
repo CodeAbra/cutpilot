@@ -64,6 +64,14 @@ void WorkflowStore::setName(const QString &name)
     scheduleSave();
 }
 
+void WorkflowStore::setQuickNodeUid(const QString &uid)
+{
+    if (m_quickNodeUid == uid)
+        return;
+    m_quickNodeUid = uid;
+    scheduleSave();
+}
+
 void WorkflowStore::scheduleSave()
 {
     setState(State::Pending);
@@ -85,7 +93,8 @@ bool WorkflowStore::saveNow()
         setState(State::Failed, file.errorString());
         return false;
     }
-    const QJsonDocument document(core::workflowToJson(*m_graph, m_name));
+    const QJsonDocument document(
+        core::workflowToJson(*m_graph, m_name, m_quickNodeUid));
     file.write(document.toJson(QJsonDocument::Compact));
     if (!file.commit()) {
         setState(State::Failed, file.errorString());
@@ -113,7 +122,8 @@ bool WorkflowStore::load()
         return false;
 
     QString name;
-    if (!core::workflowFromJson(document.object(), *m_graph, &name))
+    if (!core::workflowFromJson(document.object(), *m_graph, &name,
+                                &m_quickNodeUid))
         return false;
 
     if (!name.isEmpty() && name != m_name) {

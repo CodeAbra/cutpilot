@@ -18,6 +18,9 @@ WorkflowTemplate captureSelectionTemplate(const core::NodeGraph &graph)
         indexById.insert(node.id, content.prototypes.size());
         core::Node prototype = node;
         prototype.id = 0;
+        // A template is a prototype, not an identity: every placement mints
+        // its own uid, so a placed copy can never impersonate the original.
+        prototype.uid.clear();
         prototype.selected = false;
         prototype.runState = core::RunState::Idle;
         prototype.runProgress = 0.0;
@@ -78,6 +81,7 @@ bool templateFromJson(const QJsonObject &json, WorkflowTemplate &content,
         indexById.insert(node.id, content.prototypes.size());
         core::Node prototype = node;
         prototype.id = 0;
+        prototype.uid.clear();
         content.prototypes.push_back(prototype);
     }
     for (const core::Connection &connection : scratch.connections()) {

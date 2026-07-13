@@ -1534,6 +1534,13 @@ int main(int argc, char *argv[])
         // the toggle itself) and the top bar stay. Everything the surface
         // builds is an ordinary node, so leaving it just reveals the board.
         auto *quick = new QuickPanel(theme, layer, coordinator, view);
+        if (store) {
+            // The document remembers which node the quick surface owns, so a
+            // relaunch adopts the same node by identity, not by title.
+            quick->setBoundNodeUid(store->quickNodeUid());
+            QObject::connect(quick, &QuickPanel::boundNodeUidChanged, store,
+                             &WorkflowStore::setQuickNodeUid);
+        }
         const auto reduceChrome = [view, cluster, rail](bool reduced) {
             cluster->setVisible(!reduced);
             if (auto *minimap = view->minimap())

@@ -1,15 +1,41 @@
 #include "cutpilot/core/NodeGraph.h"
 
+#include <QUuid>
 #include <QtGlobal>
 
 namespace cutpilot::core {
+
+QString NodeGraph::mintUid()
+{
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
 
 int NodeGraph::addNode(const Node &node)
 {
     Node copy = node;
     copy.id = m_nextId++;
+    // A uid names exactly one node: a prototype arriving without one, or
+    // carrying one this graph already holds (a placed copy), gets its own.
+    if (copy.uid.isEmpty() || nodeByUid(copy.uid))
+        copy.uid = mintUid();
     m_nodes.push_back(copy);
     return copy.id;
+}
+
+Node *NodeGraph::nodeByUid(const QString &uid)
+{
+    if (uid.isEmpty())
+        return nullptr;
+    for (Node &n : m_nodes) {
+        if (n.uid == uid)
+            return &n;
+    }
+    return nullptr;
+}
+
+const Node *NodeGraph::nodeByUid(const QString &uid) const
+{
+    return const_cast<NodeGraph *>(this)->nodeByUid(uid);
 }
 
 Node *NodeGraph::nodeById(int id)
