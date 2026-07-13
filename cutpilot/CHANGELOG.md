@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Running an image-consuming generation whose wired reference file was moved
   or deleted outside the app now refuses locally with "Reference file
   missing" instead of submitting a job that names an unreadable file.
+- Starting a run no longer stalls the interface while a large reference or
+  result file is content-hashed: files past a small inline budget hash on a
+  worker thread, the run holds that node until its digest arrives, and cache
+  reuse behaves exactly as before. A cached digest is also no longer trusted
+  when it was computed inside the freshly-written window of a file whose
+  clocks later settled — the next run re-hashes once and trusts from there.
 
 ### Changed
 - Quick Mode adoption resolves by the recorded node identity instead of the

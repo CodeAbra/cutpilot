@@ -21,9 +21,14 @@ QString money(double usd)
 }
 
 // How old a file's last write must be before size and timestamps are trusted
-// to detect change; younger files are re-hashed unconditionally, so a rewrite
-// landing inside one clock tick can never leave a stale digest behind.
+// to detect change; a digest hashed before that settles is re-hashed on the
+// next decision, so a rewrite landing inside one clock tick can never leave
+// a stale digest behind.
 constexpr qint64 kTrustFileClockAfterMs = 2000;
+
+// Files up to this size hash inline within a frame's budget; anything larger
+// hashes off the GUI thread so a run decision never stalls on a big file.
+constexpr qint64 kInlineHashMaxBytes = qint64(1) * 1024 * 1024;
 
 // SHA-256 of a file's contents, or an empty string when unreadable.
 QString hashFile(const QString &path)
@@ -35,6 +40,17 @@ QString hashFile(const QString &path)
     if (!hash.addData(&file))
         return QString();
     return QString::fromLatin1(hash.result().toHex());
+}
+
+// Size, modification time, and metadata-change time together fingerprint the
+// file: a rewrite that forges size and mtime still bumps the metadata clock,
+// which userland cannot set back.
+QString fileFingerprint(const QFileInfo &info)
+{
+    return QStringLiteral("%1|%2|%3")
+        .arg(info.size())
+        .arg(info.lastModified().toMSecsSinceEpoch())
+        .arg(info.metadataChangeTime().toMSecsSinceEpoch());
 }
 
 } // namespace
@@ -111,39 +127,88 @@ QString GenerationCoordinator::imageSourcePath(const core::Node &source)
     return QString();
 }
 
-QString GenerationCoordinator::sourceDigest(core::Node *source)
+QString GenerationCoordinator::sourceDigest(core::Node *source, bool &pending)
 {
     if (!source->resultPath.isEmpty()) {
-        if (source->resultDigest.isEmpty())
-            source->resultDigest = hashFile(source->resultPath);
+        if (source->resultDigest.isEmpty()) {
+            bool digestPending = false;
+            const QString digest =
+                fileDigestFor(source->resultPath, digestPending);
+            if (digestPending) {
+                pending = true;
+                return QString();
+            }
+            source->resultDigest = digest;
+        }
         return source->resultDigest;
     }
 
     const QString path = imageSourcePath(*source);
     if (path.isEmpty())
         return QString();
+    return fileDigestFor(path, pending);
+}
+
+QString GenerationCoordinator::fileDigestFor(const QString &path, bool &pending)
+{
     const QFileInfo info(path);
-    const QDateTime modified = info.lastModified();
-    // Size, modification time, and metadata-change time together fingerprint
-    // the file: a rewrite that forges size and mtime still bumps the metadata
-    // clock, which userland cannot set back.
-    const QString fingerprint =
-        QStringLiteral("%1|%2|%3")
-            .arg(info.size())
-            .arg(modified.toMSecsSinceEpoch())
-            .arg(info.metadataChangeTime().toMSecsSinceEpoch());
-    // A file written moments ago can be rewritten again inside the same
-    // timestamp tick; until the write is old enough for the clocks to be
-    // trusted, hash the content fresh.
-    const bool freshWrite =
-        modified.msecsTo(QDateTime::currentDateTime()) < kTrustFileClockAfterMs;
+    const QString fingerprint = fileFingerprint(info);
     FileDigest &entry = m_fileDigests[path];
-    if (freshWrite || entry.fingerprint != fingerprint
-        || entry.digest.isEmpty()) {
+
+    // An off-thread hash that just landed answers exactly one decision, even
+    // while the file's clocks are still too young to be trusted — the same
+    // trust an inline hash computed this instant would get.
+    if (entry.freshDelivery && entry.fingerprint == fingerprint) {
+        entry.freshDelivery = false;
+        return entry.digest;
+    }
+
+    // A cached digest stands only if the file is unchanged and the hash was
+    // computed after the write's clock tick could no longer be re-entered;
+    // a hash taken inside that window may predate a same-tick rewrite.
+    const bool clocksSettled = entry.hashedAtMs
+        >= info.lastModified().toMSecsSinceEpoch() + kTrustFileClockAfterMs;
+    if (!entry.digest.isEmpty() && entry.fingerprint == fingerprint
+        && clocksSettled)
+        return entry.digest;
+
+    if (info.size() <= kInlineHashMaxBytes) {
         entry.fingerprint = fingerprint;
         entry.digest = hashFile(path);
+        entry.hashedAtMs = QDateTime::currentMSecsSinceEpoch();
+        entry.freshDelivery = false;
+        return entry.digest;
     }
-    return entry.digest;
+
+    if (!m_hashesInFlight.contains(path))
+        hashFileOffThread(path);
+    pending = true;
+    return QString();
+}
+
+void GenerationCoordinator::hashFileOffThread(const QString &path)
+{
+    m_hashesInFlight.insert(path);
+    auto *watcher = new QFutureWatcher<FileDigest>(this);
+    connect(watcher, &QFutureWatcher<FileDigest>::finished, this,
+            [this, watcher, path] {
+                watcher->deleteLater();
+                m_hashesInFlight.remove(path);
+                FileDigest entry = watcher->result();
+                entry.freshDelivery = true;
+                m_fileDigests.insert(path, entry);
+                if (m_run.active)
+                    advanceRun();
+            });
+    watcher->setFuture(QtConcurrent::run([path] {
+        FileDigest entry;
+        // Fingerprint before reading, like the inline path: a rewrite during
+        // the hash lands a fingerprint mismatch on the next decision.
+        entry.fingerprint = fileFingerprint(QFileInfo(path));
+        entry.digest = hashFile(path);
+        entry.hashedAtMs = QDateTime::currentMSecsSinceEpoch();
+        return entry;
+    }));
 }
 
 QString GenerationCoordinator::resolveInputPath(const core::Node &node) const
@@ -166,7 +231,8 @@ QString GenerationCoordinator::resolveInputPath(const core::Node &node) const
     return QString();
 }
 
-QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node)
+QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node,
+                                                     bool &pending)
 {
     QVector<QString> digests;
     for (int i = 0; i < node.ports.size(); ++i) {
@@ -183,7 +249,7 @@ QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node)
         core::Node *source = edge ? m_graph->nodeById(edge->fromNodeId) : nullptr;
         if (!source)
             continue;
-        const QString digest = sourceDigest(source);
+        const QString digest = sourceDigest(source, pending);
         if (digest.isEmpty())
             continue;
         digests.push_back(QStringLiteral("%1=%2").arg(i).arg(digest));
@@ -345,11 +411,13 @@ bool GenerationCoordinator::dependenciesSettled(
 }
 
 QString GenerationCoordinator::nodeSignature(const core::Node &node,
-                                             const ModelInfo &model)
+                                             const ModelInfo &model,
+                                             bool &pending)
 {
     const QSize size = requestedSize(node);
     return ResultCache::signature(model.id, resolvePrompt(node), size.width(),
-                                  size.height(), node.id, inputDigests(node));
+                                  size.height(), node.id,
+                                  inputDigests(node, pending));
 }
 
 // The node's requested output size, falling back to the request defaults when
@@ -539,7 +607,14 @@ void GenerationCoordinator::advanceRun()
                 }
             }
 
-            const QString signature = nodeSignature(*node, *model);
+            // A digest still hashing off-thread leaves the node pending
+            // untouched; its arrival re-advances the run.
+            bool digestsPending = false;
+            const QString signature =
+                nodeSignature(*node, *model, digestsPending);
+            if (digestsPending)
+                continue;
+
             if (!m_run.forced.contains(nodeId) && applyCachedResult(node, signature)) {
                 m_run.pending.remove(nodeId);
                 m_run.reusedByCache.insert(nodeId);

@@ -167,6 +167,7 @@ private slots:
     void runsAPromptThroughTheServiceToADoneNode();
     void referenceImageFeedsAndKeysTheGeneration();
     void rewrittenReferenceWithForgedTimestampRegenerates();
+    void largeReferenceHashesOffTheRunThread();
     void vanishedReferenceFileRefusesTheRunWithGuidance();
     void unchangedRerunServesTheCachedResult();
     void stopCancelsAnInFlightRun();
@@ -420,6 +421,69 @@ void GenerationFlowTest::rewrittenReferenceWithForgedTimestampRegenerates()
     QVERIFY(graph.nodeById(rig.editId)->statusMessage
             != QStringLiteral("Reused"));
     QCOMPARE(submissionSpy.count(), 2);
+}
+
+void GenerationFlowTest::largeReferenceHashesOffTheRunThread()
+{
+    // A reference too large to hash within a frame's budget must not stall
+    // the run decision: starting the run returns with the node still idle,
+    // the digest arrives through the event loop, and the run then proceeds
+    // to a result that keys the cache exactly like a small reference.
+    QTemporaryDir refDir;
+    QVERIFY(refDir.isValid());
+    const QString refPath = refDir.path() + QStringLiteral("/reference.png");
+    {
+        // Pseudo-random pixels compress poorly, so the PNG lands well past
+        // the inline-hash budget while still decoding as a real image.
+        QImage noise(QSize(1024, 1024), QImage::Format_RGB32);
+        quint32 state = 0x2545F491u;
+        for (int y = 0; y < noise.height(); ++y) {
+            QRgb *row = reinterpret_cast<QRgb *>(noise.scanLine(y));
+            for (int x = 0; x < noise.width(); ++x) {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                row[x] = qRgb(int((state >> 8) & 0xFF),
+                              int((state >> 16) & 0xFF),
+                              int((state >> 24) & 0xFF));
+            }
+        }
+        QVERIFY(noise.save(refPath));
+    }
+    QVERIFY(QFileInfo(refPath).size() > qint64(2) * 1024 * 1024);
+    // An old write: once hashed, the file's clocks are trustworthy, so the
+    // second run below may serve the cache without waiting again.
+    QVERIFY(pinFileClock(refPath,
+                         QDateTime::currentDateTime().addSecs(-3600)));
+
+    core::NodeGraph graph;
+    const ReferenceRig rig = buildReferenceRig(graph, refPath);
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    QSignalSpy submissionSpy(&m_client, &ipc::GenerationClient::jobSubmitted);
+    coordinator.runNode(rig.editId);
+
+    // The decision returned without hashing inline: the run is live, but the
+    // node was neither queued nor refused before the event loop turned.
+    QVERIFY(coordinator.runActive());
+    QCOMPARE(graph.nodeById(rig.editId)->runState, core::RunState::Idle);
+    QCOMPARE(submissionSpy.count(), 0);
+
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(rig.editId)->runState,
+                              core::RunState::Done, 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 10000);
+    QCOMPARE(submissionSpy.count(), 1);
+
+    // The off-thread digest keys the cache: an unchanged re-run reuses.
+    coordinator.runNode(rig.editId);
+    QTRY_VERIFY_WITH_TIMEOUT(!coordinator.runActive(), 10000);
+    QCOMPARE(graph.nodeById(rig.editId)->statusMessage,
+             QStringLiteral("Reused"));
+    QCOMPARE(submissionSpy.count(), 1);
 }
 
 void GenerationFlowTest::vanishedReferenceFileRefusesTheRunWithGuidance()

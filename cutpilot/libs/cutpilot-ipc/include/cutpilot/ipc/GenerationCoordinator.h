@@ -138,10 +138,11 @@ private:
     void advanceRun();
     bool dependenciesSettled(int nodeId, const QHash<int, QSet<int>> &dependencies,
                              bool &upstreamFailed) const;
-    QString nodeSignature(const core::Node &node, const ModelInfo &model);
+    QString nodeSignature(const core::Node &node, const ModelInfo &model,
+                          bool &pending);
     static QSize requestedSize(const core::Node &node);
     QString resolveInputPath(const core::Node &node) const;
-    QVector<QString> inputDigests(const core::Node &node);
+    QVector<QString> inputDigests(const core::Node &node, bool &pending);
 
     // The image file an upstream node feeds downstream: a finished
     // generation's result, or a reference still's picked file.
@@ -151,7 +152,11 @@ private:
     // file's size, modification time, and metadata-change time so an
     // unchanged reference is not re-hashed per advance. A freshly written
     // file is re-hashed unconditionally until its clocks can be trusted.
-    QString sourceDigest(core::Node *source);
+    // Files past the inline budget hash off this thread; `pending` marks a
+    // digest still being computed, and its arrival re-advances the run.
+    QString sourceDigest(core::Node *source, bool &pending);
+    QString fileDigestFor(const QString &path, bool &pending);
+    void hashFileOffThread(const QString &path);
     bool applyCachedResult(core::Node *node, const QString &signature);
     void submitNode(core::Node *node, const ModelInfo &model,
                     const QString &signature);
@@ -194,12 +199,21 @@ private:
 
     // Reference-file digests keyed by path; the fingerprint (size + mtime +
     // metadata-change time) invalidates an entry when the file changes on
-    // disk, and reconcile() drops entries no node references anymore.
+    // disk, and reconcile() drops entries no node references anymore. An
+    // entry is trusted only once its hash landed after the file's write
+    // clocks settled — until then every run decision re-hashes, except the
+    // one decision a fresh off-thread delivery is answering.
     struct FileDigest {
         QString fingerprint;
         QString digest;
+        qint64 hashedAtMs = 0;
+        bool freshDelivery = false;
     };
     QHash<QString, FileDigest> m_fileDigests;
+
+    // Paths whose digest is being hashed off this thread right now; one
+    // hash per path at a time, re-requested per decision if still untrusted.
+    QSet<QString> m_hashesInFlight;
 };
 
 } // namespace cutpilot::ipc
