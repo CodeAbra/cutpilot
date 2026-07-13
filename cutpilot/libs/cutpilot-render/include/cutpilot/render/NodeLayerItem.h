@@ -44,12 +44,62 @@ class NodeLayerItem : public QQuickItem {
                    setController NOTIFY controllerChanged)
 
 public:
+    // The active canvas tool. Cursor selects, moves, and marquees; Cut slices
+    // connectors under a click or a stroke; Connect wires node to node without
+    // needing a precise port grab; Place drops the armed prototype on the next
+    // click and returns to Cursor.
+    enum class Tool {
+        Cursor,
+        Cut,
+        Connect,
+        Place
+    };
+    Q_ENUM(Tool)
+
     explicit NodeLayerItem(QQuickItem *parent = nullptr);
 
     CanvasController *controller() const { return m_controller; }
     void setController(CanvasController *controller);
 
     core::NodeGraph &graph() { return m_graph; }
+
+    // The theme every card and overlay draws from; switching repaints the board.
+    void setTheme(theme::Theme themeId);
+    theme::Theme themeId() const { return m_theme.theme(); }
+
+    Tool tool() const { return m_tool; }
+    void setTool(Tool tool);
+
+    // Arm the Place tool with a prototype; the next canvas click drops it there.
+    void armPlacement(const core::Node &prototype);
+
+    // Undo/redo over the canvas history, mirroring the keyboard path, so the
+    // chrome's history controls drive the same stack.
+    void undo();
+    void redo();
+    bool canUndo() const { return m_commands.canUndo(); }
+    bool canRedo() const { return m_commands.canRedo(); }
+
+    // The union of every node's world rect; a null rect on an empty board.
+    QRectF contentWorldBounds() const;
+
+    // The node's media average color for the minimap block, or an invalid
+    // color when the node has no decoded media.
+    QColor nodeAverageColor(int nodeId) const
+    {
+        return m_mediaAverages.value(nodeId, QColor());
+    }
+
+    // Drop a prototype centered on a world point as one undo step; returns the
+    // assigned id. The seam behind the tool pill, the command palette, and the
+    // asset browser.
+    int placePrototypeAt(const core::Node &prototype, const QPointF &worldCentre);
+
+    // Drop a wired template centered on a world point as one undo step; wires
+    // reference the prototype list by index. Returns the assigned ids.
+    QVector<int> placeSubgraphAt(const QVector<core::Node> &prototypes,
+                                 const QVector<core::Connection> &indexWires,
+                                 const QPointF &worldCentre);
 
     // Seed the starting board: a prompt node feeding a generate node, so the first
     // canvas already shows a wired pair.
@@ -130,6 +180,17 @@ signals:
     // A fresh connector was dropped on empty canvas; the chrome should present the
     // palette (paletteEntryTitles) and answer with placePaletteEntry or cancelPalette.
     void paletteRequested();
+
+    // The palette was summoned without a wire — Tab, or a double-click on empty
+    // canvas — carrying the world point a picked node should land on.
+    void paletteInvoked(QPointF worldPos);
+
+    // The active tool changed, or a one-shot tool completed and fell back to
+    // the cursor; the tool pill mirrors this state.
+    void toolChanged();
+
+    // Anything the minimap shows moved: graph structure, a live drag, media.
+    void boardChanged();
 
     // The run control on a generation node was pressed.
     void runRequested(int nodeId);
@@ -247,16 +308,38 @@ private:
     // under the container root.
     void updateOverlay(QSGNode *root, QSGTransformNode *camera);
 
+    // The connection whose curve passes within the slice reach of the world
+    // point, or -1. The reach floor keeps connectors sliceable when zoomed out.
+    int connectionNear(const QPointF &world) const;
+
+    // Cut-tool slicing: remove every connection the stroke touches, each as
+    // its own undo step, so an accidental slice is one undo away.
+    void sliceAt(const QPointF &world);
+
+    // Connect-tool wiring from a node body: anchor the drag on the node's
+    // first output (or, failing that, first input) port.
+    bool beginConnectFromNode(int nodeId, const QPointF &world);
+
+    // The target node's best port compatible with the live wire's anchor —
+    // a direct match beats a conversion — or -1.
+    int bestCompatiblePort(const core::Node &node) const;
+
     CanvasController *m_controller = nullptr;
     core::NodeGraph m_graph;
     core::SpatialIndex m_index;
     core::CommandStack m_commands;
     theme::ThemeTable m_theme{theme::Theme::Dark};
 
+    Tool m_tool = Tool::Cursor;
+    core::Node m_placePrototype;
+    bool m_slicing = false;
+
     // Decoded result images by node id, with a version that invalidates the
-    // uploaded texture when a new result replaces an old one.
+    // uploaded texture when a new result replaces an old one, and each image's
+    // average color for the minimap.
     QHash<int, QImage> m_mediaImages;
     QHash<int, int> m_mediaVersions;
+    QHash<int, QColor> m_mediaAverages;
 
     // Connectors feeding an in-flight generation shimmer; the timer advances
     // the phase only while at least one job runs.

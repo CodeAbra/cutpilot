@@ -184,10 +184,20 @@ QImage NodeContentRasterizer::rasterize(const core::Node &node,
         }
     } else if (node.kind == core::NodeKind::Generate && node.resultPath.isEmpty()
                && node.runState == core::RunState::Idle) {
-        painter.setFont(uiFont(12.0));
-        painter.setPen(theme.textSecondary());
-        painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
-                         QStringLiteral("No result yet — press run"));
+        // The node's own prompt shows in the body until a result replaces it,
+        // so a single unwired generate node reads as the whole flow.
+        if (node.promptText.trimmed().isEmpty()) {
+            painter.setFont(uiFont(12.0));
+            painter.setPen(theme.textSecondary());
+            painter.drawText(body, Qt::AlignCenter | Qt::TextWordWrap,
+                             QStringLiteral("No result yet — press run"));
+        } else {
+            painter.setFont(uiFont(13.0));
+            painter.setPen(theme.textPrimary());
+            painter.drawText(body,
+                             Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                             node.promptText);
+        }
     } else if ((node.kind == core::NodeKind::Still
                 || node.kind == core::NodeKind::Video)
                && !hasMedia) {

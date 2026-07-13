@@ -70,6 +70,13 @@ qt_add_executable(tst_nodelayerwiring tst_nodelayerwiring.cpp)
 target_link_libraries(tst_nodelayerwiring PRIVATE Qt6::Test cutpilot-render)
 add_test(NAME render.nodelayerwiring COMMAND tst_nodelayerwiring)
 
+# The canvas tools and the minimap over the same synthesized-event harness:
+# slicing, armed placement, body-to-body wiring, frame carries, palette entry
+# points, the undo seams, and minimap mapping/navigation against live state.
+qt_add_executable(tst_canvastools tst_canvastools.cpp)
+target_link_libraries(tst_canvastools PRIVATE Qt6::Test cutpilot-render)
+add_test(NAME render.canvastools COMMAND tst_canvastools)
+
 # The GPU compositor on a real windowless device: per-op pixel math against
 # reference formulas, matte conventions, and cache-driven pass counts. Skips
 # only when the platform has no headless GPU backend.

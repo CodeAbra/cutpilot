@@ -3,6 +3,7 @@ qt_add_library(cutpilot-render STATIC
     include/cutpilot/render/CanvasItem.h
     include/cutpilot/render/CompositorEngine.h
     include/cutpilot/render/CompositorService.h
+    include/cutpilot/render/MinimapItem.h
     include/cutpilot/render/NodeLayerItem.h
     include/cutpilot/render/PreviewController.h
     include/cutpilot/render/PreviewItem.h
@@ -11,6 +12,7 @@ qt_add_library(cutpilot-render STATIC
     src/CanvasRenderer.cpp
     src/CompositorEngine.cpp
     src/CompositorService.cpp
+    src/MinimapItem.cpp
     src/NodeLayerItem.cpp
     src/PreviewController.cpp
     src/PreviewItem.cpp

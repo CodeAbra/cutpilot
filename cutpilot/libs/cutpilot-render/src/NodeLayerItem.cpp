@@ -7,6 +7,8 @@
 #include "cutpilot/core/AlignmentGuides.h"
 #include "cutpilot/core/CompositeNodes.h"
 #include "cutpilot/core/ConnectorPath.h"
+#include "cutpilot/core/NodeCatalog.h"
+#include "cutpilot/core/command/AddSubgraphCommand.h"
 #include "cutpilot/core/command/AddConnectedNodeCommand.h"
 #include "cutpilot/core/command/AddNodeCommand.h"
 #include "cutpilot/core/command/CompositeCommand.h"
@@ -62,6 +64,11 @@ constexpr qreal kConnectorMinScreenWidth = 1.2;
 // radius the hit target never shrinks below.
 constexpr qreal kPortWorldHitSlack = 3.0;
 constexpr qreal kPortMinScreenHitRadius = 5.5;
+
+// The cut tool's reach around a connector: world units at 100% zoom, with an
+// on-screen floor so slicing stays possible when zoomed out.
+constexpr qreal kSliceWorldReach = 6.0;
+constexpr qreal kSliceMinScreenReach = 6.0;
 
 // The halo drawn around a compatible target port while wiring hovers it.
 constexpr qreal kPortHighlightWorldWidth = 3.5;
@@ -149,6 +156,133 @@ NodeLayerItem::NodeLayerItem(QQuickItem *parent)
         ++m_pulseFrame;
         update();
     });
+
+    // Every structural change is also a board change; live drags and media
+    // arrivals emit boardChanged on their own.
+    connect(this, &NodeLayerItem::graphMutated, this, &NodeLayerItem::boardChanged);
+}
+
+void NodeLayerItem::setTheme(theme::Theme themeId)
+{
+    if (m_theme.theme() == themeId)
+        return;
+    m_theme.setTheme(themeId);
+    m_geometryDirty = true;
+    // Text rasters carry the old theme's colors until their revision moves.
+    for (core::Node &node : m_graph.nodes())
+        node.bumpContent();
+    update();
+    emit boardChanged();
+}
+
+void NodeLayerItem::setTool(Tool tool)
+{
+    if (m_tool == tool)
+        return;
+    // A tool switch abandons any half-made gesture of the previous tool.
+    if (m_connectActive)
+        endConnectDrag();
+    m_slicing = false;
+    m_tool = tool;
+    if (m_tool != Tool::Place)
+        m_placePrototype = core::Node();
+    emit toolChanged();
+}
+
+void NodeLayerItem::armPlacement(const core::Node &prototype)
+{
+    if (m_connectActive)
+        endConnectDrag();
+    m_slicing = false;
+    m_placePrototype = prototype;
+    if (m_tool != Tool::Place) {
+        m_tool = Tool::Place;
+        emit toolChanged();
+    }
+}
+
+void NodeLayerItem::undo()
+{
+    if (!m_commands.canUndo())
+        return;
+    if (m_connectActive)
+        endConnectDrag();
+    m_commands.undo(m_graph);
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+void NodeLayerItem::redo()
+{
+    if (!m_commands.canRedo())
+        return;
+    if (m_connectActive)
+        endConnectDrag();
+    m_commands.redo(m_graph);
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+QRectF NodeLayerItem::contentWorldBounds() const
+{
+    QRectF bounds;
+    for (const core::Node &node : m_graph.nodes())
+        bounds = bounds.isNull() ? node.worldRect()
+                                 : bounds.united(node.worldRect());
+    return bounds;
+}
+
+int NodeLayerItem::placePrototypeAt(const core::Node &prototype,
+                                    const QPointF &worldCentre)
+{
+    core::Node node = prototype;
+    node.worldPos = worldCentre
+        - QPointF(node.worldSize.width() / 2.0, node.worldSize.height() / 2.0);
+    auto command = std::make_unique<core::AddNodeCommand>(node);
+    auto *raw = command.get();
+    m_commands.push(std::move(command), m_graph);
+    m_graph.selectOnly(raw->nodeId());
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+    return raw->nodeId();
+}
+
+QVector<int> NodeLayerItem::placeSubgraphAt(const QVector<core::Node> &prototypes,
+                                            const QVector<core::Connection> &indexWires,
+                                            const QPointF &worldCentre)
+{
+    if (prototypes.isEmpty())
+        return {};
+
+    QRectF bounds;
+    for (const core::Node &prototype : prototypes) {
+        bounds = bounds.isNull() ? prototype.worldRect()
+                                 : bounds.united(prototype.worldRect());
+    }
+    const QPointF shift = worldCentre - bounds.center();
+
+    QVector<core::Node> placed = prototypes;
+    for (core::Node &node : placed)
+        node.worldPos += shift;
+
+    auto command = std::make_unique<core::AddSubgraphCommand>(placed, indexWires);
+    auto *raw = command.get();
+    m_commands.push(std::move(command), m_graph);
+    const QVector<int> ids = raw->nodeIds();
+    m_graph.clearSelection();
+    for (int id : ids)
+        m_graph.setSelected(id, true);
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+    return ids;
 }
 
 void NodeLayerItem::setController(CanvasController *controller)
@@ -491,8 +625,13 @@ void NodeLayerItem::setNodeMedia(int nodeId, const QImage &image)
         return;
     m_mediaImages.insert(nodeId, image);
     m_mediaVersions[nodeId] = m_mediaVersions.value(nodeId, 0) + 1;
+    // One smooth-scaled pixel is the image's average — the minimap block tint.
+    const QImage pixel = image.scaled(1, 1, Qt::IgnoreAspectRatio,
+                                      Qt::SmoothTransformation);
+    m_mediaAverages.insert(nodeId, pixel.pixelColor(0, 0));
     m_geometryDirty = true;
     update();
+    emit boardChanged();
 }
 
 void NodeLayerItem::clearNodeMedia(int nodeId)
@@ -500,9 +639,11 @@ void NodeLayerItem::clearNodeMedia(int nodeId)
     if (!m_mediaImages.contains(nodeId))
         return;
     m_mediaImages.remove(nodeId);
+    m_mediaAverages.remove(nodeId);
     m_mediaVersions[nodeId] = m_mediaVersions.value(nodeId, 0) + 1;
     m_geometryDirty = true;
     update();
+    emit boardChanged();
 }
 
 void NodeLayerItem::refreshNode(int nodeId)
@@ -512,6 +653,7 @@ void NodeLayerItem::refreshNode(int nodeId)
     m_geometryDirty = true;
     updatePulseTimer();
     update();
+    emit boardChanged();
 }
 
 QRectF NodeLayerItem::nodeBodyScreenRect(int nodeId) const
@@ -545,86 +687,13 @@ void NodeLayerItem::updatePulseTimer()
         m_pulseTimer->stop();
 }
 
-namespace {
-
-// The stand-in node library the palette offers until the real taxonomy lands. Each
-// prototype carries real typed ports, so the type filter and the auto-connect are
-// exact even while the list itself is a stub. The generation entries are live:
-// edit and upscale carry their local model so they run without a pick.
-QVector<core::Node> paletteCatalog()
-{
-    auto entry = [](const QString &title, const QSizeF &size,
-                    const QVector<core::Port> &ports,
-                    core::NodeKind kind = core::NodeKind::Blank,
-                    const QString &modelId = QString(),
-                    const QString &modelLabel = QString()) {
-        core::Node node;
-        node.kind = kind;
-        node.title = title;
-        node.worldSize = size;
-        node.ports = ports;
-        node.modelId = modelId;
-        node.modelLabel = modelLabel;
-        return node;
-    };
-
-    return {
-        entry(QStringLiteral("Prompt"), QSizeF(260, 170),
-              { { QStringLiteral("text"), core::PortType::Text, false, 0.5 } },
-              core::NodeKind::Prompt),
-        entry(QStringLiteral("Generate Image"), QSizeF(280, 200),
-              { { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
-                { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
-                { QStringLiteral("run"), core::PortType::Control, true, 0.8 },
-                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } },
-              core::NodeKind::Generate),
-        entry(QStringLiteral("Edit Image"), QSizeF(280, 200),
-              { { QStringLiteral("image"), core::PortType::Image, true, 0.3 },
-                { QStringLiteral("prompt"), core::PortType::Text, true, 0.55 },
-                { QStringLiteral("run"), core::PortType::Control, true, 0.8 },
-                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } },
-              core::NodeKind::Generate,
-              QStringLiteral("local/procedural-edit-v1"),
-              QStringLiteral("Procedural Edit (local)")),
-        entry(QStringLiteral("Upscale Image"), QSizeF(240, 160),
-              { { QStringLiteral("image"), core::PortType::Image, true, 0.4 },
-                { QStringLiteral("run"), core::PortType::Control, true, 0.7 },
-                { QStringLiteral("result"), core::PortType::Image, false, 0.5 } },
-              core::NodeKind::Generate,
-              QStringLiteral("local/procedural-upscale-v1"),
-              QStringLiteral("Procedural Upscale (local)")),
-        entry(QStringLiteral("Cost Gate"), QSizeF(200, 130),
-              { { QStringLiteral("run"), core::PortType::Control, true, 0.5 },
-                { QStringLiteral("pass"), core::PortType::Control, false, 0.5 } },
-              core::NodeKind::CostGate),
-        entry(QStringLiteral("Extract Mask"), QSizeF(240, 160),
-              { { QStringLiteral("image"), core::PortType::Image, true, 0.5 },
-                { QStringLiteral("mask"), core::PortType::Mask, false, 0.5 } }),
-        core::compositeNodePrototype(core::NodeKind::Still),
-        core::compositeNodePrototype(core::NodeKind::Video),
-        core::compositeNodePrototype(core::NodeKind::Blend),
-        core::compositeNodePrototype(core::NodeKind::Mask),
-        core::compositeNodePrototype(core::NodeKind::Key),
-        core::compositeNodePrototype(core::NodeKind::Transform),
-        entry(QStringLiteral("Generate Video"), QSizeF(300, 210),
-              { { QStringLiteral("prompt"), core::PortType::Text, true, 0.35 },
-                { QStringLiteral("image"), core::PortType::Image, true, 0.6 },
-                { QStringLiteral("result"), core::PortType::Video, false, 0.5 } }),
-        entry(QStringLiteral("Generate Voice"), QSizeF(240, 160),
-              { { QStringLiteral("text"), core::PortType::Text, true, 0.5 },
-                { QStringLiteral("voice"), core::PortType::Audio, false, 0.5 } }),
-        entry(QStringLiteral("Batch Count"), QSizeF(200, 130),
-              { { QStringLiteral("count"), core::PortType::Number, false, 0.5 } }),
-    };
-}
-
-} // namespace
 
 QVector<NodeLayerItem::PaletteOffer>
 NodeLayerItem::paletteOffersFor(core::PortType type, bool anchorIsOutput) const
 {
     QVector<PaletteOffer> offers;
-    for (const core::Node &candidate : paletteCatalog()) {
+    for (const core::CatalogEntry &row : core::nodeCatalog()) {
+        const core::Node &candidate = row.prototype;
         int bestPort = -1;
         core::PortMatch bestMatch = core::PortMatch::Incompatible;
         for (int i = 0; i < candidate.ports.size(); ++i) {
@@ -700,18 +769,108 @@ void NodeLayerItem::syncSpatialIndex()
 int NodeLayerItem::pickTopMost(const QPointF &world) const
 {
     // The point query narrows candidates through the index; the top-most is the one
-    // latest in the model's z-order (list order).
+    // latest in the model's z-order (list order). Frames are backdrops: any
+    // non-frame node under the point wins over every frame.
     const QVector<int> candidates = m_index.queryPoint(world);
     int bestId = -1;
     int bestIndex = -1;
+    int bestFrameId = -1;
+    int bestFrameIndex = -1;
     for (int id : candidates) {
         const int index = m_graph.indexOfId(id);
+        const core::Node *node = m_graph.nodeById(id);
+        if (node && node->kind == core::NodeKind::Frame) {
+            if (index > bestFrameIndex) {
+                bestFrameIndex = index;
+                bestFrameId = id;
+            }
+            continue;
+        }
         if (index > bestIndex) {
             bestIndex = index;
             bestId = id;
         }
     }
+    return bestId != -1 ? bestId : bestFrameId;
+}
+
+int NodeLayerItem::connectionNear(const QPointF &world) const
+{
+    const qreal zoom = m_controller ? m_controller->zoom() : 1.0;
+    const qreal reach =
+        qMax(kSliceWorldReach, kSliceMinScreenReach / (zoom > 0.0 ? zoom : 1.0));
+
+    int bestId = -1;
+    qreal bestDistance = reach;
+    for (const core::Connection &c : m_graph.connections()) {
+        const core::Node *from = m_graph.nodeById(c.fromNodeId);
+        const core::Node *to = m_graph.nodeById(c.toNodeId);
+        if (!from || !to || c.fromPortIndex >= from->ports.size()
+            || c.toPortIndex >= to->ports.size())
+            continue;
+        const QPointF a = from->portWorldPosition(c.fromPortIndex);
+        const QPointF b = to->portWorldPosition(c.toPortIndex);
+        if (!core::connectorBounds(a, b, reach).contains(world))
+            continue;
+        const qreal distance = core::connectorDistance(a, b, world);
+        if (distance <= bestDistance) {
+            bestDistance = distance;
+            bestId = c.id;
+        }
+    }
     return bestId;
+}
+
+void NodeLayerItem::sliceAt(const QPointF &world)
+{
+    const int id = connectionNear(world);
+    if (id == -1)
+        return;
+    m_commands.push(std::make_unique<core::DisconnectCommand>(id), m_graph);
+    m_geometryDirty = true;
+    update();
+    emit graphMutated();
+}
+
+int NodeLayerItem::bestCompatiblePort(const core::Node &node) const
+{
+    int best = -1;
+    core::PortMatch bestMatch = core::PortMatch::Incompatible;
+    for (int i = 0; i < node.ports.size(); ++i) {
+        const core::Port &port = node.ports[i];
+        if (port.isInput != m_anchorIsOutput)
+            continue;
+        const core::PortMatch match = m_anchorIsOutput
+            ? core::portMatch(m_anchorType, port.type)
+            : core::portMatch(port.type, m_anchorType);
+        if (match == core::PortMatch::Incompatible)
+            continue;
+        if (best == -1
+            || (bestMatch == core::PortMatch::Converted
+                && match == core::PortMatch::Direct)) {
+            best = i;
+            bestMatch = match;
+        }
+    }
+    return best;
+}
+
+bool NodeLayerItem::beginConnectFromNode(int nodeId, const QPointF &world)
+{
+    const core::Node *node = m_graph.nodeById(nodeId);
+    if (!node || node->ports.isEmpty())
+        return false;
+    int portIndex = -1;
+    for (int i = 0; i < node->ports.size(); ++i) {
+        if (!node->ports[i].isInput) {
+            portIndex = i;
+            break;
+        }
+    }
+    if (portIndex == -1)
+        portIndex = 0;
+    beginConnectDrag({ nodeId, portIndex }, world);
+    return m_connectActive;
 }
 
 NodeLayerItem::PortHit NodeLayerItem::pickPort(const QPointF &world) const
@@ -839,6 +998,25 @@ void NodeLayerItem::finishConnectDrag(const QPointF &world)
     }
     const bool detachedAlive = m_detachedConnectionId != -1
         && m_graph.connectionById(m_detachedConnectionId) != nullptr;
+
+    // With the Connect tool a release over a node body snaps to the node's
+    // best compatible port, so wiring never needs a precise port grab.
+    if (m_tool == Tool::Connect
+        && (m_targetNodeId == -1
+            || m_targetMatch == core::PortMatch::Incompatible)) {
+        const int bodyId = pickTopMost(world);
+        const core::Node *bodyNode =
+            bodyId != -1 && bodyId != m_anchorNodeId ? m_graph.nodeById(bodyId)
+                                                     : nullptr;
+        const int port = bodyNode ? bestCompatiblePort(*bodyNode) : -1;
+        if (port != -1) {
+            m_targetNodeId = bodyId;
+            m_targetPortIndex = port;
+            m_targetMatch = m_anchorIsOutput
+                ? core::portMatch(m_anchorType, bodyNode->ports[port].type)
+                : core::portMatch(bodyNode->ports[port].type, m_anchorType);
+        }
+    }
 
     const bool hasTarget = m_targetNodeId != -1
         && m_graph.nodeById(m_targetNodeId) != nullptr
@@ -1086,10 +1264,22 @@ void NodeLayerItem::rebuildNodes(QSGNode *nodeRoot, bool detailed,
     NodeGeometryBuilder builder;
     NodeContentRasterizer rasterizer;
 
-    QSGNode *child = nodeRoot->firstChild();
+    // Frames draw first so every non-frame card sits over its backdrop,
+    // whatever the model's list order says; off-screen nodes are not drawn.
+    QVector<const core::Node *> ordered;
+    ordered.reserve(visible.size());
     for (const core::Node &node : m_graph.nodes()) {
-        if (!visible.contains(node.id))
-            continue; // off-screen nodes are not drawn
+        if (node.kind == core::NodeKind::Frame && visible.contains(node.id))
+            ordered.push_back(&node);
+    }
+    for (const core::Node &node : m_graph.nodes()) {
+        if (node.kind != core::NodeKind::Frame && visible.contains(node.id))
+            ordered.push_back(&node);
+    }
+
+    QSGNode *child = nodeRoot->firstChild();
+    for (const core::Node *orderedNode : ordered) {
+        const core::Node &node = *orderedNode;
 
         auto *group = static_cast<NodeCardGroup *>(child);
         if (!group) {
@@ -1433,6 +1623,44 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
     const QPointF world = worldFromLocal(event->position());
     const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
 
+    // The one-shot Place tool drops its armed prototype where the press lands
+    // and hands the pill back to the cursor.
+    if (m_tool == Tool::Place) {
+        const core::Node prototype = m_placePrototype;
+        m_placePrototype = core::Node();
+        m_tool = Tool::Cursor;
+        if (!prototype.worldSize.isEmpty())
+            placePrototypeAt(prototype, world);
+        emit toolChanged();
+        event->accept();
+        return;
+    }
+
+    // The Cut tool slices the connector under the press and keeps slicing
+    // along the stroke until release.
+    if (m_tool == Tool::Cut) {
+        m_slicing = true;
+        sliceAt(world);
+        event->accept();
+        return;
+    }
+
+    // The Connect tool wires from any port at any zoom, or from a node body
+    // via its first output, so drawing an edge never needs a precise grab.
+    if (m_tool == Tool::Connect) {
+        const PortHit portHit = pickPort(world);
+        if (portHit.nodeId != -1) {
+            beginConnectDrag(portHit, world);
+            event->accept();
+            return;
+        }
+        const int bodyId = pickTopMost(world);
+        if (bodyId != -1 && beginConnectFromNode(bodyId, world)) {
+            event->accept();
+            return;
+        }
+    }
+
     // A grab on a port starts wiring, not selection; Shift keeps the click available
     // for toggling the node under the port. Ports are only grabbable while they are
     // drawn — the low-zoom tier hides them and keeps the whole card draggable.
@@ -1493,6 +1721,22 @@ void NodeLayerItem::mousePressEvent(QMouseEvent *event)
             m_graph.raiseToTop(ids);
             m_dragging = true;
             m_dragIds = m_graph.selectedIds();
+            // A dragged frame carries the nodes resting on it, without
+            // selecting them.
+            const QVector<int> selection = m_dragIds;
+            for (int id : selection) {
+                const core::Node *frame = m_graph.nodeById(id);
+                if (!frame || frame->kind != core::NodeKind::Frame)
+                    continue;
+                const QRectF frameRect = frame->worldRect();
+                for (const core::Node &other : m_graph.nodes()) {
+                    if (other.kind == core::NodeKind::Frame
+                        || m_dragIds.contains(other.id))
+                        continue;
+                    if (frameRect.contains(other.worldRect()))
+                        m_dragIds.push_back(other.id);
+                }
+            }
             m_dragPressWorld = world;
             m_dragLastWorld = world;
             setCursor(Qt::ClosedHandCursor);
@@ -1525,6 +1769,12 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_slicing) {
+        sliceAt(worldFromLocal(event->position()));
+        event->accept();
+        return;
+    }
+
     if (m_connectActive) {
         updateConnectTarget(worldFromLocal(event->position()));
         event->accept();
@@ -1553,6 +1803,7 @@ void NodeLayerItem::mouseMoveEvent(QMouseEvent *event)
         updateDragGuides();
         m_geometryDirty = true;
         update();
+        emit boardChanged();
         event->accept();
         return;
     }
@@ -1577,6 +1828,12 @@ void NodeLayerItem::mouseReleaseEvent(QMouseEvent *event)
 
     if (event->button() != Qt::LeftButton) {
         event->ignore();
+        return;
+    }
+
+    if (m_slicing) {
+        m_slicing = false;
+        event->accept();
         return;
     }
 
@@ -1629,13 +1886,26 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
     const QPointF world = worldFromLocal(event->position());
     const int hitId = pickTopMost(world);
     if (hitId == -1) {
-        addNodeAtCursor(world); // empty canvas: add a node at the cursor
+        // Empty canvas: summon the command palette at the cursor's world point.
+        emit paletteInvoked(world);
         event->accept();
         return;
     }
 
     const core::Node *hitNode = m_graph.nodeById(hitId);
     if (hitNode->kind == core::NodeKind::Prompt) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        emit promptEditRequested(hitId);
+        event->accept();
+        return;
+    }
+    // A generate node's own prompt is editable in place, so a single
+    // self-contained node can carry its whole idea-to-result flow.
+    if (hitNode->kind == core::NodeKind::Generate
+        && !NodeCardLayout::modelChipRect(*hitNode).contains(world)
+        && !NodeCardLayout::runButtonRect(*hitNode).contains(world)) {
         m_graph.selectOnly(hitId);
         m_geometryDirty = true;
         update();
@@ -1719,6 +1989,14 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
         return;
     }
 
+    if (event->key() == Qt::Key_Tab) {
+        // Summon the command palette; a picked node lands at the view center.
+        emit paletteInvoked(
+            worldFromLocal(QPointF(width() / 2.0, height() / 2.0)));
+        event->accept();
+        return;
+    }
+
     const bool control = event->modifiers().testFlag(Qt::ControlModifier);
     const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
 
@@ -1773,6 +2051,8 @@ void NodeLayerItem::keyPressEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Escape) {
         if (m_connectActive) {
             endConnectDrag(); // abandon the wire; a grabbed edge snaps home
+        } else if (m_tool != Tool::Cursor) {
+            setTool(Tool::Cursor);
         } else {
             m_graph.clearSelection();
             m_geometryDirty = true;

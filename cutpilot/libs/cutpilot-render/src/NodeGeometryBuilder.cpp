@@ -217,6 +217,32 @@ NodeGeometryBuilder::buildNode(const core::Node &node, const theme::ThemeTable &
     const QRectF rect = node.worldRect();
     const qreal radius = kBodyRadiusWorld;
 
+    // A frame is a backdrop: a translucent tinted region drawn under the
+    // nodes resting on it, with a title strip — never a solid card.
+    if (node.kind == core::NodeKind::Frame) {
+        if (node.selected) {
+            appendRoundedRectStroke(mesh, rect, radius, kHaloWorldWidth,
+                                    over(theme.glowEmphasis(), canvas));
+        }
+        appendRoundedRect(mesh, rect, radius, theme.selectionFill());
+        if (detailed) {
+            QRectF headerRect = rect;
+            headerRect.setHeight(
+                qMin(NodeCardLayout::kHeaderHeight, rect.height()));
+            QColor strip = theme.nodeHeader();
+            strip.setAlpha(215);
+            appendRoundedRect(mesh, headerRect, radius, strip);
+        }
+        if (node.selected) {
+            appendRoundedRectStroke(mesh, rect, radius, kSelectionWorldWidth,
+                                    theme.selection());
+        } else {
+            appendRoundedRectStroke(mesh, rect, radius, kBorderWorldWidth,
+                                    theme.borderSubtle());
+        }
+        return mesh;
+    }
+
     // Resting card: a rounded body with a hairline border. The selected node first
     // lays down a neutral halo ring just outside the card (the elevation lift), then
     // the selection outline replaces the resting border.
