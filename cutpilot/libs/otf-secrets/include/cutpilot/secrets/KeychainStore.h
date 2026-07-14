@@ -12,7 +12,9 @@ namespace cutpilot::secrets {
 // same entry.
 class KeychainStore {
 public:
-    // True on platforms where a system keychain is wired up.
+    // True on platforms where a system keychain is wired up. False when
+    // CUTPILOT_DISABLE_KEYCHAIN is set, which routes every operation away from
+    // the real keychain so test runs stay isolated from it.
     static bool available();
 
     // Create or replace the secret. Returns false when the platform has no

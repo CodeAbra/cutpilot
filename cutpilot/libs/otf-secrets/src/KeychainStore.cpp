@@ -11,6 +11,14 @@ namespace cutpilot::secrets {
 
 namespace {
 
+// Isolation switch shared with the rest of the codebase: when set, no
+// operation touches the real login keychain, so tests can never read, write,
+// or delete a developer's own keychain items.
+bool keychainDisabled()
+{
+    return qEnvironmentVariableIsSet("CUTPILOT_DISABLE_KEYCHAIN");
+}
+
 CFStringRef cfString(const QString &value)
 {
     return CFStringCreateWithCharacters(
@@ -38,12 +46,14 @@ CFMutableDictionaryRef itemQuery(const QString &service, const QString &account)
 
 bool KeychainStore::available()
 {
-    return true;
+    return !keychainDisabled();
 }
 
 bool KeychainStore::writeSecret(const QString &service, const QString &account,
                                 const QString &value)
 {
+    if (keychainDisabled())
+        return false;
     const QByteArray bytes = value.toUtf8();
     CFDataRef data = CFDataCreate(
         kCFAllocatorDefault, reinterpret_cast<const UInt8 *>(bytes.constData()),
@@ -69,6 +79,8 @@ bool KeychainStore::writeSecret(const QString &service, const QString &account,
 
 QString KeychainStore::readSecret(const QString &service, const QString &account)
 {
+    if (keychainDisabled())
+        return QString();
     CFMutableDictionaryRef query = itemQuery(service, account);
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
@@ -89,6 +101,8 @@ QString KeychainStore::readSecret(const QString &service, const QString &account
 
 bool KeychainStore::removeSecret(const QString &service, const QString &account)
 {
+    if (keychainDisabled())
+        return false;
     CFMutableDictionaryRef query = itemQuery(service, account);
     const OSStatus status = SecItemDelete(query);
     CFRelease(query);
@@ -97,6 +111,8 @@ bool KeychainStore::removeSecret(const QString &service, const QString &account)
 
 bool KeychainStore::hasSecret(const QString &service, const QString &account)
 {
+    if (keychainDisabled())
+        return false;
     CFMutableDictionaryRef query = itemQuery(service, account);
     CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
     CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
