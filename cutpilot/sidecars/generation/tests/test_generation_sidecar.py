@@ -1103,6 +1103,71 @@ class SidecarTestCase(unittest.TestCase):
         self.assertIn("too large", str(caught.exception))
         self.assertNotIn("secret-key", str(caught.exception))
 
+    def test_structured_body_hook_builds_nested_body(self):
+        def content_builder(desc, request):
+            body = {
+                "content": [{"type": "text", "text": request.prompt}],
+                "model": providers._slug(request.model),
+            }
+            return body, request.width, request.height
+
+        stub = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(stub, build_body=content_builder)
+        model = ModelInfo(
+            id="stub/video-1",
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            model_slug="nested-slug",
+            output_kind="video",
+        )
+        self._run_async_direct(desc, model, "nested-body.mp4")
+        self.assertEqual(
+            stub.submit_body["content"][0]["text"], "a lighthouse at dusk"
+        )
+        self.assertEqual(stub.submit_body["model"], "nested-slug")
+        self.assertNotIn("prompt", stub.submit_body)
+
+    def test_input_image_encoded_into_submit_body(self):
+        input_path = self.render_input(name="i2v-input.png")
+        with open(input_path, "rb") as handle:
+            input_bytes = handle.read()
+
+        stub = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(
+            stub, input_body_key="promptImage", input_encoding="data_uri"
+        )
+        model = ModelInfo(
+            id="stub/video-1",
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            needs_input=True,
+            output_kind="video",
+        )
+        self._run_async_direct(desc, model, "i2v.mp4", input_path=input_path)
+        encoded = stub.submit_body["promptImage"]
+        self.assertTrue(encoded.startswith("data:image/png;base64,"))
+        decoded = base64.b64decode(encoded.split(",", 1)[1])
+        self.assertEqual(decoded, input_bytes)
+
+        # A text-to-video row (no input field) carries no encoded image.
+        t2v_stub = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(t2v_stub.stop)
+        t2v_desc = self._stub_async_descriptor(t2v_stub)
+        self._run_async_direct(t2v_desc, model, "t2v.mp4", input_path=input_path)
+        self.assertNotIn("promptImage", t2v_stub.submit_body)
+
     def test_url_download_refuses_internal_and_plaintext_hosts(self):
         for url in (
             "http://example.com/x.png",

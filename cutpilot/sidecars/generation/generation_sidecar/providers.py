@@ -209,6 +209,15 @@ class AsyncJobDescriptor:
     # vendor's step constraint is row data rather than engine logic.
     size_multiple: int = 0
     extra_body: dict = field(default_factory=dict)
+    # An escape hatch for a vendor whose body is not a flat field map (a nested
+    # content array). When set it is called as build_body(desc, request) and
+    # returns the full body dict plus the reported width and height, bypassing
+    # the flat builder. Unset keeps the declarative flat body.
+    build_body: Callable | None = None
+    # An input image carried in the body: the field it goes under and how it is
+    # encoded ("" or "data_uri"). Empty means the row takes no input image.
+    input_body_key: str = ""
+    input_encoding: str = ""
     job_id_path: tuple = ("id",)
     poll_url_path: tuple | None = ("polling_url",)
     poll_path: str = ""
@@ -687,7 +696,28 @@ def _round_multiple(value: int, multiple: int) -> int:
     return max(MIN_ASYNC_DIMENSION, min(MAX_ASYNC_DIMENSION, rounded))
 
 
+def _read_input_capped(path: str) -> bytes:
+    """Read an input file under the raw byte cap without decoding it: the file
+    is sent to the vendor as-is, not rendered, so no PNG decode runs here."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_INPUT_FILE_BYTES + 1)
+    except OSError as exc:
+        raise RuntimeError(f"Input image could not be read: {exc}") from exc
+    if len(data) > MAX_INPUT_FILE_BYTES:
+        raise RuntimeError("Input image is too large to process")
+    return data
+
+
+def _encode_input_data_uri(path: str) -> str:
+    return "data:image/png;base64," + base64.b64encode(
+        _read_input_capped(path)
+    ).decode()
+
+
 def _build_async_body(desc: AsyncJobDescriptor, request: GenerationRequest):
+    if desc.build_body is not None:
+        return desc.build_body(desc, request)
     width = _round_multiple(request.width, desc.size_multiple)
     height = _round_multiple(request.height, desc.size_multiple)
     body = {desc.prompt_key: request.prompt}
@@ -698,6 +728,12 @@ def _build_async_body(desc: AsyncJobDescriptor, request: GenerationRequest):
         body[desc.height_key] = height
     elif desc.size_mode == "size_string":
         body["size"] = desc.size_format.format(w=width, h=height)
+    if (
+        desc.input_body_key
+        and request.input_path
+        and desc.input_encoding == "data_uri"
+    ):
+        body[desc.input_body_key] = _encode_input_data_uri(request.input_path)
     body.update(desc.extra_body)
     return body, width, height
 
