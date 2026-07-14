@@ -231,6 +231,10 @@ target_include_directories(tst_keymanager PRIVATE
 target_link_libraries(tst_keymanager PRIVATE Qt6::Test Qt6::Widgets
     cutpilot-ipc cutpilot-theme otf-secrets cutpilot-core)
 add_test(NAME app.keymanager COMMAND tst_keymanager)
+# Pin keychain isolation at the ctest level too, so it holds regardless of
+# in-test setup ordering.
+set_tests_properties(app.keymanager PROPERTIES
+    ENVIRONMENT "CUTPILOT_DISABLE_KEYCHAIN=1")
 
 # The Node screen as one working whole: a palette pick lands on the live
 # canvas, generates through a real sidecar, shows on the minimap mapping,
