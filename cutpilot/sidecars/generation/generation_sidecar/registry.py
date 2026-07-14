@@ -27,6 +27,11 @@ class ModelInfo:
     model_slug: str = ""
     category: str = "image"
     output_kind: str = "image"
+    # The async-job descriptor a model routes through when it differs from the
+    # provider id. Empty routes by provider. A non-empty value disambiguates two
+    # shapes that share one provider id and key (a synchronous image row and an
+    # asynchronous video row under the same vendor account).
+    descriptor: str = ""
     # A model whose vendor contract is not yet confirmed against a live key.
     # The server keeps these out of the model picker and key surface until
     # they are confirmed, while they stay resolvable for a direct smoke test.

@@ -819,6 +819,45 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(data["error"], "missing_key")
         self.assertEqual(data["provider"], "bytedance")
 
+    def test_descriptor_routes_two_shapes_under_one_provider(self):
+        # One provider id (bytedance) hosts two shapes: the synchronous Seedream
+        # image row and an asynchronous video row. The descriptor, not the
+        # provider, selects the adapter, so the two resolve to different
+        # singletons without either regressing.
+        synthetic = providers.AsyncJobDescriptor(
+            provider="bytedance",
+            base_url="https://ark.example/api/v3",
+            success_states=("succeeded",),
+            failure_states=("failed",),
+            result_ref_path=("content", "video_url"),
+            result_fetch="url",
+        )
+        video_model = ModelInfo(
+            id="bytedance/seedance-stub",
+            label="Seedance Stub",
+            provider="bytedance",
+            price_usd=0.1,
+            needs_key=True,
+            descriptor="seedance-video",
+            output_kind="video",
+        )
+        with patch.dict(
+            providers.ASYNC_JOB_DESCRIPTORS, {"seedance-video": synthetic}
+        ):
+            self.assertIs(
+                providers.provider_for(video_model), providers._async_job
+            )
+            self.assertIs(
+                providers.provider_for(model_by_id("bytedance/seedream-4-0")),
+                providers._sync_image,
+            )
+            # A provider-keyed async row (BFL, no descriptor) still resolves via
+            # the provider-id fallback.
+            self.assertIs(
+                providers.provider_for(model_by_id("bfl/flux-2-pro-preview")),
+                providers._async_job,
+            )
+
     def test_url_download_refuses_internal_and_plaintext_hosts(self):
         for url in (
             "http://example.com/x.png",

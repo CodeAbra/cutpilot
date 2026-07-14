@@ -746,7 +746,7 @@ class AsyncJobProvider:
         on_progress: ProgressFn,
         is_canceled: CanceledFn,
     ) -> GenerationResult:
-        desc = ASYNC_JOB_DESCRIPTORS[request.model.provider]
+        desc = ASYNC_JOB_DESCRIPTORS[request.model.descriptor or request.model.provider]
         key = keys.lookup_key(desc.provider)
         if not key:
             raise MissingKeyError(desc.provider)
@@ -848,14 +848,22 @@ _MODEL_PROVIDERS = {
 
 _sync_image = SyncImageProvider()
 _async_job = AsyncJobProvider()
-_PROVIDERS = {
-    **{provider_id: _sync_image for provider_id in SYNC_IMAGE_DESCRIPTORS},
-    **{provider_id: _async_job for provider_id in ASYNC_JOB_DESCRIPTORS},
-}
 
 
 def provider_for(model: ModelInfo):
-    provider = _MODEL_PROVIDERS.get(model.id) or _PROVIDERS.get(model.provider)
-    if provider is None:
-        raise RuntimeError(f"Unsupported provider: {model.provider}")
-    return provider
+    """Pick the adapter for a model by shape, not by a flat provider->adapter
+    map. A model-specific adapter wins first. A set descriptor routes to the
+    async adapter, so one provider id can host both a synchronous image row and
+    an asynchronous video row under the same key. Otherwise the provider id
+    selects sync or async, with the async provider id as the back-compat
+    fallback for rows that route by provider alone."""
+    specific = _MODEL_PROVIDERS.get(model.id)
+    if specific is not None:
+        return specific
+    if model.descriptor and model.descriptor in ASYNC_JOB_DESCRIPTORS:
+        return _async_job
+    if model.provider in SYNC_IMAGE_DESCRIPTORS:
+        return _sync_image
+    if model.provider in ASYNC_JOB_DESCRIPTORS:
+        return _async_job
+    raise RuntimeError(f"Unsupported provider: {model.provider}")
