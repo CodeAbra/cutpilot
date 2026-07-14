@@ -177,6 +177,7 @@ MODELS: tuple[ModelInfo, ...] = (
         price_usd=0.2,
         needs_key=True,
         needs_input=True,
+        needs_prompt=False,
         model_slug="image-to-video",
         category="video",
         output_kind="video",
