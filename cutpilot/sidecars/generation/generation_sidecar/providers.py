@@ -271,6 +271,12 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MAX_REDIRECTS = 5
 
+# Plaintext http to a loopback host is refused for vendor-supplied URLs in
+# production so a compromised vendor cannot reach a local service. Only the
+# in-process test transport, which binds its stubs to 127.0.0.1 over http,
+# flips this on.
+_ALLOW_LOOPBACK_HTTP = False
+
 
 def _flags_internal(address) -> bool:
     return (
@@ -340,8 +346,8 @@ def _guard_url(url: str) -> tuple[str, str, int, str, str]:
     scheme = parts.scheme.lower()
     host = parts.hostname or ""
     if scheme == "http":
-        if host not in _LOOPBACK_HOSTS:
-            raise RuntimeError("Refusing a non-loopback plaintext image URL")
+        if not (_ALLOW_LOOPBACK_HTTP and host in _LOOPBACK_HOSTS):
+            raise RuntimeError("Refusing a plaintext image URL")
         port = parts.port or 80
         allow_internal = True
     elif scheme == "https":

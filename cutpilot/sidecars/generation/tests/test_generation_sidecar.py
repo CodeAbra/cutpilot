@@ -257,6 +257,15 @@ class SidecarTestCase(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
 
+    def setUp(self):
+        # The in-process stubs bind to 127.0.0.1 over http; enable the
+        # loopback-http transport carve-out for the duration of each test. In
+        # production the flag stays off so a vendor-supplied loopback URL is
+        # refused.
+        loopback = patch.object(providers, "_ALLOW_LOOPBACK_HTTP", True)
+        loopback.start()
+        self.addCleanup(loopback.stop)
+
     def request(self, method, path, body=None, token=TOKEN):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         headers = {}
@@ -828,6 +837,28 @@ class SidecarTestCase(unittest.TestCase):
         self.addCleanup(stub.stop)
         data = providers._download_capped(
             stub.url + "/img/x.png", providers.MAX_INPUT_FILE_BYTES, timeout=5
+        )
+        self.assertTrue(data.startswith(PNG_SIGNATURE))
+
+    def test_vendor_loopback_http_url_is_refused_in_production(self):
+        # With the test-only loopback carve-out off (production posture), a
+        # vendor-supplied http://127.0.0.1 URL must be refused like any other
+        # internal host — a compromised vendor cannot reach a local service.
+        stub = StubVendor()
+        stub.start()
+        self.addCleanup(stub.stop)
+        loopback_url = stub.url + "/img/x.png"
+        with patch.object(providers, "_ALLOW_LOOPBACK_HTTP", False):
+            with self.assertRaises(RuntimeError) as caught:
+                providers._download_capped(
+                    loopback_url, providers.MAX_INPUT_FILE_BYTES, timeout=5
+                )
+        self.assertNotIn("127.0.0.1", str(caught.exception))
+
+        # With the transport carve-out on, the same URL is served locally so
+        # the in-process stub matrix keeps working.
+        data = providers._download_capped(
+            loopback_url, providers.MAX_INPUT_FILE_BYTES, timeout=5
         )
         self.assertTrue(data.startswith(PNG_SIGNATURE))
 
