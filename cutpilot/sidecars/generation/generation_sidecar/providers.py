@@ -821,6 +821,152 @@ def _build_multipart_body(desc: AsyncJobDescriptor, request: GenerationRequest):
     return b"".join(parts), content_type, request.width, request.height
 
 
+def _build_seedance_body(desc: AsyncJobDescriptor, request: GenerationRequest):
+    """Build the nested content body: a text part, and — when the row takes an
+    input image and one is supplied — an image part carrying the input as a
+    data URI. The slug and extra fields ride the same body."""
+    content = [{"type": "text", "text": request.prompt}]
+    if desc.input_body_key and request.input_path:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": _encode_input_data_uri(request.input_path)},
+            }
+        )
+    body = {"model": _slug(request.model), "content": content}
+    body.update(desc.extra_body)
+    return body, request.width, request.height
+
+
+# Video budgets run in minutes, and a valid clip is larger than a still image;
+# both are per-row bounds, never unlimited.
+VIDEO_JOB_DEADLINE_S = 300.0
+VIDEO_POLL_INTERVAL_S = 6.0
+VIDEO_POLL_CEILING_S = 12.0
+VIDEO_RESULT_MAX_BYTES = 256 * 1024 * 1024
+
+# The direct video roster. Each row's base host, slug placement, status
+# enumeration, and result path are provisional pending a live-key confirmation;
+# each is row data, so confirming one is a one-line edit. Every backing model is
+# unverified until then. Seedance shares the ByteDance provider id (and ARK key)
+# with Seedream but routes through its own descriptor id.
+ASYNC_JOB_DESCRIPTORS.update(
+    {
+        "runway": AsyncJobDescriptor(
+            provider="runway",
+            base_url="https://api.dev.runwayml.com",
+            submit_path="/v1/image_to_video",
+            submit_headers={"X-Runway-Version": "2024-11-06"},
+            model_body_key="model",
+            prompt_key="promptText",
+            input_body_key="promptImage",
+            input_encoding="data_uri",
+            size_mode="none",
+            extra_body={"ratio": "1280:720", "duration": 5},
+            job_id_path=("id",),
+            poll_url_path=None,
+            poll_path="/v1/tasks/{job_id}",
+            status_path=("status",),
+            success_states=("SUCCEEDED",),
+            failure_states=("FAILED", "CANCELED"),
+            result_ref_path=("output", 0),
+            result_fetch="url",
+            result_kind="video",
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+        "luma": AsyncJobDescriptor(
+            provider="luma",
+            base_url="https://agents.lumalabs.ai/v1",
+            submit_path="/generations",
+            model_body_key="model",
+            prompt_key="prompt",
+            size_mode="none",
+            job_id_path=("id",),
+            poll_url_path=None,
+            poll_path="/generations/{job_id}",
+            status_path=("state",),
+            success_states=("completed",),
+            failure_states=("failed",),
+            result_ref_path=("assets", "video"),
+            result_fetch="url",
+            result_kind="video",
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+        "leonardo": AsyncJobDescriptor(
+            provider="leonardo",
+            base_url="https://cloud.leonardo.ai/api/rest",
+            submit_path="/v2/generations",
+            model_body_key="model",
+            prompt_key="prompt",
+            size_mode="none",
+            job_id_path=("sdGenerationJob", "generationId"),
+            poll_url_path=None,
+            poll_path="/v1/generations/{job_id}",
+            status_path=("generations_by_pk", "status"),
+            success_states=("COMPLETE",),
+            failure_states=("FAILED",),
+            result_ref_path=("generations_by_pk", "generated_images", 0, "url"),
+            result_fetch="url",
+            result_kind="video",
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+        "seedance-video": AsyncJobDescriptor(
+            provider="bytedance",
+            base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
+            submit_path="/contents/generations/tasks",
+            size_mode="none",
+            build_body=_build_seedance_body,
+            input_body_key="image_url",
+            input_encoding="data_uri",
+            extra_body={},
+            job_id_path=("id",),
+            poll_url_path=None,
+            poll_path="/contents/generations/tasks/{job_id}",
+            status_path=("status",),
+            success_states=("succeeded",),
+            failure_states=("failed",),
+            result_ref_path=("content", "video_url"),
+            result_fetch="url",
+            result_kind="video",
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+        "stability": AsyncJobDescriptor(
+            provider="stability",
+            base_url="https://api.stability.ai",
+            submit_path="/v2beta/image-to-video",
+            body_encoding="multipart",
+            input_body_key="image",
+            submit_headers={"accept": "video/*"},
+            size_mode="none",
+            extra_body={"cfg_scale": 1.8, "motion_bucket_id": 127},
+            model_body_key=None,
+            job_id_path=("id",),
+            poll_url_path=None,
+            poll_path="/v2beta/image-to-video/result/{job_id}",
+            status_source="http_code",
+            result_fetch="bytes",
+            result_kind="video",
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+    }
+)
+
+
 def _synth_progress(desc: AsyncJobDescriptor, resp, started: float, floor: float) -> float:
     """A monotonic progress fraction capped below 1.0: the vendor's own number
     when it reports one, otherwise elapsed time over the expected duration. The
@@ -964,7 +1110,9 @@ class AsyncJobProvider:
                 if folded in success_states:
                     break
                 if folded in failure_states:
-                    detail = _select_optional(last_poll, desc.error_msg_path) or status
+                    detail = status
+                    if desc.error_msg_path is not None:
+                        detail = _select_optional(last_poll, desc.error_msg_path) or status
                     raise RuntimeError(f"{desc.provider}: {detail}")
                 # Any state we do not recognize keeps the loop polling; the
                 # whole-job deadline is the backstop for a vendor that never

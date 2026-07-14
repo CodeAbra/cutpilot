@@ -28,7 +28,11 @@ from generation_sidecar.procedural import (  # noqa: E402
     decode_png,
     render_png,
 )
-from generation_sidecar.registry import ModelInfo, model_by_id  # noqa: E402
+from generation_sidecar.registry import (  # noqa: E402
+    ModelInfo,
+    list_models,
+    model_by_id,
+)
 from generation_sidecar.server import build_server  # noqa: E402
 
 
@@ -181,10 +185,12 @@ class StubAsyncVendor:
         result_kind="image",
         result_ref_path=None,
         video_body=None,
+        submit_id_path=("id",),
     ):
         self.mode = mode
         self.polls_before_ready = polls_before_ready
         self.injected_polling_url = polling_url
+        self.submit_id_path = tuple(submit_id_path)
         self.status_path = tuple(status_path)
         self.running_value = running_value
         self.success_value = success_value
@@ -252,7 +258,9 @@ class StubAsyncVendor:
                     polling_url = vendor.injected_polling_url
                 else:
                     polling_url = f"{vendor.url}/poll/1"
-                self._reply({"id": "1", "polling_url": polling_url})
+                response = _nest(vendor.submit_id_path, "1")
+                _deep_merge(response, {"polling_url": polling_url})
+                self._reply(response)
 
             def do_GET(self):
                 if self.path.startswith("/img/"):
@@ -271,14 +279,11 @@ class StubAsyncVendor:
                     else:
                         self._reply_status(200, vendor.video_body, "video/mp4")
                     return
-                if self.path.startswith("/poll/"):
-                    vendor.poll_headers = dict(self.headers)
-                    vendor.poll_count += 1
-                    self._reply(vendor._poll_payload())
-                    return
-                self.send_response(404)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+                # Any other GET is a poll for this job, whatever path the row's
+                # poll_path resolves to.
+                vendor.poll_headers = dict(self.headers)
+                vendor.poll_count += 1
+                self._reply(vendor._poll_payload())
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._server.server_address[1]
@@ -576,6 +581,92 @@ class SidecarTestCase(unittest.TestCase):
         patcher = patch.dict(providers.ASYNC_JOB_DESCRIPTORS, {"bfl": replaced})
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def redirect_async_row(self, descriptor_id, stub, **overrides):
+        """Point an arbitrary async descriptor at an in-process stub with fast
+        timings for the duration of the test, leaving every other field intact."""
+        replaced = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS[descriptor_id],
+            base_url=stub.url,
+            poll_interval_s=0.01,
+            poll_backoff_ceiling_s=0.02,
+            **overrides,
+        )
+        patcher = patch.dict(
+            providers.ASYNC_JOB_DESCRIPTORS, {descriptor_id: replaced}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _video_stub_for(self, descriptor_id, **kw):
+        """A video-result stub whose status and result shapes mirror a row's
+        descriptor so the real submit->poll->fetch loop runs against it."""
+        desc = providers.ASYNC_JOB_DESCRIPTORS[descriptor_id]
+        return StubAsyncVendor(
+            result_kind="video",
+            status_path=desc.status_path,
+            success_value=desc.success_states[0],
+            failure_value=(desc.failure_states or ("failed",))[0],
+            running_value="in_progress",
+            result_ref_path=desc.result_ref_path,
+            submit_id_path=desc.job_id_path,
+            **kw,
+        )
+
+    def _drive_video_row(self, model_id, descriptor_id, env_var, slug, needs_input):
+        self.set_env_key(env_var)
+        model = model_by_id(model_id)
+        if descriptor_id == "stability":
+            stub = StubAsyncVendor(mode="stability", polls_before_ready=2).start()
+        else:
+            stub = self._video_stub_for(
+                descriptor_id, mode="ready", polls_before_ready=2
+            ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row(descriptor_id, stub, job_deadline_s=5.0)
+
+        overrides = {
+            "model": model_id,
+            "prompt": "a lighthouse at dusk",
+            "width": 1024,
+            "height": 1024,
+        }
+        if needs_input:
+            overrides["input_path"] = self.render_input(name=f"{descriptor_id}-in.png")
+        progress = []
+        status, submitted = self.submit(**overrides)
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".mp4"))
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertEqual(content[4:8], MP4_FTYP)
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertAlmostEqual(final["cost_usd"], model.price_usd)
+        self.assertEqual(progress, sorted(progress))
+        pre_terminal = [
+            snap["progress"] for snap in snapshots if snap["state"] != "done"
+        ]
+        self.assertTrue(all(value < 1.0 for value in pre_terminal))
+        # The key rides submit and poll; the result fetch (url rows) carries no
+        # auth header — the stub's asset routes require none.
+        self.assertEqual(stub.submit_headers.get("Authorization"), "Bearer test")
+        self.assertEqual(stub.poll_headers.get("Authorization"), "Bearer test")
+        # The slug is read from the row, never hardcoded: it rides the body for
+        # the json rows; Stability carries no slug and posts multipart.
+        if descriptor_id == "stability":
+            self.assertIn(
+                "multipart/form-data", stub.submit_headers.get("Content-Type", "")
+            )
+            self.assertEqual(stub.submit_headers.get("accept"), "video/*")
+        else:
+            self.assertIn(slug, json.dumps(stub.submit_body))
+        return stub, final
 
     def test_openai_request_stays_byte_identical(self):
         # The refactor must not change the bytes OpenAI receives: same four
@@ -1301,6 +1392,115 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("169.254", str(caught.exception))
         self.assertNotIn("secret-key", str(caught.exception))
 
+    def test_runway_video_row_drives_full_loop(self):
+        self._drive_video_row(
+            "runway/gen4-turbo", "runway", "RUNWAYML_API_SECRET", "gen4_turbo", True
+        )
+
+    def test_luma_video_row_drives_full_loop(self):
+        self._drive_video_row(
+            "luma/ray-3", "luma", "LUMA_API_KEY", "ray-3.2", False
+        )
+
+    def test_leonardo_video_row_drives_full_loop(self):
+        self._drive_video_row(
+            "leonardo/motion-2", "leonardo", "LEONARDO_API_KEY", "motion_2.0", False
+        )
+
+    def test_seedance_video_row_drives_full_loop(self):
+        stub, _ = self._drive_video_row(
+            "bytedance/seedance-1-pro",
+            "seedance-video",
+            "ARK_API_KEY",
+            "seedance-1-0-pro-250528",
+            False,
+        )
+        # The nested content body carries the prompt as a text part.
+        self.assertEqual(
+            stub.submit_body["content"][0]["text"], "a lighthouse at dusk"
+        )
+
+    def test_stability_video_row_drives_full_loop(self):
+        self._drive_video_row(
+            "stability/image-to-video",
+            "stability",
+            "STABILITY_API_KEY",
+            "image-to-video",
+            True,
+        )
+
+    def test_video_row_failure_surfaces_message_without_leaking_key(self):
+        self.set_env_key("LUMA_API_KEY")
+        stub = self._video_stub_for("luma", mode="failure").start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("luma", stub, error_msg_path=("details",))
+        final = self.run_to_done(
+            model="luma/ray-3", prompt="x", width=1024, height=1024
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("quota exceeded", final["message"])
+        self.assertNotIn("test", final["message"])
+
+    def test_video_row_deadline_trips_cleanly(self):
+        self.set_env_key("LUMA_API_KEY")
+        stub = self._video_stub_for("luma", mode="never").start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("luma", stub, job_deadline_s=0.2)
+        started = time.monotonic()
+        final = self.run_to_done(
+            model="luma/ray-3", prompt="x", width=1024, height=1024
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(final["state"], "error")
+        self.assertLess(elapsed, 3.0)
+        self.assertFalse(final["result_path"])
+        self.assertNotIn("test", final["message"])
+
+    def test_video_rows_are_excluded_from_models_yet_resolve(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        listed = {model["id"] for model in data["models"]}
+        rows = (
+            ("runway/gen4-turbo", "runway", True),
+            ("luma/ray-3", "luma", False),
+            ("leonardo/motion-2", "leonardo", False),
+            ("bytedance/seedance-1-pro", "bytedance", False),
+            ("stability/image-to-video", "stability", True),
+        )
+        for model_id, provider, needs_input in rows:
+            self.assertNotIn(model_id, listed)
+            overrides = {"model": model_id}
+            if needs_input:
+                overrides["input_path"] = self.render_input(
+                    name=f"{provider}-resolve.png"
+                )
+            status, data = self.submit(**overrides)
+            self.assertEqual(status, 409, model_id)
+            self.assertEqual(data["error"], "missing_key")
+            self.assertEqual(data["provider"], provider)
+
+    def _assert_video_row_valid(self, model):
+        desc = providers.ASYNC_JOB_DESCRIPTORS[model.descriptor or model.provider]
+        # A video budget runs in minutes, not the still-image seconds.
+        self.assertGreaterEqual(desc.job_deadline_s, 120.0)
+        self.assertTrue(desc.result_ref_path or desc.result_fetch == "bytes")
+        if model.needs_input:
+            self.assertTrue(desc.input_body_key or desc.build_body is not None)
+
+    def test_video_rows_are_well_formed(self):
+        video_models = [m for m in list_models() if m.output_kind == "video"]
+        self.assertTrue(video_models)
+        for model in video_models:
+            self._assert_video_row_valid(model)
+
+        # A malformed video row (a still-image-scale deadline) fails the check.
+        stunted = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["luma"], job_deadline_s=5.0
+        )
+        with patch.dict(providers.ASYNC_JOB_DESCRIPTORS, {"luma": stunted}):
+            with self.assertRaises(AssertionError):
+                self._assert_video_row_valid(model_by_id("luma/ray-3"))
+
     def test_url_download_refuses_internal_and_plaintext_hosts(self):
         for url in (
             "http://example.com/x.png",
@@ -1434,17 +1634,20 @@ class SidecarTestCase(unittest.TestCase):
         self.assertIn(desc.result_fetch, {"inline_b64", "url"})
         self.assertIn(desc.size_mode, {"fixed_set", "passthrough"})
 
-    def _assert_async_descriptor_row_valid(self, provider, desc):
-        self.assertEqual(desc.provider, provider)
+    def _assert_async_descriptor_row_valid(self, key, desc):
+        self.assertTrue(desc.provider)
         self.assertTrue(desc.base_url)
         self.assertTrue(desc.auth_header)
         self.assertTrue(desc.auth_template)
         self.assertTrue(desc.submit_path)
         self.assertTrue(desc.job_id_path)
         self.assertTrue(desc.status_path)
-        self.assertTrue(desc.success_states)
-        self.assertTrue(desc.result_ref_path)
-        self.assertIn(desc.result_fetch, {"url", "inline_b64"})
+        # A json-field row settles on a named success state; an http-code row
+        # settles on the status code instead.
+        self.assertTrue(desc.success_states or desc.status_source == "http_code")
+        # A row either points at a result reference or returns the bytes inline.
+        self.assertTrue(desc.result_ref_path or desc.result_fetch == "bytes")
+        self.assertIn(desc.result_fetch, {"url", "inline_b64", "bytes"})
 
     def test_async_descriptor_rows_are_well_formed(self):
         for provider, desc in providers.ASYNC_JOB_DESCRIPTORS.items():

@@ -20,6 +20,11 @@ ENV_VARS: dict[str, str] = {
     "google": "GEMINI_API_KEY",
     "bytedance": "ARK_API_KEY",
     "bfl": "BFL_API_KEY",
+    # ByteDance Seedance shares the ARK key above; no separate row for it.
+    "runway": "RUNWAYML_API_SECRET",
+    "luma": "LUMA_API_KEY",
+    "leonardo": "LEONARDO_API_KEY",
+    "stability": "STABILITY_API_KEY",
 }
 
 

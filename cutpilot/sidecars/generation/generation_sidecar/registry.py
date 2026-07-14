@@ -112,6 +112,76 @@ MODELS: tuple[ModelInfo, ...] = (
         output_kind="image",
         unverified=True,
     ),
+    # The video roster. Each row's slug, poll-status enumeration, and result
+    # path are unconfirmed against a live key and kept unverified — out of the
+    # picker — until a real generation settles them.
+    ModelInfo(
+        id="runway/gen4-turbo",
+        label="Runway Gen-4 Turbo",
+        provider="runway",
+        price_usd=0.25,
+        needs_key=True,
+        needs_input=True,
+        model_slug="gen4_turbo",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
+    # Slug, the canonical host (Agents vs classic Dream Machine), and the
+    # result path are all unconfirmed against a live key.
+    ModelInfo(
+        id="luma/ray-3",
+        label="Luma Ray 3",
+        provider="luma",
+        price_usd=0.4,
+        needs_key=True,
+        model_slug="ray-3.2",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
+    # The v2 submit shape, the nested status/result paths, and the slug are
+    # unconfirmed against a live key; this row carries the highest such risk.
+    ModelInfo(
+        id="leonardo/motion-2",
+        label="Leonardo Motion 2.0",
+        provider="leonardo",
+        price_usd=0.3,
+        needs_key=True,
+        model_slug="motion_2.0",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
+    # Shares the ByteDance key with Seedream; the slug and status enumeration
+    # are unconfirmed against a live key. Routed by descriptor so its async
+    # video shape does not collide with the synchronous Seedream image row.
+    ModelInfo(
+        id="bytedance/seedance-1-pro",
+        label="Seedance 1 Pro",
+        provider="bytedance",
+        descriptor="seedance-video",
+        price_usd=0.3,
+        needs_key=True,
+        model_slug="seedance-1-0-pro-250528",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
+    # The exact multipart fields and the 202/200 completion semantics are
+    # unconfirmed against a live key.
+    ModelInfo(
+        id="stability/image-to-video",
+        label="Stability Image-to-Video",
+        provider="stability",
+        price_usd=0.2,
+        needs_key=True,
+        needs_input=True,
+        model_slug="image-to-video",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
 )
 
 
