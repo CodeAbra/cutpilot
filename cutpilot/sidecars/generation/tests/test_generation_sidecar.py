@@ -198,6 +198,7 @@ class StubAsyncVendor:
         self.video_body = video_body if video_body is not None else STUB_MP4
         self.submit_headers = None
         self.submit_body = None
+        self.submit_raw = None
         self.submit_path = None
         self.poll_headers = None
         self.poll_count = 0
@@ -221,6 +222,14 @@ class StubAsyncVendor:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _reply_status(self, status, body, content_type):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length) if length > 0 else b""
@@ -230,9 +239,12 @@ class StubAsyncVendor:
                     return
                 vendor.submit_headers = dict(self.headers)
                 vendor.submit_path = self.path
+                vendor.submit_raw = raw
                 try:
                     vendor.submit_body = json.loads(raw) if raw else {}
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # A multipart submit body is binary, not JSON; submit_raw
+                    # keeps the exact bytes for assertions.
                     vendor.submit_body = None
                 if vendor.mode == "ssrf":
                     polling_url = "https://169.254.169.254/poll/1"
@@ -248,6 +260,16 @@ class StubAsyncVendor:
                     return
                 if self.path.startswith("/video/"):
                     self._reply(vendor.video_body, content_type="video/mp4")
+                    return
+                if vendor.mode == "stability":
+                    # Completion signaled by HTTP status: 202 while running, then
+                    # a 200 whose body is the mp4 (no separate result fetch).
+                    vendor.poll_headers = dict(self.headers)
+                    vendor.poll_count += 1
+                    if vendor.poll_count <= vendor.polls_before_ready:
+                        self._reply_status(202, b"", "application/octet-stream")
+                    else:
+                        self._reply_status(200, vendor.video_body, "video/mp4")
                     return
                 if self.path.startswith("/poll/"):
                     vendor.poll_headers = dict(self.headers)
@@ -1167,6 +1189,117 @@ class SidecarTestCase(unittest.TestCase):
         t2v_desc = self._stub_async_descriptor(t2v_stub)
         self._run_async_direct(t2v_desc, model, "t2v.mp4", input_path=input_path)
         self.assertNotIn("promptImage", t2v_stub.submit_body)
+
+    def test_stability_http_code_status_and_bytes_result(self):
+        input_path = self.render_input(name="stability-input.png")
+        stub = StubAsyncVendor(mode="stability", polls_before_ready=2).start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(
+            stub,
+            body_encoding="multipart",
+            status_source="http_code",
+            result_fetch="bytes",
+            input_body_key="image",
+            submit_headers={"accept": "video/*"},
+            extra_body={"cfg_scale": 1.8, "motion_bucket_id": 127},
+            poll_url_path=None,
+            poll_path="/poll/{job_id}",
+        )
+        model = ModelInfo(
+            id="stub/stability",
+            label="Stub Stability",
+            provider="stub",
+            price_usd=0.2,
+            needs_key=True,
+            needs_input=True,
+            output_kind="video",
+        )
+        result, progress = self._run_async_direct(
+            desc, model, "stability.mp4", input_path=input_path
+        )
+        # The submit was multipart carrying the image part and the accept header.
+        self.assertIn(
+            "multipart/form-data", stub.submit_headers.get("Content-Type", "")
+        )
+        self.assertEqual(stub.submit_headers.get("accept"), "video/*")
+        self.assertIn(b'name="image"', stub.submit_raw)
+        self.assertIn(b"cfg_scale", stub.submit_raw)
+        # The key rode submit and poll but never a separate result fetch.
+        self.assertEqual(stub.submit_headers.get("x-key"), "secret-key")
+        self.assertEqual(stub.poll_headers.get("x-key"), "secret-key")
+        # 202 kept polling; 200 was terminal and its body is the mp4.
+        self.assertGreater(stub.poll_count, 2)
+        with open(result.path, "rb") as handle:
+            self.assertEqual(handle.read()[4:8], MP4_FTYP)
+        self.assertEqual(progress, sorted(progress))
+        self.assertTrue(all(value < 1.0 for value in progress))
+
+    def test_stability_submit_ssrf_guarded(self):
+        # The multipart submit runs through the same SSRF gate as the JSON
+        # submit: a malicious submit host is refused before connecting.
+        input_path = self.render_input(name="submit-ssrf-input.png")
+        desc = providers.AsyncJobDescriptor(
+            provider="stub",
+            base_url="https://169.254.169.254",
+            auth_header="x-key",
+            auth_template="{key}",
+            body_encoding="multipart",
+            status_source="http_code",
+            result_fetch="bytes",
+            input_body_key="image",
+            submit_headers={"accept": "video/*"},
+            extra_body={"cfg_scale": 1.8},
+            success_states=("Ready",),
+            poll_url_path=None,
+            poll_path="/result/{job_id}",
+            result_max_bytes=256 * 1024 * 1024,
+            poll_interval_s=0.01,
+            poll_backoff_ceiling_s=0.02,
+            job_deadline_s=2.0,
+        )
+        model = ModelInfo(
+            id="stub/stability",
+            label="Stub Stability",
+            provider="stub",
+            price_usd=0.2,
+            needs_key=True,
+            needs_input=True,
+            output_kind="video",
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, model, "submit-ssrf.mp4", input_path=input_path)
+        self.assertNotIn("169.254", str(caught.exception))
+        self.assertNotIn("secret-key", str(caught.exception))
+
+    def test_stability_poll_url_ssrf_guarded(self):
+        # A vendor-supplied poll URL aimed at the metadata host is refused on the
+        # new http-code poll path with no key in the message.
+        input_path = self.render_input(name="poll-ssrf-input.png")
+        stub = StubAsyncVendor(mode="ssrf").start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(
+            stub,
+            body_encoding="multipart",
+            status_source="http_code",
+            result_fetch="bytes",
+            input_body_key="image",
+            submit_headers={"accept": "video/*"},
+            extra_body={"cfg_scale": 1.8},
+            poll_url_path=("polling_url",),
+        )
+        model = ModelInfo(
+            id="stub/stability",
+            label="Stub Stability",
+            provider="stub",
+            price_usd=0.2,
+            needs_key=True,
+            needs_input=True,
+            output_kind="video",
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, model, "poll-ssrf.mp4", input_path=input_path)
+        self.assertNotIn("169.254", str(caught.exception))
+        self.assertNotIn("secret-key", str(caught.exception))
 
     def test_url_download_refuses_internal_and_plaintext_hosts(self):
         for url in (

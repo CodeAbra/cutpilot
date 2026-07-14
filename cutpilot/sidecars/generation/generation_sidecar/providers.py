@@ -8,9 +8,11 @@ job queue only ever sees progress callbacks and a final result or error.
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import ipaddress
 import json
+import os
 import socket
 import ssl
 import time
@@ -215,9 +217,14 @@ class AsyncJobDescriptor:
     # the flat builder. Unset keeps the declarative flat body.
     build_body: Callable | None = None
     # An input image carried in the body: the field it goes under and how it is
-    # encoded ("" or "data_uri"). Empty means the row takes no input image.
+    # encoded ("" or "data_uri" for the JSON path, a multipart file part when
+    # body_encoding is "multipart"). Empty means the row takes no input image.
     input_body_key: str = ""
     input_encoding: str = ""
+    # How the submit body is encoded on the wire: a JSON object, or a
+    # multipart/form-data payload (a file part for the input image plus scalar
+    # parts from extra_body). The submit response is JSON either way.
+    body_encoding: str = "json"
     job_id_path: tuple = ("id",)
     poll_url_path: tuple | None = ("polling_url",)
     poll_path: str = ""
@@ -227,6 +234,10 @@ class AsyncJobDescriptor:
     poll_backoff_ceiling_s: float = 5.0
     request_timeout_s: int = 30
     job_deadline_s: float = 60.0
+    # How completion is signaled: a status field in each poll's JSON body, or
+    # the poll's HTTP status code (a running code such as 202 keeps polling; 200
+    # is terminal success and its body is the result when result_fetch="bytes").
+    status_source: str = "json_field"
     status_path: tuple = ("status",)
     success_states: tuple[str, ...] = ()
     failure_states: tuple[str, ...] = ()
@@ -689,6 +700,49 @@ def _vendor_json(url, method, headers, body, timeout):
     return json.loads(raw)
 
 
+def _vendor_poll_raw(url, method, headers, timeout, max_bytes):
+    """Poll a vendor whose completion is the HTTP status code, not a JSON field.
+
+    Runs the same gate as the JSON path (https or loopback http, pinned to a
+    validated address), returns (status_code, raw_bytes) without raising on the
+    status and without parsing JSON, and refuses a body larger than max_bytes.
+    Redirects are not followed on a poll."""
+    scheme, host, port, pinned_ip, path = _guard_url(url)
+    connection = _open_pinned(scheme, host, pinned_ip, port, timeout)
+    try:
+        connection.request(method, path, headers=dict(headers))
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read(max_bytes + 1)
+    finally:
+        connection.close()
+    if len(raw) > max_bytes:
+        raise RuntimeError("Vendor response is too large")
+    return status, raw
+
+
+def _vendor_submit_multipart(url, method, headers, body_bytes, content_type, timeout):
+    """Submit a multipart/form-data body through the same gate as the JSON
+    submit and return the parsed JSON submit response. A non-2xx raises a
+    generic error carrying neither the key nor the URL."""
+    scheme, host, port, pinned_ip, path = _guard_url(url)
+    connection = _open_pinned(scheme, host, pinned_ip, port, timeout)
+    try:
+        send_headers = dict(headers)
+        send_headers["Content-Type"] = content_type
+        connection.request(method, path, body=body_bytes, headers=send_headers)
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read(MAX_INPUT_FILE_BYTES + 1)
+    finally:
+        connection.close()
+    if len(raw) > MAX_INPUT_FILE_BYTES:
+        raise RuntimeError("Vendor response is too large")
+    if not (200 <= status < 300):
+        raise RuntimeError(f"vendor request failed ({status})")
+    return json.loads(raw)
+
+
 def _round_multiple(value: int, multiple: int) -> int:
     if multiple <= 0:
         return value
@@ -736,6 +790,35 @@ def _build_async_body(desc: AsyncJobDescriptor, request: GenerationRequest):
         body[desc.input_body_key] = _encode_input_data_uri(request.input_path)
     body.update(desc.extra_body)
     return body, width, height
+
+
+def _build_multipart_body(desc: AsyncJobDescriptor, request: GenerationRequest):
+    """Build a multipart/form-data submit body with the standard library: a
+    file part for the input image under input_body_key and a scalar part per
+    extra_body field. Returns (body_bytes, content_type, width, height) — a
+    distinct arity from the flat JSON builder's (body, width, height)."""
+    boundary = "cutpilot" + hashlib.sha256(os.urandom(32)).hexdigest()
+    parts: list[bytes] = []
+    for name, value in desc.extra_body.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
+        )
+    if desc.input_body_key and request.input_path:
+        image = _read_input_capped(request.input_path)
+        header = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{desc.input_body_key}"; '
+            f'filename="input.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode()
+        parts.append(header + image + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return b"".join(parts), content_type, request.width, request.height
 
 
 def _synth_progress(desc: AsyncJobDescriptor, resp, started: float, floor: float) -> float:
@@ -802,16 +885,30 @@ class AsyncJobProvider:
             raise JobCanceled()
         on_progress(0.02)
 
-        body, width, height = _build_async_body(desc, request)
         submit_url = desc.base_url + desc.submit_path.format(model=_slug(request.model))
         auth = {desc.auth_header: desc.auth_template.format(key=key)}
-        submit_resp = _vendor_json(
-            submit_url,
-            desc.submit_method,
-            {**desc.submit_headers, **auth},
-            body,
-            desc.request_timeout_s,
-        )
+        submit_headers = {**desc.submit_headers, **auth}
+        if desc.body_encoding == "multipart":
+            body_bytes, content_type, width, height = _build_multipart_body(
+                desc, request
+            )
+            submit_resp = _vendor_submit_multipart(
+                submit_url,
+                desc.submit_method,
+                submit_headers,
+                body_bytes,
+                content_type,
+                desc.request_timeout_s,
+            )
+        else:
+            body, width, height = _build_async_body(desc, request)
+            submit_resp = _vendor_json(
+                submit_url,
+                desc.submit_method,
+                submit_headers,
+                body,
+                desc.request_timeout_s,
+            )
 
         job_id = _select_optional(submit_resp, desc.job_id_path)
         if job_id is None:
@@ -833,6 +930,7 @@ class AsyncJobProvider:
         # so the first in-loop emission can never regress below it.
         emitted = 0.02
         last_poll = None
+        result_bytes = None
         success_states = {s.casefold() for s in desc.success_states}
         failure_states = {s.casefold() for s in desc.failure_states}
         while True:
@@ -843,18 +941,34 @@ class AsyncJobProvider:
                 raise RuntimeError(
                     f"{desc.provider} job did not complete within the time budget"
                 )
-            last_poll = _vendor_json(
-                poll_url, desc.poll_method, auth, None, desc.request_timeout_s
-            )
-            status = str(_select_optional(last_poll, desc.status_path) or "")
-            folded = status.casefold()
-            if folded in success_states:
-                break
-            if folded in failure_states:
-                detail = _select_optional(last_poll, desc.error_msg_path) or status
-                raise RuntimeError(f"{desc.provider}: {detail}")
-            # Any state we do not recognize keeps the loop polling; the whole-job
-            # deadline is the backstop for a vendor that never settles.
+            if desc.status_source == "http_code":
+                status_code, raw = _vendor_poll_raw(
+                    poll_url,
+                    desc.poll_method,
+                    auth,
+                    desc.request_timeout_s,
+                    desc.result_max_bytes,
+                )
+                if status_code == 200:
+                    # A 200 is terminal; its body is the result for a bytes row.
+                    result_bytes = raw
+                    break
+                # A running code (202) or anything else keeps polling; the
+                # whole-job deadline is the backstop.
+            else:
+                last_poll = _vendor_json(
+                    poll_url, desc.poll_method, auth, None, desc.request_timeout_s
+                )
+                status = str(_select_optional(last_poll, desc.status_path) or "")
+                folded = status.casefold()
+                if folded in success_states:
+                    break
+                if folded in failure_states:
+                    detail = _select_optional(last_poll, desc.error_msg_path) or status
+                    raise RuntimeError(f"{desc.provider}: {detail}")
+                # Any state we do not recognize keeps the loop polling; the
+                # whole-job deadline is the backstop for a vendor that never
+                # settles.
             emitted = _synth_progress(desc, last_poll, started, emitted)
             on_progress(emitted)
             _sleep_cancelable(interval, is_canceled)
@@ -864,17 +978,31 @@ class AsyncJobProvider:
             _fire_cancel(desc, last_poll, auth, desc.request_timeout_s)
             raise JobCanceled()
 
-        ref = _select_optional(last_poll, desc.result_ref_path)
-        if ref is None:
-            raise RuntimeError(f"{desc.provider} returned an unexpected response shape")
-        if desc.result_fetch == "url":
-            data = _download_capped(ref, desc.result_max_bytes, desc.request_timeout_s)
-        elif desc.result_fetch == "inline_b64":
-            data = base64.b64decode(ref)
+        if desc.result_fetch == "bytes":
+            # The result is the terminal poll's own body, already read under the
+            # per-row cap; the poll carried the key, so there is no separate
+            # pre-signed fetch.
+            if result_bytes is None:
+                raise RuntimeError(
+                    f"{desc.provider} returned an unexpected response shape"
+                )
+            data = result_bytes
         else:
-            raise RuntimeError(
-                f"{desc.provider} uses an unsupported result fetch mode"
-            )
+            ref = _select_optional(last_poll, desc.result_ref_path)
+            if ref is None:
+                raise RuntimeError(
+                    f"{desc.provider} returned an unexpected response shape"
+                )
+            if desc.result_fetch == "url":
+                data = _download_capped(
+                    ref, desc.result_max_bytes, desc.request_timeout_s
+                )
+            elif desc.result_fetch == "inline_b64":
+                data = base64.b64decode(ref)
+            else:
+                raise RuntimeError(
+                    f"{desc.provider} uses an unsupported result fetch mode"
+                )
         with open(request.out_path, "wb") as handle:
             handle.write(data)
         return GenerationResult(
