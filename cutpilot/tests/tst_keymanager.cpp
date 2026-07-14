@@ -93,6 +93,7 @@ private slots:
     void savingAKeyFiresTheStoredSignal();
     void noSecretLeaksIntoTheSurface();
     void keyStatusReflectsEnvironmentAndKeychain();
+    void editSurvivesARegistryRefresh();
 
 private:
     struct Rig {
@@ -346,6 +347,30 @@ void KeyManagerTest::keyStatusReflectsEnvironmentAndKeychain()
 
     keyedHost.stop();
     qunsetenv("OPENAI_API_KEY");
+}
+
+void KeyManagerTest::editSurvivesARegistryRefresh()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    rig.panel.openKeyEditor(kOpenai);
+    QLineEdit *editor = rig.editor();
+    QVERIFY(editor);
+    const QString partial = QStringLiteral("half-typed-key-in-progress-99");
+    editor->setText(partial);
+
+    // A registry refresh arrives while the key is still being typed.
+    QSignalSpy modelsSpy(&rig.coordinator,
+                         &ipc::GenerationCoordinator::modelsReady);
+    rig.coordinator.refreshModels();
+    QVERIFY(QTest::qWaitFor([&] { return modelsSpy.count() >= 1; }, 10000));
+
+    // The editor is still open and the typed key was not lost.
+    QLineEdit *after = rig.editor();
+    QVERIFY(after);
+    QVERIFY(after->isVisibleTo(&rig.panel));
+    QVERIFY(after->text() == partial);
 }
 
 QTEST_MAIN(KeyManagerTest)
