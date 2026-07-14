@@ -220,6 +220,18 @@ target_link_libraries(tst_quickmode PRIVATE Qt6::Test Qt6::Widgets
     cutpilot-render cutpilot-ipc)
 add_test(NAME app.quickmode COMMAND tst_quickmode)
 
+# The BYOK key surface over a live registry: the format guard, add / replace /
+# remove round trips through an in-memory store standing in for the keychain,
+# the four-state key status against environment and stored keys, masked entry,
+# the stored signal the rerun path hangs off, and the no-leakage guarantee.
+qt_add_executable(tst_keymanager tst_keymanager.cpp
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app/KeyManagerPanel.cpp)
+target_include_directories(tst_keymanager PRIVATE
+    ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
+target_link_libraries(tst_keymanager PRIVATE Qt6::Test Qt6::Widgets
+    cutpilot-ipc cutpilot-theme otf-secrets cutpilot-core)
+add_test(NAME app.keymanager COMMAND tst_keymanager)
+
 # The Node screen as one working whole: a palette pick lands on the live
 # canvas, generates through a real sidecar, shows on the minimap mapping,
 # undoes and redoes through the cluster's controls under one identity, and
