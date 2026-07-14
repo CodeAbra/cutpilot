@@ -388,7 +388,7 @@ void KeyManagerPanel::refreshRow(VendorRow *row)
             .arg(color.name()));
 
     if (row->needsKey) {
-        row->addReplace->setText((inKeychain || registryHasKey)
+        row->addReplace->setText(inKeychain
                                      ? QStringLiteral("Replace key…")
                                      : QStringLiteral("Add key…"));
         row->remove->setVisible(inKeychain);
