@@ -762,7 +762,9 @@ def _read_input_capped(path: str) -> bytes:
         with open(path, "rb") as handle:
             data = handle.read(MAX_INPUT_FILE_BYTES + 1)
     except OSError as exc:
-        raise RuntimeError(f"Input image could not be read: {exc}") from exc
+        # Generic message: the raw OSError string carries the local path, which
+        # would ride the job error/SSE. The traceback still reaches stderr.
+        raise RuntimeError("Input image could not be read") from exc
     if len(data) > MAX_INPUT_FILE_BYTES:
         raise RuntimeError("Input image is too large to process")
     return data
