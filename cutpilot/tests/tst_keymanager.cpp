@@ -94,6 +94,7 @@ private slots:
     void noSecretLeaksIntoTheSurface();
     void keyStatusReflectsEnvironmentAndKeychain();
     void editSurvivesARegistryRefresh();
+    void captureSurfaceImage();
 
 private:
     struct Rig {
@@ -371,6 +372,44 @@ void KeyManagerTest::editSurvivesARegistryRefresh()
     QVERIFY(after);
     QVERIFY(after->isVisibleTo(&rig.panel));
     QVERIFY(after->text() == partial);
+}
+
+void KeyManagerTest::captureSurfaceImage()
+{
+    // Opt-in rendering of the populated surface to an image, for a visual
+    // record without a pointer. The key is a presence-only placeholder and is
+    // never shown by the surface, so the image carries no secret.
+    const QByteArray outDir = qgetenv("CUTPILOT_SHOT_DIR");
+    if (outDir.isEmpty())
+        QSKIP("set CUTPILOT_SHOT_DIR to render the surface image");
+
+    qputenv("OPENAI_API_KEY", "env-presence-placeholder-000000");
+    ipc::SidecarHost keyedHost;
+    QSignalSpy readySpy(&keyedHost, &ipc::SidecarHost::ready);
+    QSignalSpy failedSpy(&keyedHost, &ipc::SidecarHost::failed);
+    keyedHost.start();
+    QTRY_VERIFY_WITH_TIMEOUT(readySpy.count() == 1 || failedSpy.count() == 1,
+                             15000);
+    if (failedSpy.count() > 0)
+        QFAIL(qPrintable(failedSpy.first().first().toString()));
+    ipc::GenerationClient keyedClient;
+    keyedClient.setEndpoint(keyedHost.port(), keyedHost.token());
+
+    Rig rig(&keyedClient);
+    rig.secrets.seed(kService, kOpenai,
+                     QStringLiteral("keychain-placeholder-1111"));
+    QVERIFY(waitForModels(rig));
+
+    rig.panel.resize(460, rig.panel.sizeHint().height());
+    rig.panel.ensurePolished();
+    QTest::qWait(50);
+    const QPixmap shot = rig.panel.grab();
+    const QString path =
+        QString::fromUtf8(outDir) + QStringLiteral("/byok-key-surface.png");
+    QVERIFY(shot.save(path));
+
+    keyedHost.stop();
+    qunsetenv("OPENAI_API_KEY");
 }
 
 QTEST_MAIN(KeyManagerTest)
