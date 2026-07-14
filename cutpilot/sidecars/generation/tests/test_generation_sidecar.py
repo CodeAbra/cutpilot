@@ -12,6 +12,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import tracemalloc
 import unittest
 import zlib
@@ -860,6 +861,143 @@ class SidecarTestCase(unittest.TestCase):
         self.assertTrue(desc.result_ref)
         self.assertIn(desc.result_fetch, {"inline_b64", "url"})
         self.assertIn(desc.size_mode, {"fixed_set", "passthrough"})
+
+    def _assert_async_descriptor_row_valid(self, provider, desc):
+        self.assertEqual(desc.provider, provider)
+        self.assertTrue(desc.base_url)
+        self.assertTrue(desc.auth_header)
+        self.assertTrue(desc.auth_template)
+        self.assertTrue(desc.submit_path)
+        self.assertTrue(desc.job_id_path)
+        self.assertTrue(desc.status_path)
+        self.assertTrue(desc.success_states)
+        self.assertTrue(desc.result_ref_path)
+        self.assertIn(desc.result_fetch, {"url", "inline_b64", "bytes"})
+
+    def test_async_descriptor_rows_are_well_formed(self):
+        for provider, desc in providers.ASYNC_JOB_DESCRIPTORS.items():
+            self._assert_async_descriptor_row_valid(provider, desc)
+
+        malformed = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["bfl"], success_states=()
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_async_descriptor_row_valid("bfl", malformed)
+
+    def test_async_failure_state_becomes_error_without_leaking_key(self):
+        self.set_env_key("BFL_API_KEY")
+        stub = StubAsyncVendor(mode="failure").start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_descriptor(stub)
+
+        final = self.run_to_done(
+            model="bfl/flux-2-pro-preview", prompt="x", width=1024, height=1024
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("quota exceeded", final["message"])
+        self.assertNotIn("test", final["message"])
+
+    def test_async_deadline_trips_cleanly(self):
+        self.set_env_key("BFL_API_KEY")
+        stub = StubAsyncVendor(mode="never").start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_descriptor(stub, job_deadline_s=0.2)
+
+        started = time.monotonic()
+        final = self.run_to_done(
+            model="bfl/flux-2-pro-preview", prompt="x", width=1024, height=1024
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(final["state"], "error")
+        self.assertLess(elapsed, 3.0)
+        self.assertFalse(final["result_path"])
+        self.assertNotIn("test", final["message"])
+
+    def test_async_cancel_between_polls_fires_cancel_and_settles_canceled(self):
+        self.set_env_key("BFL_API_KEY")
+        stub = StubAsyncVendor(mode="cancel").start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_descriptor(
+            stub, cancel_url_path=("cancel_url",), job_deadline_s=5.0
+        )
+
+        _, submitted = self.submit(
+            model="bfl/flux-2-pro-preview", prompt="x", width=1024, height=1024
+        )
+        job_id = submitted["job_id"]
+        canceled = []
+
+        def cancel_after_a_poll(snapshot):
+            if not canceled and stub.poll_count >= 1:
+                status, data = self.request("POST", f"/jobs/{job_id}/cancel")
+                self.assertEqual(status, 200)
+                canceled.append(True)
+            return True
+
+        snapshots = self.stream_events(job_id, cancel_after_a_poll)
+        self.assertTrue(stub.cancel_hit)
+        self.assertEqual(snapshots[-1]["state"], "canceled")
+        self.assertEqual(snapshots[-1]["message"], "Stopped")
+        self.assertNotIn("done", [snap["state"] for snap in snapshots])
+
+        # A descriptor with no cancel endpoint cancels cooperatively: the job
+        # still settles canceled and no cancel route is hit.
+        coop_stub = StubAsyncVendor(mode="cancel").start()
+        self.addCleanup(coop_stub.stop)
+        self.redirect_async_descriptor(
+            coop_stub, cancel_url_path=None, job_deadline_s=5.0
+        )
+        _, submitted2 = self.submit(
+            model="bfl/flux-2-pro-preview", prompt="y", width=1024, height=1024
+        )
+        job_id2 = submitted2["job_id"]
+        canceled2 = []
+
+        def cancel_coop(snapshot):
+            if not canceled2 and coop_stub.poll_count >= 1:
+                self.request("POST", f"/jobs/{job_id2}/cancel")
+                canceled2.append(True)
+            return True
+
+        snapshots2 = self.stream_events(job_id2, cancel_coop)
+        self.assertFalse(coop_stub.cancel_hit)
+        self.assertEqual(snapshots2[-1]["state"], "canceled")
+        self.assertEqual(snapshots2[-1]["message"], "Stopped")
+
+    def test_async_progress_is_monotonic_and_sub_one(self):
+        self.set_env_key("BFL_API_KEY")
+        stub = StubAsyncVendor(mode="ready", polls_before_ready=4).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_descriptor(stub)
+
+        progress = []
+        _, submitted = self.submit(
+            model="bfl/flux-2-pro-preview", prompt="x", width=512, height=512
+        )
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        self.assertEqual(snapshots[-1]["state"], "done")
+        self.assertEqual(progress, sorted(progress))
+        pre_terminal = [
+            snap["progress"] for snap in snapshots if snap["state"] != "done"
+        ]
+        self.assertTrue(all(value < 1.0 for value in pre_terminal))
+        self.assertEqual(snapshots[-1]["progress"], 1.0)
+
+    def test_async_poll_url_ssrf_guarded(self):
+        self.set_env_key("BFL_API_KEY")
+        stub = StubAsyncVendor(mode="ssrf").start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_descriptor(stub)
+
+        final = self.run_to_done(
+            model="bfl/flux-2-pro-preview", prompt="x", width=1024, height=1024
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertNotIn("169.254", final["message"])
+        self.assertNotIn("test", final["message"])
 
     def test_descriptor_table_rows_are_well_formed(self):
         for provider, desc in providers.SYNC_IMAGE_DESCRIPTORS.items():
