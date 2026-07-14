@@ -401,8 +401,13 @@ class SyncImageProvider:
 
         on_progress(0.9)
         leaf = parsed
-        for step in desc.result_ref:
-            leaf = leaf[step]
+        try:
+            for step in desc.result_ref:
+                leaf = leaf[step]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                f"{desc.provider} returned an unexpected response shape"
+            ) from exc
         if desc.result_fetch == "url":
             if is_canceled():
                 raise JobCanceled()
