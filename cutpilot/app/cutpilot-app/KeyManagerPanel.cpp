@@ -410,6 +410,7 @@ void KeyManagerPanel::saveKey(VendorRow *row)
     row->error->hide();
     refreshRow(row);
     m_coordinator->refreshModels();
+    runDeferredRebuild();
     emit keyStored(row->provider);
 }
 
@@ -425,6 +426,7 @@ void KeyManagerPanel::removeKey(VendorRow *row)
     row->error->hide();
     refreshRow(row);
     m_coordinator->refreshModels();
+    runDeferredRebuild();
     emit keyRemoved(row->provider);
 }
 

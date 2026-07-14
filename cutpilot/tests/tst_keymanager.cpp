@@ -5,6 +5,7 @@
 #include <QLineEdit>
 #include <QMap>
 #include <QPair>
+#include <QPointer>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -95,6 +96,7 @@ private slots:
     void noSecretLeaksIntoTheSurface();
     void keyStatusReflectsEnvironmentAndKeychain();
     void editSurvivesARegistryRefresh();
+    void saveFlushesADeferredRebuildWhenTheServiceIsDown();
     void captureSurfaceImage();
 
 private:
@@ -407,6 +409,38 @@ void KeyManagerTest::editSurvivesARegistryRefresh()
     QVERIFY(after);
     QVERIFY(after->isVisibleTo(&rig.panel));
     QVERIFY(after->text() == partial);
+}
+
+void KeyManagerTest::saveFlushesADeferredRebuildWhenTheServiceIsDown()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    rig.panel.openKeyEditor(kOpenai);
+    QLineEdit *editor = rig.editor();
+    QVERIFY(editor);
+    editor->setText(kPlausibleKey);
+
+    // A registry refresh lands while the editor is open, so a full rebuild is
+    // deferred until the interaction ends rather than tearing the row down.
+    QSignalSpy modelsSpy(&rig.coordinator,
+                         &ipc::GenerationCoordinator::modelsReady);
+    rig.coordinator.refreshModels();
+    QVERIFY(QTest::qWaitFor([&] { return modelsSpy.count() >= 1; }, 10000));
+
+    // The deferred rebuild recreates every row, so the open row's editor is
+    // what must be torn down once that rebuild finally runs.
+    QPointer<QLineEdit> deferredEditor = rig.editor();
+    QVERIFY(deferredEditor);
+
+    // The service drops before the save, so the post-save refresh is a no-op
+    // and no fresh registry can round-trip back. The deferred rebuild must
+    // still be flushed by the save itself.
+    rig.coordinator.serviceBecameUnavailable(QStringLiteral("offline"));
+    rig.save()->click();
+
+    QVERIFY(rig.secrets.hasSecret(kService, kOpenai));
+    QVERIFY(QTest::qWaitFor([&] { return deferredEditor.isNull(); }, 5000));
 }
 
 void KeyManagerTest::captureSurfaceImage()
