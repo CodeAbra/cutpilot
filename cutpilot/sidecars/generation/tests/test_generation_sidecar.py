@@ -962,7 +962,7 @@ class SidecarTestCase(unittest.TestCase):
         self.assertTrue(desc.status_path)
         self.assertTrue(desc.success_states)
         self.assertTrue(desc.result_ref_path)
-        self.assertIn(desc.result_fetch, {"url", "inline_b64", "bytes"})
+        self.assertIn(desc.result_fetch, {"url", "inline_b64"})
 
     def test_async_descriptor_rows_are_well_formed(self):
         for provider, desc in providers.ASYNC_JOB_DESCRIPTORS.items():

@@ -823,7 +823,9 @@ class AsyncJobProvider:
         elif desc.result_fetch == "inline_b64":
             data = base64.b64decode(ref)
         else:
-            data = ref
+            raise RuntimeError(
+                f"{desc.provider} uses an unsupported result fetch mode"
+            )
         with open(request.out_path, "wb") as handle:
             handle.write(data)
         return GenerationResult(
