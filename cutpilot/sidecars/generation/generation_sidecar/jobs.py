@@ -21,6 +21,10 @@ from .registry import ModelInfo
 
 TERMINAL_STATES = ("done", "error", "canceled")
 
+# The result file extension follows the model's output kind, so a fetched video
+# lands as a playable file rather than video bytes in a .png.
+_RESULT_EXTENSION = {"image": ".png", "video": ".mp4", "audio": ".mp3"}
+
 
 @dataclass
 class JobSnapshot:
@@ -106,13 +110,14 @@ class JobManager:
         with self._lock:
             self._jobs[job.id] = job
 
+        extension = _RESULT_EXTENSION.get(model.output_kind, ".png")
         request = GenerationRequest(
             model=model,
             prompt=prompt,
             width=width,
             height=height,
             seed=seed,
-            out_path=os.path.join(self._gen_dir, f"{job.id}.png"),
+            out_path=os.path.join(self._gen_dir, f"{job.id}{extension}"),
             input_path=input_path,
         )
         worker = threading.Thread(

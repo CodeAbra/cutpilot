@@ -22,6 +22,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from generation_sidecar import providers  # noqa: E402
+from generation_sidecar.jobs import JobManager  # noqa: E402
 from generation_sidecar.procedural import (  # noqa: E402
     MAX_INPUT_DIMENSION,
     decode_png,
@@ -58,6 +59,37 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # A small valid PNG the stub vendor hands back, inline as base64 or via a URL.
 STUB_PNG = _png_with_idat(4, 4, b"\x00" * ((4 * 3 + 1) * 4))
 STUB_PNG_B64 = base64.b64encode(STUB_PNG).decode()
+
+# A minimal blob whose first box is an ftyp header: enough to prove correct
+# bytes landed at a .mp4 path without a real decoder (CI has none). The bytes at
+# offset 4..8 are the ftyp tag a real container starts with.
+MP4_FTYP = b"ftyp"
+STUB_MP4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"\x00" * 16
+
+
+def _nest(path, value):
+    """Build a nested dict/list structure that places value at path — string
+    keys become dict levels and integers become list indices — so a stub can
+    emit any vendor's response shape from a descriptor's path tuple."""
+    if not path:
+        return value
+    head, rest = path[0], tuple(path[1:])
+    if isinstance(head, int):
+        items = [None] * (head + 1)
+        items[head] = _nest(rest, value)
+        return items
+    return {head: _nest(rest, value)}
+
+
+def _deep_merge(base, extra):
+    """Merge extra into base, recursing into shared dict subtrees so a nested
+    status path and a nested result path under one parent both survive."""
+    for key, value in extra.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
 
 
 class StubVendor:
@@ -137,10 +169,33 @@ class StubAsyncVendor:
     hit; 'ssrf' returns a polling URL aimed at the cloud-metadata host. Bound to
     127.0.0.1 on an ephemeral port."""
 
-    def __init__(self, mode="ready", polls_before_ready=2, polling_url=None):
+    def __init__(
+        self,
+        mode="ready",
+        polls_before_ready=2,
+        polling_url=None,
+        status_path=("status",),
+        running_value="Pending",
+        success_value="Ready",
+        failure_value="Error",
+        result_kind="image",
+        result_ref_path=None,
+        video_body=None,
+    ):
         self.mode = mode
         self.polls_before_ready = polls_before_ready
         self.injected_polling_url = polling_url
+        self.status_path = tuple(status_path)
+        self.running_value = running_value
+        self.success_value = success_value
+        self.failure_value = failure_value
+        self.result_kind = result_kind
+        if result_ref_path is None:
+            result_ref_path = (
+                ("result", "sample") if result_kind == "image" else ("output", 0)
+            )
+        self.result_ref_path = tuple(result_ref_path)
+        self.video_body = video_body if video_body is not None else STUB_MP4
         self.submit_headers = None
         self.submit_body = None
         self.submit_path = None
@@ -191,6 +246,9 @@ class StubAsyncVendor:
                 if self.path.startswith("/img/"):
                     self._reply(STUB_PNG, content_type="image/png")
                     return
+                if self.path.startswith("/video/"):
+                    self._reply(vendor.video_body, content_type="video/mp4")
+                    return
                 if self.path.startswith("/poll/"):
                     vendor.poll_headers = dict(self.headers)
                     vendor.poll_count += 1
@@ -205,30 +263,42 @@ class StubAsyncVendor:
         self.url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
+    def _running_payload(self):
+        return _nest(self.status_path, self.running_value)
+
+    def _success_payload(self):
+        if self.result_kind == "video":
+            url = f"{self.url}/video/1.mp4"
+        else:
+            url = f"{self.url}/img/1.png"
+        payload = _nest(self.status_path, self.success_value)
+        return _deep_merge(payload, _nest(self.result_ref_path, url))
+
     def _poll_payload(self):
         if self.mode == "failure":
-            return {"status": "Error", "details": "quota exceeded"}
+            payload = _nest(self.status_path, self.failure_value)
+            payload["details"] = "quota exceeded"
+            return payload
         if self.mode == "never":
-            return {"status": "Pending"}
+            return self._running_payload()
         if self.mode == "cancel":
-            return {"status": "Pending", "cancel_url": f"{self.url}/cancel/1"}
+            payload = self._running_payload()
+            payload["cancel_url"] = f"{self.url}/cancel/1"
+            return payload
         if self.mode == "zero_progress":
             # Report a freshly-queued job at progress 0.0 for a few polls, then
             # a ready result URL: exercises the submit->poll progress seam.
             if self.poll_count <= self.polls_before_ready:
-                return {"status": "Pending", "progress": 0.0}
-            return {
-                "status": "Ready",
-                "result": {"sample": f"{self.url}/img/1.png"},
-            }
+                payload = self._running_payload()
+                payload["progress"] = 0.0
+                return payload
+            return self._success_payload()
         # ready / ssrf: report progress while pending, then a ready result URL.
         if self.poll_count <= self.polls_before_ready:
-            fraction = self.poll_count / (self.polls_before_ready + 1)
-            return {"status": "Pending", "progress": fraction}
-        return {
-            "status": "Ready",
-            "result": {"sample": f"{self.url}/img/1.png"},
-        }
+            payload = self._running_payload()
+            payload["progress"] = self.poll_count / (self.polls_before_ready + 1)
+            return payload
+        return self._success_payload()
 
     def start(self):
         self._thread.start()
@@ -857,6 +927,181 @@ class SidecarTestCase(unittest.TestCase):
                 providers.provider_for(model_by_id("bfl/flux-2-pro-preview")),
                 providers._async_job,
             )
+
+    def _wait_job(self, job, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        version = 0
+        while time.monotonic() < deadline:
+            snapshot = job.wait_newer(version, timeout=0.5)
+            version = snapshot.version
+            if snapshot.state in ("done", "error", "canceled"):
+                return snapshot
+        raise AssertionError("job did not settle in time")
+
+    def _run_async_direct(self, desc, model, out_name, **request_overrides):
+        out_path = os.path.join(self.gen_dir, out_name)
+        fields = {
+            "prompt": "a lighthouse at dusk",
+            "width": 1024,
+            "height": 1024,
+            "seed": 7,
+        }
+        fields.update(request_overrides)
+        request = providers.GenerationRequest(
+            model=model, out_path=out_path, **fields
+        )
+        progress = []
+        with patch.dict(
+            providers.ASYNC_JOB_DESCRIPTORS, {"stub": desc}
+        ), patch.object(providers.keys, "lookup_key", return_value="secret-key"):
+            result = providers.AsyncJobProvider().generate(
+                request, on_progress=progress.append, is_canceled=lambda: False
+            )
+        return result, progress
+
+    def _stub_async_descriptor(self, stub, **overrides):
+        fields = dict(
+            provider="stub",
+            base_url=stub.url,
+            auth_header="x-key",
+            auth_template="{key}",
+            success_states=("Ready",),
+            failure_states=("Error", "Failed"),
+            result_ref_path=("output", 0),
+            result_fetch="url",
+            result_max_bytes=256 * 1024 * 1024,
+            poll_interval_s=0.01,
+            poll_backoff_ceiling_s=0.02,
+            job_deadline_s=2.0,
+        )
+        fields.update(overrides)
+        return providers.AsyncJobDescriptor(**fields)
+
+    def test_async_slug_rides_the_body_when_configured(self):
+        stub = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(stub, model_body_key="model")
+        model = ModelInfo(
+            id="stub/video-1",
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            model_slug="stub-video-slug",
+            output_kind="video",
+        )
+        result, _ = self._run_async_direct(desc, model, "slug-in-body.mp4")
+        self.assertEqual(stub.submit_body["model"], providers._slug(model))
+        with open(result.path, "rb") as handle:
+            self.assertEqual(handle.read()[4:8], MP4_FTYP)
+
+        # A descriptor without model_body_key omits the model key (BFL parity).
+        stub2 = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(stub2.stop)
+        desc2 = self._stub_async_descriptor(stub2, model_body_key=None)
+        self._run_async_direct(desc2, model, "no-slug.mp4")
+        self.assertNotIn("model", stub2.submit_body)
+
+    def test_result_extension_follows_output_kind(self):
+        manager = JobManager(self.gen_dir)
+
+        video_stub = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(video_stub.stop)
+        video_desc = self._stub_async_descriptor(video_stub)
+        video_model = ModelInfo(
+            id="stub/video-1",
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            output_kind="video",
+        )
+        with patch.dict(
+            providers.ASYNC_JOB_DESCRIPTORS, {"stub": video_desc}
+        ), patch.object(providers.keys, "lookup_key", return_value="secret-key"):
+            job = manager.submit(video_model, "a lighthouse", 1024, 1024, 7)
+            final = self._wait_job(job)
+        self.assertEqual(final.state, "done")
+        self.assertTrue(final.result_path.endswith(".mp4"))
+        with open(final.result_path, "rb") as handle:
+            self.assertEqual(handle.read()[4:8], MP4_FTYP)
+
+        image_stub = StubAsyncVendor(mode="ready", polls_before_ready=1).start()
+        self.addCleanup(image_stub.stop)
+        image_desc = self._stub_async_descriptor(
+            image_stub, result_ref_path=("result", "sample")
+        )
+        image_model = ModelInfo(
+            id="stub/image-1",
+            label="Stub Image",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            output_kind="image",
+        )
+        with patch.dict(
+            providers.ASYNC_JOB_DESCRIPTORS, {"stub": image_desc}
+        ), patch.object(providers.keys, "lookup_key", return_value="secret-key"):
+            job = manager.submit(image_model, "a lighthouse", 1024, 1024, 7)
+            final = self._wait_job(job)
+        self.assertEqual(final.state, "done")
+        self.assertTrue(final.result_path.endswith(".png"))
+        with open(final.result_path, "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+
+    def test_result_cap_is_per_row(self):
+        row_cap = 8192
+        admitted_body = STUB_MP4 + b"\x00" * (4096 - len(STUB_MP4))
+        oversized_body = STUB_MP4 + b"\x00" * (row_cap + 4096)
+        model = ModelInfo(
+            id="stub/video-1",
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            output_kind="video",
+        )
+
+        # A body larger than the image default cap but within the widened row
+        # cap is admitted (the image default is shrunk here so the boundary is
+        # exercised without moving megabytes).
+        admit_stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=1,
+            result_kind="video",
+            video_body=admitted_body,
+        ).start()
+        self.addCleanup(admit_stub.stop)
+        admit_desc = self._stub_async_descriptor(
+            admit_stub, result_max_bytes=row_cap
+        )
+        with patch.object(providers, "MAX_INPUT_FILE_BYTES", 1024):
+            result, _ = self._run_async_direct(admit_desc, model, "cap-ok.mp4")
+        self.assertGreater(len(admitted_body), 1024)
+        with open(result.path, "rb") as handle:
+            self.assertEqual(len(handle.read()), len(admitted_body))
+
+        # A body past the row cap is refused with a generic error and no key.
+        refuse_stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=1,
+            result_kind="video",
+            video_body=oversized_body,
+        ).start()
+        self.addCleanup(refuse_stub.stop)
+        refuse_desc = self._stub_async_descriptor(
+            refuse_stub, result_max_bytes=row_cap
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(refuse_desc, model, "cap-refused.mp4")
+        self.assertIn("too large", str(caught.exception))
+        self.assertNotIn("secret-key", str(caught.exception))
 
     def test_url_download_refuses_internal_and_plaintext_hosts(self):
         for url in (

@@ -35,6 +35,12 @@ from .registry import ModelInfo
 # approximates the latency profile of a hosted model.
 PROCEDURAL_BAND_PAUSE_S = 0.02
 
+# A valid input PNG at the largest accepted dimensions still compresses well
+# under this, so the raw read is bounded before the file ever reaches the
+# decoder — a truly huge file on disk is refused without loading it whole. It is
+# also the default per-row result cap for image jobs; video rows widen it.
+MAX_INPUT_FILE_BYTES = 64 * 1024 * 1024
+
 
 class MissingKeyError(Exception):
     def __init__(self, provider: str):
@@ -188,6 +194,11 @@ class AsyncJobDescriptor:
     submit_path: str = "/{model}"
     submit_method: str = "POST"
     submit_headers: dict = field(default_factory=dict)
+    # When set, the model slug is placed in the request body under this key
+    # (video vendors post to a fixed path and name the model in the body). The
+    # slug is per-model registry data, so it cannot live in the static per-row
+    # extra_body. None keeps the slug on the submit path (its default place).
+    model_body_key: str | None = None
     prompt_key: str = "prompt"
     size_mode: str = "wh_fields"
     width_key: str = "width"
@@ -215,6 +226,10 @@ class AsyncJobDescriptor:
     result_kind: str = "image"
     result_ref_path: tuple = ("result", "sample")
     result_fetch: str = "url"
+    # A per-row bound on the fetched result so a valid clip larger than the
+    # image cap is not refused as too large; still a hard bound, never unlimited.
+    # Image rows keep the default; video rows widen it.
+    result_max_bytes: int = MAX_INPUT_FILE_BYTES
     cancel_url_path: tuple | None = None
     expected_duration_s: float = 4.0
 
@@ -530,12 +545,6 @@ class SyncImageProvider:
         )
 
 
-# A valid input PNG at the largest accepted dimensions still compresses well
-# under this, so the raw read is bounded before the file ever reaches the
-# decoder — a truly huge file on disk is refused without loading it whole.
-MAX_INPUT_FILE_BYTES = 64 * 1024 * 1024
-
-
 def _decode_input(request: GenerationRequest) -> tuple[int, int, list[bytes]]:
     try:
         with open(request.input_path, "rb") as handle:
@@ -682,6 +691,8 @@ def _build_async_body(desc: AsyncJobDescriptor, request: GenerationRequest):
     width = _round_multiple(request.width, desc.size_multiple)
     height = _round_multiple(request.height, desc.size_multiple)
     body = {desc.prompt_key: request.prompt}
+    if desc.model_body_key is not None:
+        body[desc.model_body_key] = _slug(request.model)
     if desc.size_mode == "wh_fields":
         body[desc.width_key] = width
         body[desc.height_key] = height
@@ -821,7 +832,7 @@ class AsyncJobProvider:
         if ref is None:
             raise RuntimeError(f"{desc.provider} returned an unexpected response shape")
         if desc.result_fetch == "url":
-            data = _download_capped(ref, MAX_INPUT_FILE_BYTES, desc.request_timeout_s)
+            data = _download_capped(ref, desc.result_max_bytes, desc.request_timeout_s)
         elif desc.result_fetch == "inline_b64":
             data = base64.b64decode(ref)
         else:
