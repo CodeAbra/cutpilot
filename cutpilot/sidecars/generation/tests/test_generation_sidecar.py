@@ -3,9 +3,11 @@
 import base64
 import dataclasses
 import hashlib
+import ipaddress
 import json
 import http.client
 import os
+import socket
 import struct
 import sys
 import tempfile
@@ -63,9 +65,10 @@ class StubVendor:
     In url mode it also serves the returned PNG at /img/<name>.png. Bound to
     127.0.0.1 on an ephemeral port; never reaches the network."""
 
-    def __init__(self, status=200, body=None):
+    def __init__(self, status=200, body=None, redirect_location=None):
         self.status = status
         self.body = body if body is not None else {"data": [{"b64_json": STUB_PNG_B64}]}
+        self.redirect_location = redirect_location
         self.last_headers = None
         self.last_body = None
         vendor = self
@@ -93,6 +96,12 @@ class StubVendor:
 
             def do_GET(self):
                 if self.path.startswith("/img/"):
+                    if vendor.redirect_location is not None:
+                        self.send_response(302)
+                        self.send_header("Location", vendor.redirect_location)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
                     self.send_response(200)
                     self.send_header("Content-Type", "image/png")
                     self.send_header("Content-Length", str(len(STUB_PNG)))
@@ -518,6 +527,87 @@ class SidecarTestCase(unittest.TestCase):
             stub.url + "/img/x.png", providers.MAX_INPUT_FILE_BYTES, timeout=5
         )
         self.assertTrue(data.startswith(PNG_SIGNATURE))
+
+    def test_url_download_refuses_a_redirect_to_an_internal_host(self):
+        # A host that passes the gate but 302s to the cloud-metadata endpoint
+        # must have the redirect target re-validated and refused, not followed.
+        stub = StubVendor(
+            redirect_location="http://169.254.169.254/latest/meta-data/"
+        )
+        stub.start()
+        self.addCleanup(stub.stop)
+        with self.assertRaises(RuntimeError) as caught:
+            providers._download_capped(
+                stub.url + "/img/x.png", providers.MAX_INPUT_FILE_BYTES, timeout=5
+            )
+        self.assertNotIn("meta-data", str(caught.exception))
+
+    def test_url_download_pins_the_validated_address(self):
+        # The address validated by the guard must be the exact address the
+        # transport connects to: no second, unvalidated resolution may run
+        # between the check and the connect (the DNS-rebinding window).
+        validated_ip = "93.184.216.34"
+
+        class _ConnectReached(Exception):
+            pass
+
+        connected = []
+
+        def fake_getaddrinfo(host, port=None, *args, **kwargs):
+            try:
+                ipaddress.ip_address(host)
+                family = (
+                    socket.AF_INET6 if ":" in host else socket.AF_INET
+                )
+                return [(family, socket.SOCK_STREAM, 6, "", (host, port or 0))]
+            except ValueError:
+                pass
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    (validated_ip, port or 0),
+                )
+            ]
+
+        def fake_create_connection(address, *args, **kwargs):
+            connected.append(address[0])
+            raise _ConnectReached()
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo), patch(
+            "socket.create_connection", side_effect=fake_create_connection
+        ):
+            with self.assertRaises(_ConnectReached):
+                providers._download_capped(
+                    "https://rebind.example/x.png",
+                    providers.MAX_INPUT_FILE_BYTES,
+                    timeout=5,
+                )
+        self.assertEqual(connected, [validated_ip])
+
+    def test_url_download_refuses_ipv4_mapped_internal_address(self):
+        # An IPv4-mapped IPv6 literal must be classified by its embedded IPv4
+        # regardless of interpreter version.
+        def fake_getaddrinfo(host, port=None, *args, **kwargs):
+            return [
+                (
+                    socket.AF_INET6,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("::ffff:169.254.169.254", port or 0, 0, 0),
+                )
+            ]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            with self.assertRaises(RuntimeError):
+                providers._download_capped(
+                    "https://mapped.example/x.png",
+                    providers.MAX_INPUT_FILE_BYTES,
+                    timeout=5,
+                )
 
     def _assert_descriptor_row_valid(self, provider, desc):
         self.assertEqual(desc.provider, provider)
