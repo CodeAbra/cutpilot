@@ -93,6 +93,20 @@ MODELS: tuple[ModelInfo, ...] = (
         model_slug="seedream-4-0",
         unverified=True,
     ),
+    # The exact slug, the poll-status enumeration beyond Ready/Error/Failed, and
+    # the width/height step constraint are unconfirmed against a live key; kept
+    # unverified until a real generation settles them.
+    ModelInfo(
+        id="bfl/flux-2-pro-preview",
+        label="Flux 2 Pro",
+        provider="bfl",
+        price_usd=0.05,
+        needs_key=True,
+        model_slug="flux-2-pro-preview",
+        category="image",
+        output_kind="image",
+        unverified=True,
+    ),
 )
 
 

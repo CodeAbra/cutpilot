@@ -19,6 +19,7 @@ ENV_VARS: dict[str, str] = {
     "recraft": "RECRAFT_API_TOKEN",
     "google": "GEMINI_API_KEY",
     "bytedance": "ARK_API_KEY",
+    "bfl": "BFL_API_KEY",
 }
 
 

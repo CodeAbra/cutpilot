@@ -219,7 +219,46 @@ class AsyncJobDescriptor:
     expected_duration_s: float = 4.0
 
 
-ASYNC_JOB_DESCRIPTORS: dict[str, AsyncJobDescriptor] = {}
+ASYNC_JOB_DESCRIPTORS: dict[str, AsyncJobDescriptor] = {
+    # The base host, the exact slug substituted into submit_path, the size
+    # multiple, and the progress/details field names are provisional pending a
+    # live-key confirmation; each is row data, so confirming one is a one-line
+    # edit. Submit and poll both send the raw key in an x-key header (not
+    # Bearer); the result URL is fetched with no auth header.
+    "bfl": AsyncJobDescriptor(
+        provider="bfl",
+        base_url="https://api.bfl.ai/v1",
+        auth_header="x-key",
+        auth_template="{key}",
+        submit_path="/{model}",
+        prompt_key="prompt",
+        size_mode="wh_fields",
+        size_multiple=32,
+        job_id_path=("id",),
+        poll_url_path=("polling_url",),
+        poll_interval_s=0.5,
+        poll_backoff_factor=1.5,
+        poll_backoff_ceiling_s=3.0,
+        request_timeout_s=30,
+        job_deadline_s=60.0,
+        status_path=("status",),
+        success_states=("Ready",),
+        failure_states=(
+            "Error",
+            "Failed",
+            "Request Moderated",
+            "Content Moderated",
+            "Task not found",
+        ),
+        progress_path=("progress",),
+        error_msg_path=("details",),
+        result_kind="image",
+        result_ref_path=("result", "sample"),
+        result_fetch="url",
+        cancel_url_path=None,
+        expected_duration_s=4.0,
+    ),
+}
 
 # The dimension range a rounded async request size is clamped into, matching
 # the server's accepted bounds, and the slice a cancelable sleep re-checks in.

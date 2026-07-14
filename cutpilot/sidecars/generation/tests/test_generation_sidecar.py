@@ -142,6 +142,7 @@ class StubAsyncVendor:
         self.injected_polling_url = polling_url
         self.submit_headers = None
         self.submit_body = None
+        self.submit_path = None
         self.poll_headers = None
         self.poll_count = 0
         self.cancel_hit = False
@@ -172,6 +173,7 @@ class StubAsyncVendor:
                     self._reply({"ok": True})
                     return
                 vendor.submit_headers = dict(self.headers)
+                vendor.submit_path = self.path
                 try:
                     vendor.submit_body = json.loads(raw) if raw else {}
                 except json.JSONDecodeError:
@@ -450,6 +452,20 @@ class SidecarTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def redirect_async_descriptor(self, stub, **overrides):
+        """Point the BFL async descriptor at an in-process stub with fast
+        timings for the duration of the test, leaving every other field intact."""
+        replaced = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["bfl"],
+            base_url=stub.url,
+            poll_interval_s=0.01,
+            poll_backoff_ceiling_s=0.02,
+            **overrides,
+        )
+        patcher = patch.dict(providers.ASYNC_JOB_DESCRIPTORS, {"bfl": replaced})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_openai_request_stays_byte_identical(self):
         # The refactor must not change the bytes OpenAI receives: same four
         # body keys in the same order, no response_format, fixed-set sizing.
@@ -652,6 +668,74 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("Authorization", stub.poll_headers)
         self.assertEqual(progress, sorted(progress))
         self.assertTrue(all(value < 1.0 for value in progress))
+
+    def test_async_job_submit_poll_ready_writes_image(self):
+        self.set_env_key("BFL_API_KEY")
+        stub = StubAsyncVendor(mode="ready", polls_before_ready=2).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_descriptor(stub)
+
+        progress = []
+        status, submitted = self.submit(
+            model="bfl/flux-2-pro-preview",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertTrue(content.startswith(PNG_SIGNATURE))
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertEqual((final["width"], final["height"]), (1024, 1024))
+        self.assertAlmostEqual(final["cost_usd"], 0.05)
+        self.assertEqual(progress, sorted(progress))
+
+        # The slug rides the submit path; the raw key rides an x-key header on
+        # both submit and poll, and no Authorization header is ever sent.
+        self.assertEqual(stub.submit_path, "/flux-2-pro-preview")
+        self.assertEqual(stub.submit_body["prompt"], "a lighthouse at dusk")
+        self.assertEqual(stub.submit_body["width"], 1024)
+        self.assertEqual(stub.submit_body["height"], 1024)
+        self.assertEqual(stub.submit_headers.get("x-key"), "test")
+        self.assertNotIn("Authorization", stub.submit_headers)
+        self.assertEqual(stub.poll_headers.get("x-key"), "test")
+        self.assertNotIn("Authorization", stub.poll_headers)
+
+        # A size off the 32-grid is rounded to the nearest multiple before submit
+        # and the rounded size is what the result reports.
+        rounding_stub = StubAsyncVendor(mode="ready", polls_before_ready=1).start()
+        self.addCleanup(rounding_stub.stop)
+        self.redirect_async_descriptor(rounding_stub)
+        rounded_final = self.run_to_done(
+            model="bfl/flux-2-pro-preview",
+            prompt="a wide vista",
+            width=1000,
+            height=1000,
+        )
+        self.assertEqual(rounded_final["state"], "done")
+        self.assertEqual(rounding_stub.submit_body["width"], 992)
+        self.assertEqual(rounding_stub.submit_body["height"], 992)
+        self.assertEqual((rounded_final["width"], rounded_final["height"]), (992, 992))
+
+    def test_bfl_is_excluded_from_models_yet_resolves(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        ids = {model["id"] for model in data["models"]}
+        self.assertNotIn("bfl/flux-2-pro-preview", ids)
+
+        # A direct submission still resolves the row: an absent key returns the
+        # missing-key refusal, not the unknown-model rejection.
+        status, data = self.submit(model="bfl/flux-2-pro-preview")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "missing_key")
+        self.assertEqual(data["provider"], "bfl")
 
     def test_unverified_model_is_excluded_from_models_yet_resolves(self):
         status, data = self.request("GET", "/models")
