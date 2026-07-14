@@ -22,6 +22,11 @@ class ModelInfo:
     # reads the same flags to gate a run before it is ever submitted.
     needs_prompt: bool = True
     needs_input: bool = False
+    # The vendor slug placed in the request body's "model" field. Empty means
+    # derive it from the id's part after the provider prefix.
+    model_slug: str = ""
+    category: str = "image"
+    output_kind: str = "image"
 
 
 MODELS: tuple[ModelInfo, ...] = (

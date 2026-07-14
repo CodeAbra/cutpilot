@@ -1,5 +1,7 @@
 """End-to-end tests for the generation sidecar over a live loopback server."""
 
+import base64
+import dataclasses
 import hashlib
 import json
 import http.client
@@ -11,9 +13,12 @@ import threading
 import tracemalloc
 import unittest
 import zlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from generation_sidecar import providers  # noqa: E402
 from generation_sidecar.procedural import (  # noqa: E402
     MAX_INPUT_DIMENSION,
     decode_png,
@@ -45,6 +50,70 @@ def _png_with_idat(width: int, height: int, raw: bytes, color: int = 2) -> bytes
 
 TOKEN = "test-token"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+# A small valid PNG the stub vendor hands back, inline as base64 or via a URL.
+STUB_PNG = _png_with_idat(4, 4, b"\x00" * ((4 * 3 + 1) * 4))
+STUB_PNG_B64 = base64.b64encode(STUB_PNG).decode()
+
+
+class StubVendor:
+    """An in-process stand-in for a sync-image vendor. Records the last POST it
+    received (headers + parsed JSON body) and returns a canned (status, json).
+    In url mode it also serves the returned PNG at /img/<name>.png. Bound to
+    127.0.0.1 on an ephemeral port; never reaches the network."""
+
+    def __init__(self, status=200, body=None):
+        self.status = status
+        self.body = body if body is not None else {"data": [{"b64_json": STUB_PNG_B64}]}
+        self.last_headers = None
+        self.last_body = None
+        vendor = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length > 0 else b""
+                vendor.last_headers = dict(self.headers)
+                try:
+                    vendor.last_body = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    vendor.last_body = None
+                payload = json.dumps(vendor.body).encode()
+                self.send_response(vendor.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path.startswith("/img/"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(STUB_PNG)))
+                    self.end_headers()
+                    self.wfile.write(STUB_PNG)
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._server.shutdown()
+        self._server.server_close()
 
 
 class SidecarTestCase(unittest.TestCase):
@@ -254,6 +323,59 @@ class SidecarTestCase(unittest.TestCase):
         path = os.path.join(self.gen_dir, name)
         render_png("an input plate", seed, width, height, path)
         return path
+
+    def set_env_key(self, name, value="test"):
+        os.environ[name] = value
+        self.addCleanup(lambda: os.environ.pop(name, None))
+
+    def redirect_descriptor(self, provider, stub, **overrides):
+        """Point a provider's descriptor at an in-process stub for the duration
+        of the test, leaving every other field intact."""
+        base_row = providers.SYNC_IMAGE_DESCRIPTORS[provider]
+        replaced = dataclasses.replace(base_row, base_url=stub.url, **overrides)
+        patcher = patch.dict(
+            providers.SYNC_IMAGE_DESCRIPTORS, {provider: replaced}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_openai_request_stays_byte_identical(self):
+        # The refactor must not change the bytes OpenAI receives: same four
+        # body keys in the same order, no response_format, fixed-set sizing.
+        self.set_env_key("OPENAI_API_KEY")
+        stub = StubVendor().start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("openai", stub)
+
+        final = self.run_to_done(
+            model="openai/gpt-image-1",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(stub.last_headers.get("Authorization"), "Bearer test")
+        self.assertEqual(stub.last_headers.get("Content-Type"), "application/json")
+        self.assertEqual(
+            stub.last_body,
+            {
+                "model": "gpt-image-1",
+                "prompt": "a lighthouse at dusk",
+                "size": "1024x1024",
+                "n": 1,
+            },
+        )
+        self.assertNotIn("response_format", stub.last_body)
+        self.assertEqual(list(stub.last_body.keys()), ["model", "prompt", "size", "n"])
+
+        landscape = self.run_to_done(
+            model="openai/gpt-image-1",
+            prompt="a wide vista",
+            width=1536,
+            height=1024,
+        )
+        self.assertEqual(landscape["state"], "done")
+        self.assertEqual(stub.last_body["size"], "1536x1024")
 
     def test_models_report_prompt_and_input_needs(self):
         status, data = self.request("GET", "/models")

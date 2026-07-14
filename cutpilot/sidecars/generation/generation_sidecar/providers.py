@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import keys
 from .procedural import (
@@ -29,9 +29,6 @@ from .registry import ModelInfo
 # Pacing between procedural render bands: keeps a cancellation window open and
 # approximates the latency profile of a hosted model.
 PROCEDURAL_BAND_PAUSE_S = 0.02
-
-OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
-OPENAI_TIMEOUT_S = 120
 
 
 class MissingKeyError(Exception):
@@ -100,15 +97,64 @@ class ProceduralProvider:
         )
 
 
-class OpenAiImagesProvider:
-    """OpenAI Images API. The key is the user's own (env or keychain)."""
+@dataclass(frozen=True)
+class SyncImageDescriptor:
+    """A vendor's synchronous image endpoint expressed as data.
 
-    # The API accepts a fixed set of sizes; the closest aspect match is used.
-    SIZES = ((1024, 1024), (1536, 1024), (1024, 1536))
+    One row per provider drives the shared adapter: where to POST, how to
+    authenticate, how sizes are chosen, what extra body fields to send, and
+    how to read the image back out of the response.
+    """
 
-    def _pick_size(self, width: int, height: int) -> tuple[int, int]:
-        aspect = width / max(1, height)
-        return min(self.SIZES, key=lambda s: abs(s[0] / s[1] - aspect))
+    provider: str
+    base_url: str
+    generate_path: str = "/images/generations"
+    auth_header: str = "Authorization"
+    auth_template: str = "Bearer {key}"
+    size_mode: str = "passthrough"
+    sizes: tuple[tuple[int, int], ...] = ()
+    size_format: str = "{w}x{h}"
+    extra_body: dict = field(default_factory=dict)
+    result_ref: tuple = ()
+    result_fetch: str = "inline_b64"
+    timeout_s: int = 120
+
+
+SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
+    "openai": SyncImageDescriptor(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        generate_path="/images/generations",
+        auth_header="Authorization",
+        auth_template="Bearer {key}",
+        size_mode="fixed_set",
+        sizes=((1024, 1024), (1536, 1024), (1024, 1536)),
+        extra_body={"n": 1},
+        result_ref=("data", 0, "b64_json"),
+        result_fetch="inline_b64",
+        timeout_s=120,
+    ),
+}
+
+
+def _slug(model: ModelInfo) -> str:
+    return model.model_slug or model.id.split("/", 1)[1]
+
+
+def _resolve_size(
+    desc: SyncImageDescriptor, width: int, height: int
+) -> tuple[int, int]:
+    if desc.size_mode == "passthrough":
+        return width, height
+    # fixed_set: the endpoint accepts only a fixed set; pick the closest aspect.
+    aspect = width / max(1, height)
+    return min(desc.sizes, key=lambda s: abs(s[0] / s[1] - aspect))
+
+
+class SyncImageProvider:
+    """One adapter for every synchronous image vendor, driven by a descriptor
+    row picked by the model's provider. The key is the user's own (env or
+    keychain) and never appears in a progress update, error, or result."""
 
     def generate(
         self,
@@ -116,50 +162,59 @@ class OpenAiImagesProvider:
         on_progress: ProgressFn,
         is_canceled: CanceledFn,
     ) -> GenerationResult:
-        key = keys.lookup_key("openai")
+        desc = SYNC_IMAGE_DESCRIPTORS[request.model.provider]
+        key = keys.lookup_key(desc.provider)
         if not key:
-            raise MissingKeyError("openai")
+            raise MissingKeyError(desc.provider)
 
-        width, height = self._pick_size(request.width, request.height)
-        payload = json.dumps(
-            {
-                "model": "gpt-image-1",
-                "prompt": request.prompt,
-                "size": f"{width}x{height}",
-                "n": 1,
-            }
-        ).encode()
+        width, height = _resolve_size(desc, request.width, request.height)
+        body = {
+            "model": _slug(request.model),
+            "prompt": request.prompt,
+            "size": desc.size_format.format(w=width, h=height),
+            **desc.extra_body,
+        }
+        payload = json.dumps(body).encode()
 
         on_progress(0.05)
         http_request = urllib.request.Request(
-            OPENAI_IMAGES_URL,
+            desc.base_url + desc.generate_path,
             data=payload,
             headers={
-                "Authorization": f"Bearer {key}",
+                desc.auth_header: desc.auth_template.format(key=key),
                 "Content-Type": "application/json",
             },
             method="POST",
         )
         try:
-            with urllib.request.urlopen(http_request, timeout=OPENAI_TIMEOUT_S) as response:
-                body = json.loads(response.read())
+            with urllib.request.urlopen(
+                http_request, timeout=desc.timeout_s
+            ) as response:
+                parsed = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
                 detail = json.loads(exc.read()).get("error", {}).get("message", "")
             except Exception:
                 pass
-            raise RuntimeError(f"OpenAI request failed ({exc.code}): {detail}") from exc
+            raise RuntimeError(
+                f"{desc.provider} request failed ({exc.code}): {detail}"
+            ) from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
+            raise RuntimeError(
+                f"{desc.provider} request failed: {exc.reason}"
+            ) from exc
 
         if is_canceled():
             raise JobCanceled()
 
         on_progress(0.9)
-        image_b64 = body["data"][0]["b64_json"]
+        leaf = parsed
+        for step in desc.result_ref:
+            leaf = leaf[step]
+        image_bytes = base64.b64decode(leaf)
         with open(request.out_path, "wb") as handle:
-            handle.write(base64.b64decode(image_b64))
+            handle.write(image_bytes)
         return GenerationResult(
             path=request.out_path,
             cost_usd=request.model.price_usd,
@@ -275,9 +330,8 @@ _MODEL_PROVIDERS = {
     "local/procedural-edit-v1": ProceduralEditProvider(),
 }
 
-_PROVIDERS = {
-    "openai": OpenAiImagesProvider(),
-}
+_sync_image = SyncImageProvider()
+_PROVIDERS = {provider_id: _sync_image for provider_id in SYNC_IMAGE_DESCRIPTORS}
 
 
 def provider_for(model: ModelInfo):
