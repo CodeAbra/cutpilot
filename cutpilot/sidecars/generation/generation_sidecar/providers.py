@@ -774,7 +774,9 @@ class AsyncJobProvider:
 
         started = time.monotonic()
         interval = desc.poll_interval_s
-        emitted = 0.0
+        # Floor the synthetic progress at the value already streamed pre-submit
+        # so the first in-loop emission can never regress below it.
+        emitted = 0.02
         last_poll = None
         success_states = {s.casefold() for s in desc.success_states}
         failure_states = {s.casefold() for s in desc.failure_states}

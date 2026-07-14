@@ -212,6 +212,15 @@ class StubAsyncVendor:
             return {"status": "Pending"}
         if self.mode == "cancel":
             return {"status": "Pending", "cancel_url": f"{self.url}/cancel/1"}
+        if self.mode == "zero_progress":
+            # Report a freshly-queued job at progress 0.0 for a few polls, then
+            # a ready result URL: exercises the submit->poll progress seam.
+            if self.poll_count <= self.polls_before_ready:
+                return {"status": "Pending", "progress": 0.0}
+            return {
+                "status": "Ready",
+                "result": {"sample": f"{self.url}/img/1.png"},
+            }
         # ready / ssrf: report progress while pending, then a ready result URL.
         if self.poll_count <= self.polls_before_ready:
             fraction = self.poll_count / (self.polls_before_ready + 1)
@@ -668,6 +677,56 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(stub.poll_headers.get("x-key"), "secret-key")
         self.assertNotIn("Authorization", stub.poll_headers)
         self.assertEqual(progress, sorted(progress))
+        self.assertTrue(all(value < 1.0 for value in progress))
+
+    def test_async_progress_never_regresses_below_the_submit_floor(self):
+        # The engine streams 0.02 before submit; a vendor that reports
+        # progress 0.0 on the first poll must not drag the stream back below
+        # that floor.
+        stub = StubAsyncVendor(mode="zero_progress", polls_before_ready=2).start()
+        self.addCleanup(stub.stop)
+        desc = providers.AsyncJobDescriptor(
+            provider="stub",
+            base_url=stub.url,
+            auth_header="x-key",
+            auth_template="{key}",
+            success_states=("Ready",),
+            failure_states=("Error", "Failed"),
+            progress_path=("progress",),
+            result_ref_path=("result", "sample"),
+            result_fetch="url",
+            poll_interval_s=0.01,
+            poll_backoff_ceiling_s=0.02,
+            job_deadline_s=2.0,
+        )
+        model = ModelInfo(
+            id="stub/async-1",
+            label="Stub Async",
+            provider="stub",
+            price_usd=0.05,
+            needs_key=True,
+        )
+        out_path = os.path.join(self.gen_dir, "async-floor.png")
+        request = providers.GenerationRequest(
+            model=model,
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+            seed=7,
+            out_path=out_path,
+        )
+        progress = []
+        with patch.dict(providers.ASYNC_JOB_DESCRIPTORS, {"stub": desc}), patch.object(
+            providers.keys, "lookup_key", return_value="secret-key"
+        ):
+            providers.AsyncJobProvider().generate(
+                request,
+                on_progress=progress.append,
+                is_canceled=lambda: False,
+            )
+        self.assertEqual(progress[0], 0.02)
+        self.assertEqual(progress, sorted(progress))
+        self.assertTrue(all(value >= 0.02 for value in progress))
         self.assertTrue(all(value < 1.0 for value in progress))
 
     def test_async_job_submit_poll_ready_writes_image(self):
