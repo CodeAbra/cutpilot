@@ -33,6 +33,13 @@ const QString kOpenai = QStringLiteral("openai");
 const QString kPlausibleKey = QStringLiteral("plausible-key-abcdefgh01234567");
 const QString kReplacementKey = QStringLiteral("replacement-key-zyxwvut98765432");
 
+// Clears OPENAI_API_KEY when the scope exits, even if an assertion aborts the
+// slot early, so an environment key set for one case never leaks into a later
+// one.
+struct OpenAiEnvGuard {
+    ~OpenAiEnvGuard() { qunsetenv("OPENAI_API_KEY"); }
+};
+
 } // namespace
 
 // A SecretStore that lives entirely in memory. Injected in place of the
@@ -349,6 +356,7 @@ void KeyManagerTest::keyStatusReflectsEnvironmentAndKeychain()
     // environment, so it reports the vendor as keyed. The value is a
     // presence-only placeholder; the service echoes back only a boolean.
     qputenv("OPENAI_API_KEY", "env-presence-placeholder-000000");
+    OpenAiEnvGuard envGuard;
     ipc::SidecarHost keyedHost;
     QSignalSpy readySpy(&keyedHost, &ipc::SidecarHost::ready);
     QSignalSpy failedSpy(&keyedHost, &ipc::SidecarHost::failed);
@@ -384,7 +392,6 @@ void KeyManagerTest::keyStatusReflectsEnvironmentAndKeychain()
     }
 
     keyedHost.stop();
-    qunsetenv("OPENAI_API_KEY");
 }
 
 void KeyManagerTest::editSurvivesARegistryRefresh()
@@ -453,6 +460,7 @@ void KeyManagerTest::captureSurfaceImage()
         QSKIP("set CUTPILOT_SHOT_DIR to render the surface image");
 
     qputenv("OPENAI_API_KEY", "env-presence-placeholder-000000");
+    OpenAiEnvGuard envGuard;
     ipc::SidecarHost keyedHost;
     QSignalSpy readySpy(&keyedHost, &ipc::SidecarHost::ready);
     QSignalSpy failedSpy(&keyedHost, &ipc::SidecarHost::failed);
@@ -478,7 +486,6 @@ void KeyManagerTest::captureSurfaceImage()
     QVERIFY(shot.save(path));
 
     keyedHost.stop();
-    qunsetenv("OPENAI_API_KEY");
 }
 
 QTEST_MAIN(KeyManagerTest)
