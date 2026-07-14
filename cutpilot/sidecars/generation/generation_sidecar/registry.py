@@ -61,6 +61,22 @@ MODELS: tuple[ModelInfo, ...] = (
         price_usd=0.042,
         needs_key=True,
     ),
+    ModelInfo(
+        id="recraft/recraftv4_1",
+        label="Recraft V4.1",
+        provider="recraft",
+        price_usd=0.04,
+        needs_key=True,
+        model_slug="recraftv4_1",
+    ),
+    ModelInfo(
+        id="google/gemini-2.5-flash-image",
+        label="Nano Banana",
+        provider="google",
+        price_usd=0.039,
+        needs_key=True,
+        model_slug="gemini-2.5-flash-image",
+    ),
 )
 
 

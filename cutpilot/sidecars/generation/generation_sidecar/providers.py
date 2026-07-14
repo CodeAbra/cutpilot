@@ -134,6 +134,22 @@ SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
         result_fetch="inline_b64",
         timeout_s=120,
     ),
+    "recraft": SyncImageDescriptor(
+        provider="recraft",
+        base_url="https://external.api.recraft.ai/v1",
+        size_mode="passthrough",
+        extra_body={"response_format": "b64_json", "n": 1},
+        result_ref=("data", 0, "b64_json"),
+        result_fetch="inline_b64",
+    ),
+    "google": SyncImageDescriptor(
+        provider="google",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        size_mode="passthrough",
+        extra_body={"response_format": "b64_json", "n": 1},
+        result_ref=("data", 0, "b64_json"),
+        result_fetch="inline_b64",
+    ),
 }
 
 
@@ -197,6 +213,8 @@ class SyncImageProvider:
                 detail = json.loads(exc.read()).get("error", {}).get("message", "")
             except Exception:
                 pass
+            finally:
+                exc.close()
             raise RuntimeError(
                 f"{desc.provider} request failed ({exc.code}): {detail}"
             ) from exc

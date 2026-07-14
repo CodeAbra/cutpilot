@@ -16,6 +16,8 @@ KEYCHAIN_SERVICE = "cutpilot"
 
 ENV_VARS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
+    "recraft": "RECRAFT_API_TOKEN",
+    "google": "GEMINI_API_KEY",
 }
 
 

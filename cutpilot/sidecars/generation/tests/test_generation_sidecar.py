@@ -24,6 +24,7 @@ from generation_sidecar.procedural import (  # noqa: E402
     decode_png,
     render_png,
 )
+from generation_sidecar.registry import model_by_id  # noqa: E402
 from generation_sidecar.server import build_server  # noqa: E402
 
 
@@ -376,6 +377,91 @@ class SidecarTestCase(unittest.TestCase):
         )
         self.assertEqual(landscape["state"], "done")
         self.assertEqual(stub.last_body["size"], "1536x1024")
+
+    def _drive_b64_provider(self, model_id, provider, env_var, slug):
+        self.set_env_key(env_var)
+        stub = StubVendor(body={"data": [{"b64_json": STUB_PNG_B64}]}).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor(provider, stub)
+
+        width, height = 1024, 768
+        progress = []
+        status, submitted = self.submit(
+            model=model_id, prompt="a neon skyline", width=width, height=height
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        final = snapshots[-1]
+
+        self.assertEqual(final["state"], "done")
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertTrue(content.startswith(PNG_SIGNATURE))
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertEqual((final["width"], final["height"]), (width, height))
+        self.assertAlmostEqual(final["cost_usd"], model_by_id(model_id).price_usd)
+        self.assertEqual(progress, sorted(progress))
+
+        self.assertEqual(stub.last_headers.get("Authorization"), "Bearer test")
+        self.assertEqual(stub.last_body["model"], slug)
+        self.assertEqual(stub.last_body["prompt"], "a neon skyline")
+        self.assertEqual(stub.last_body["size"], f"{width}x{height}")
+        self.assertEqual(stub.last_body["response_format"], "b64_json")
+
+    def test_recraft_generates_through_its_stub(self):
+        self._drive_b64_provider(
+            "recraft/recraftv4_1", "recraft", "RECRAFT_API_TOKEN", "recraftv4_1"
+        )
+
+    def test_nano_banana_generates_through_its_stub(self):
+        self._drive_b64_provider(
+            "google/gemini-2.5-flash-image",
+            "google",
+            "GEMINI_API_KEY",
+            "gemini-2.5-flash-image",
+        )
+
+    def test_new_sync_providers_appear_in_models_with_key_presence(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        by_id = {model["id"]: model for model in data["models"]}
+        for model_id in ("recraft/recraftv4_1", "google/gemini-2.5-flash-image"):
+            self.assertIn(model_id, by_id)
+            self.assertFalse(by_id[model_id]["has_key"])
+
+        self.set_env_key("RECRAFT_API_TOKEN")
+        status, data = self.request("GET", "/models")
+        by_id = {model["id"]: model for model in data["models"]}
+        self.assertTrue(by_id["recraft/recraftv4_1"]["has_key"])
+        self.assertFalse(by_id["google/gemini-2.5-flash-image"]["has_key"])
+
+    def test_new_sync_providers_refuse_without_key(self):
+        for model_id, provider in (
+            ("recraft/recraftv4_1", "recraft"),
+            ("google/gemini-2.5-flash-image", "google"),
+        ):
+            status, data = self.submit(model=model_id)
+            self.assertEqual(status, 409)
+            self.assertEqual(data["error"], "missing_key")
+            self.assertEqual(data["provider"], provider)
+
+    def test_vendor_failure_surfaces_message_without_leaking_key(self):
+        self.set_env_key("RECRAFT_API_TOKEN")
+        stub = StubVendor(
+            status=400, body={"error": {"message": "quota exceeded"}}
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("recraft", stub)
+
+        final = self.run_to_done(
+            model="recraft/recraftv4_1", prompt="x", width=1024, height=768
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("quota exceeded", final["message"])
+        self.assertNotIn("test", final["message"])
 
     def test_models_report_prompt_and_input_needs(self):
         status, data = self.request("GET", "/models")

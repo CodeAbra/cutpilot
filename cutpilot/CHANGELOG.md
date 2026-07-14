@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Two hosted image models are now selectable in the model picker and generate
+  on the user's own key: Recraft V4.1 (`RECRAFT_API_TOKEN`) and Nano Banana,
+  Google's Gemini 2.5 Flash Image (`GEMINI_API_KEY`). Each reads its key from
+  the environment or the keychain, appears with correct key presence, and
+  surfaces "add a key" when none is configured.
 - Every node in the workflow document now carries a durable identity (`uid`),
   persisted in the workflow JSON and preserved across save/reload, undo/redo,
   and renames. Documents written before this field existed gain identities on
