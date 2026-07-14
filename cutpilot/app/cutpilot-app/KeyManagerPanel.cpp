@@ -121,8 +121,12 @@ void KeyManagerPanel::openKeyEditor(const QString &provider)
         row->error->hide();
         row->editorRow->show();
         row->editor->setFocus();
+        m_pendingEditorProvider.clear();
         return;
     }
+    // No row for this vendor yet — the registry may still be loading. Open the
+    // editor once the next rebuild creates the row.
+    m_pendingEditorProvider = provider;
 }
 
 bool KeyManagerPanel::keyLooksPlausible(const QString &key, QString *reason)
@@ -335,6 +339,12 @@ void KeyManagerPanel::rebuild()
             m_rows.push_back(row);
             refreshRow(row);
         }
+    }
+
+    if (!m_pendingEditorProvider.isEmpty()) {
+        const QString provider = m_pendingEditorProvider;
+        m_pendingEditorProvider.clear();
+        openKeyEditor(provider);
     }
 }
 

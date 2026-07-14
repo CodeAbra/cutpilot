@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QString>
 #include <QVector>
 #include <QWidget>
 
@@ -75,6 +76,10 @@ private:
     QLabel *m_empty = nullptr;
     QVector<VendorRow *> m_rows;
     bool m_rebuildDeferred = false;
+    // A vendor whose editor was requested before its row existed; opened once
+    // the next rebuild creates the row, then cleared. Holds only a provider
+    // name, never a key.
+    QString m_pendingEditorProvider;
 };
 
 } // namespace cutpilot::app
