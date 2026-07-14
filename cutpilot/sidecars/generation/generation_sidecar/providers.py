@@ -779,7 +779,9 @@ class AsyncJobProvider:
             poll_url = desc.base_url + desc.poll_path.format(job_id=job_id)
 
         started = time.monotonic()
-        interval = desc.poll_interval_s
+        # Floor the cadence so a zero or non-growing poll interval cannot
+        # busy-poll the vendor until the deadline.
+        interval = max(CANCEL_SLICE_S, desc.poll_interval_s)
         # Floor the synthetic progress at the value already streamed pre-submit
         # so the first in-loop emission can never regress below it.
         emitted = 0.02
