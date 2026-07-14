@@ -8,15 +8,17 @@ job queue only ever sees progress callbacks and a final result or error.
 from __future__ import annotations
 
 import base64
+import http.client
 import ipaddress
 import json
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from . import keys
 from .procedural import (
@@ -168,57 +170,160 @@ SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 5
 
 
-def _resolves_to_internal_address(host: str) -> bool:
-    """True when a host resolves to a private, link-local, reserved, loopback,
-    multicast, or unspecified address — the ranges a fetch must never reach on
-    a vendor's behalf (cloud metadata at 169.254.169.254, RFC-1918 hosts)."""
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
+def _flags_internal(address) -> bool:
+    return (
+        address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_loopback
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def _is_internal_address(address) -> bool:
+    """True when an address — or the IPv4 it embeds through an IPv6 transition
+    scheme — falls in a range a fetch must never reach on a vendor's behalf
+    (cloud metadata at 169.254.169.254, RFC-1918 hosts). Mapped/6to4/Teredo
+    forms are normalized so the block holds regardless of interpreter version."""
+    if _flags_internal(address):
         return True
+    for embedded in (
+        getattr(address, "ipv4_mapped", None),
+        getattr(address, "sixtofour", None),
+    ):
+        if embedded is not None and _flags_internal(embedded):
+            return True
+    teredo = getattr(address, "teredo", None)
+    if teredo is not None and any(_flags_internal(part) for part in teredo):
+        return True
+    return False
+
+
+def _resolve_pinned_address(host: str, port: int, allow_internal: bool) -> str:
+    """Resolve the host once, refuse if any resolved address is internal (unless
+    this is the loopback-http exception), and return one validated address for
+    the connection to pin — so the transport never performs a second,
+    unvalidated resolution between the check and the connect."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise RuntimeError("Refusing an image URL whose host cannot be resolved") from exc
+    pinned = None
     for info in infos:
         raw = info[4][0].split("%", 1)[0]
         try:
             address = ipaddress.ip_address(raw)
-        except ValueError:
-            return True
-        if (
-            address.is_private
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_loopback
-            or address.is_multicast
-            or address.is_unspecified
-        ):
-            return True
-    return False
+        except ValueError as exc:
+            raise RuntimeError(
+                "Refusing an image URL with an unparseable address"
+            ) from exc
+        if not allow_internal and _is_internal_address(address):
+            raise RuntimeError("Refusing an image URL that targets an internal host")
+        if pinned is None:
+            pinned = raw
+    if pinned is None:
+        raise RuntimeError("Refusing an image URL whose host cannot be resolved")
+    return pinned
 
 
-def _download_capped(url: str, max_bytes: int, timeout: int) -> bytes:
-    """Fetch a vendor-supplied image URL under strict bounds: https only (or
-    http to an explicit loopback host, matching the in-process transport), no
-    URL that resolves to an internal address, a hard read cap, and a timeout.
-    Bytes are returned raw and never interpreted."""
+def _guard_url(url: str) -> tuple[str, str, int, str, str]:
+    """Enforce the fetch policy for one URL and return the connection parts for
+    a pinned, validated address: (scheme, host, port, pinned_ip, path). https is
+    required except for an explicit loopback http host (the in-process
+    transport); every resolved address of an https host must be external. Shared
+    by the initial fetch and every redirect hop so there is one enforcement
+    point."""
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
     host = parts.hostname or ""
     if scheme == "http":
         if host not in _LOOPBACK_HOSTS:
             raise RuntimeError("Refusing a non-loopback plaintext image URL")
+        port = parts.port or 80
+        allow_internal = True
     elif scheme == "https":
-        if _resolves_to_internal_address(host):
-            raise RuntimeError("Refusing an image URL that targets an internal host")
+        port = parts.port or 443
+        allow_internal = False
     else:
         raise RuntimeError("Unsupported image URL scheme")
+    pinned_ip = _resolve_pinned_address(host, port, allow_internal)
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    return scheme, host, port, pinned_ip, path
 
-    http_request = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(http_request, timeout=timeout) as response:
-        data = response.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise RuntimeError("Vendor image is too large")
-    return data
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """An http connection that connects to a pre-validated address while keeping
+    the original hostname for the Host header — the transport performs no
+    resolution of its own."""
+
+    def __init__(self, host: str, pinned_ip: str, port: int, timeout: int):
+        super().__init__(host, port, timeout=timeout)
+        self._pinned_ip = pinned_ip
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout
+        )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """As above for https: the socket targets the validated address, but the
+    Host header and TLS SNI keep the original hostname so certificate
+    verification still holds."""
+
+    def __init__(self, host: str, pinned_ip: str, port: int, timeout: int):
+        super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_ip = pinned_ip
+
+    def connect(self):
+        sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _open_pinned(scheme: str, host: str, pinned_ip: str, port: int, timeout: int):
+    if scheme == "https":
+        return _PinnedHTTPSConnection(host, pinned_ip, port, timeout)
+    return _PinnedHTTPConnection(host, pinned_ip, port, timeout)
+
+
+def _download_capped(url: str, max_bytes: int, timeout: int) -> bytes:
+    """Fetch a vendor-supplied image URL under strict bounds: https only (or
+    http to an explicit loopback host, matching the in-process transport), a
+    connection pinned to a validated address, every redirect hop re-validated
+    against the same gate, a hard read cap, and a timeout. Bytes are returned
+    raw and never interpreted."""
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        scheme, host, port, pinned_ip, path = _guard_url(current)
+        connection = _open_pinned(scheme, host, pinned_ip, port, timeout)
+        try:
+            connection.request("GET", path)
+            response = connection.getresponse()
+            if response.status in _REDIRECT_STATUSES:
+                location = response.headers.get("Location")
+                response.read()
+                if not location:
+                    raise RuntimeError("Vendor redirect is missing a target")
+                current = urljoin(current, location)
+                continue
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Vendor image fetch failed ({response.status})"
+                )
+            data = response.read(max_bytes + 1)
+        finally:
+            connection.close()
+        if len(data) > max_bytes:
+            raise RuntimeError("Vendor image is too large")
+        return data
+    raise RuntimeError("Vendor image URL redirected too many times")
 
 
 def _slug(model: ModelInfo) -> str:
