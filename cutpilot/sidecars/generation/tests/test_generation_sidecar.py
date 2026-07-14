@@ -26,7 +26,7 @@ from generation_sidecar.procedural import (  # noqa: E402
     decode_png,
     render_png,
 )
-from generation_sidecar.registry import model_by_id  # noqa: E402
+from generation_sidecar.registry import ModelInfo, model_by_id  # noqa: E402
 from generation_sidecar.server import build_server  # noqa: E402
 
 
@@ -116,6 +116,107 @@ class StubVendor:
         self.port = self._server.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+class StubAsyncVendor:
+    """An in-process stand-in for a submit -> poll -> fetch vendor. The submit
+    returns a job id and a loopback polling URL pointing back at this server, so
+    the poll is served locally and never touches the network. Modes drive the
+    poll replies: 'ready' returns Pending for a few polls then Ready with a
+    result URL; 'failure' returns an error state; 'never' stays Pending; 'cancel'
+    returns Pending with a cancel URL and records whether its cancel route was
+    hit; 'ssrf' returns a polling URL aimed at the cloud-metadata host. Bound to
+    127.0.0.1 on an ephemeral port."""
+
+    def __init__(self, mode="ready", polls_before_ready=2, polling_url=None):
+        self.mode = mode
+        self.polls_before_ready = polls_before_ready
+        self.injected_polling_url = polling_url
+        self.submit_headers = None
+        self.submit_body = None
+        self.poll_headers = None
+        self.poll_count = 0
+        self.cancel_hit = False
+        vendor = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def _reply(self, payload, content_type="application/json"):
+                if content_type == "application/json":
+                    body = json.dumps(payload).encode()
+                else:
+                    body = payload
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length > 0 else b""
+                if self.path.startswith("/cancel/"):
+                    vendor.cancel_hit = True
+                    self._reply({"ok": True})
+                    return
+                vendor.submit_headers = dict(self.headers)
+                try:
+                    vendor.submit_body = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    vendor.submit_body = None
+                if vendor.mode == "ssrf":
+                    polling_url = "https://169.254.169.254/poll/1"
+                elif vendor.injected_polling_url is not None:
+                    polling_url = vendor.injected_polling_url
+                else:
+                    polling_url = f"{vendor.url}/poll/1"
+                self._reply({"id": "1", "polling_url": polling_url})
+
+            def do_GET(self):
+                if self.path.startswith("/img/"):
+                    self._reply(STUB_PNG, content_type="image/png")
+                    return
+                if self.path.startswith("/poll/"):
+                    vendor.poll_headers = dict(self.headers)
+                    vendor.poll_count += 1
+                    self._reply(vendor._poll_payload())
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def _poll_payload(self):
+        if self.mode == "failure":
+            return {"status": "Error", "details": "quota exceeded"}
+        if self.mode == "never":
+            return {"status": "Pending"}
+        if self.mode == "cancel":
+            return {"status": "Pending", "cancel_url": f"{self.url}/cancel/1"}
+        # ready / ssrf: report progress while pending, then a ready result URL.
+        if self.poll_count <= self.polls_before_ready:
+            fraction = self.poll_count / (self.polls_before_ready + 1)
+            return {"status": "Pending", "progress": fraction}
+        return {
+            "status": "Ready",
+            "result": {"sample": f"{self.url}/img/1.png"},
+        }
 
     def start(self):
         self._thread.start()
@@ -493,6 +594,64 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
         self.assertEqual(stub.last_headers.get("Authorization"), "Bearer test")
         self.assertEqual(stub.last_body["model"], "seedream-4-0")
+
+    def test_async_engine_submit_poll_ready_writes_image_and_carries_x_key(self):
+        stub = StubAsyncVendor(mode="ready", polls_before_ready=2).start()
+        self.addCleanup(stub.stop)
+        desc = providers.AsyncJobDescriptor(
+            provider="stub",
+            base_url=stub.url,
+            auth_header="x-key",
+            auth_template="{key}",
+            success_states=("Ready",),
+            failure_states=("Error", "Failed"),
+            progress_path=("progress",),
+            error_msg_path=("details",),
+            result_ref_path=("result", "sample"),
+            result_fetch="url",
+            poll_interval_s=0.01,
+            poll_backoff_ceiling_s=0.02,
+            job_deadline_s=2.0,
+        )
+        model = ModelInfo(
+            id="stub/async-1",
+            label="Stub Async",
+            provider="stub",
+            price_usd=0.05,
+            needs_key=True,
+        )
+        out_path = os.path.join(self.gen_dir, "async-engine.png")
+        request = providers.GenerationRequest(
+            model=model,
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+            seed=7,
+            out_path=out_path,
+        )
+        progress = []
+        with patch.dict(providers.ASYNC_JOB_DESCRIPTORS, {"stub": desc}), patch.object(
+            providers.keys, "lookup_key", return_value="secret-key"
+        ):
+            result = providers.AsyncJobProvider().generate(
+                request,
+                on_progress=progress.append,
+                is_canceled=lambda: False,
+            )
+
+        self.assertEqual(result.path, out_path)
+        with open(out_path, "rb") as handle:
+            content = handle.read()
+        self.assertTrue(content.startswith(PNG_SIGNATURE))
+        self.assertEqual(stub.submit_body["prompt"], "a lighthouse at dusk")
+        self.assertEqual(stub.submit_body["width"], 1024)
+        self.assertEqual(stub.submit_body["height"], 1024)
+        self.assertEqual(stub.submit_headers.get("x-key"), "secret-key")
+        self.assertNotIn("Authorization", stub.submit_headers)
+        self.assertEqual(stub.poll_headers.get("x-key"), "secret-key")
+        self.assertNotIn("Authorization", stub.poll_headers)
+        self.assertEqual(progress, sorted(progress))
+        self.assertTrue(all(value < 1.0 for value in progress))
 
     def test_unverified_model_is_excluded_from_models_yet_resolves(self):
         status, data = self.request("GET", "/models")

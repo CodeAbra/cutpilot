@@ -169,6 +169,65 @@ SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
 }
 
 
+@dataclass(frozen=True)
+class AsyncJobDescriptor:
+    """A vendor's submit -> poll -> fetch job endpoint expressed as data.
+
+    One row per async provider drives the shared adapter: where and how to
+    submit, how to read the job id and the polling URL back, how to poll and
+    map a status to a terminal state, how to synthesize progress, and how to
+    fetch the finished result. Adding an async provider is a new row, not new
+    adapter code. Timings are fields so a still-image budget and a video budget
+    differ by data alone.
+    """
+
+    provider: str
+    base_url: str
+    auth_header: str = "Authorization"
+    auth_template: str = "Bearer {key}"
+    submit_path: str = "/{model}"
+    submit_method: str = "POST"
+    submit_headers: dict = field(default_factory=dict)
+    prompt_key: str = "prompt"
+    size_mode: str = "wh_fields"
+    width_key: str = "width"
+    height_key: str = "height"
+    size_format: str = "{w}x{h}"
+    # 0 leaves sizes untouched; a positive value rounds width/height to the
+    # nearest multiple and clamps to the accepted dimension range, so a
+    # vendor's step constraint is row data rather than engine logic.
+    size_multiple: int = 0
+    extra_body: dict = field(default_factory=dict)
+    job_id_path: tuple = ("id",)
+    poll_url_path: tuple | None = ("polling_url",)
+    poll_path: str = ""
+    poll_method: str = "GET"
+    poll_interval_s: float = 0.5
+    poll_backoff_factor: float = 1.5
+    poll_backoff_ceiling_s: float = 5.0
+    request_timeout_s: int = 30
+    job_deadline_s: float = 60.0
+    status_path: tuple = ("status",)
+    success_states: tuple[str, ...] = ()
+    failure_states: tuple[str, ...] = ()
+    progress_path: tuple | None = None
+    error_msg_path: tuple | None = None
+    result_kind: str = "image"
+    result_ref_path: tuple = ("result", "sample")
+    result_fetch: str = "url"
+    cancel_url_path: tuple | None = None
+    expected_duration_s: float = 4.0
+
+
+ASYNC_JOB_DESCRIPTORS: dict[str, AsyncJobDescriptor] = {}
+
+# The dimension range a rounded async request size is clamped into, matching
+# the server's accepted bounds, and the slice a cancelable sleep re-checks in.
+MIN_ASYNC_DIMENSION = 64
+MAX_ASYNC_DIMENSION = 2048
+CANCEL_SLICE_S = 0.05
+
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MAX_REDIRECTS = 5
@@ -525,6 +584,209 @@ class ProceduralEditProvider:
         )
 
 
+def _select_optional(obj, path):
+    """Walk a path of keys/indices, returning None on any missing or wrongly
+    typed step rather than raising — for optional response fields."""
+    leaf = obj
+    for step in path:
+        try:
+            leaf = leaf[step]
+        except (KeyError, IndexError, TypeError):
+            return None
+    return leaf
+
+
+def _vendor_json(url, method, headers, body, timeout):
+    """Send one request to a vendor job endpoint and return its parsed JSON.
+
+    The URL is run through the same gate as an image fetch (https, or http only
+    to an explicit loopback host, pinned to a validated address) before
+    connecting, so a vendor-supplied poll URL cannot reach an internal host. A
+    JSON body is sent only when present. The response is read under a hard cap;
+    a non-2xx status raises a generic error carrying neither the key nor the
+    URL."""
+    scheme, host, port, pinned_ip, path = _guard_url(url)
+    connection = _open_pinned(scheme, host, pinned_ip, port, timeout)
+    try:
+        send_headers = dict(headers)
+        payload = None
+        if body is not None:
+            payload = json.dumps(body).encode()
+            send_headers["Content-Type"] = "application/json"
+        connection.request(method, path, body=payload, headers=send_headers)
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read(MAX_INPUT_FILE_BYTES + 1)
+    finally:
+        connection.close()
+    if len(raw) > MAX_INPUT_FILE_BYTES:
+        raise RuntimeError("Vendor response is too large")
+    if not (200 <= status < 300):
+        raise RuntimeError(f"vendor request failed ({status})")
+    return json.loads(raw)
+
+
+def _round_multiple(value: int, multiple: int) -> int:
+    if multiple <= 0:
+        return value
+    rounded = int(round(value / multiple)) * multiple
+    return max(MIN_ASYNC_DIMENSION, min(MAX_ASYNC_DIMENSION, rounded))
+
+
+def _build_async_body(desc: AsyncJobDescriptor, request: GenerationRequest):
+    width = _round_multiple(request.width, desc.size_multiple)
+    height = _round_multiple(request.height, desc.size_multiple)
+    body = {desc.prompt_key: request.prompt}
+    if desc.size_mode == "wh_fields":
+        body[desc.width_key] = width
+        body[desc.height_key] = height
+    elif desc.size_mode == "size_string":
+        body["size"] = desc.size_format.format(w=width, h=height)
+    body.update(desc.extra_body)
+    return body, width, height
+
+
+def _synth_progress(desc: AsyncJobDescriptor, resp, started: float, floor: float) -> float:
+    """A monotonic progress fraction capped below 1.0: the vendor's own number
+    when it reports one, otherwise elapsed time over the expected duration. The
+    floor keeps a dipping vendor value from regressing the stream, and 1.0 is
+    never emitted before the terminal state."""
+    value = None
+    if desc.progress_path is not None:
+        raw = _select_optional(resp, desc.progress_path)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw) if 0.0 <= raw <= 1.0 else float(raw) / 100.0
+    if value is None:
+        value = (time.monotonic() - started) / desc.expected_duration_s
+    value = min(0.99, max(0.0, value))
+    return max(floor, value)
+
+
+def _sleep_cancelable(interval: float, is_canceled: CanceledFn) -> None:
+    """Sleep for interval seconds in short slices, returning early the moment a
+    cancellation is requested so a stop is honored within a slice rather than
+    after a whole backoff interval."""
+    remaining = interval
+    while remaining > 0:
+        if is_canceled():
+            return
+        time.sleep(min(CANCEL_SLICE_S, remaining))
+        remaining -= CANCEL_SLICE_S
+
+
+def _fire_cancel(desc: AsyncJobDescriptor, last_poll, headers, timeout) -> None:
+    """Best-effort cancel: when the descriptor names a cancel URL and the last
+    poll carried one, POST it and ignore any failure. A descriptor without a
+    cancel URL cancels cooperatively (stop polling)."""
+    if desc.cancel_url_path is None or last_poll is None:
+        return
+    cancel_url = _select_optional(last_poll, desc.cancel_url_path)
+    if not cancel_url:
+        return
+    try:
+        _vendor_json(cancel_url, "POST", headers, None, timeout)
+    except Exception:
+        pass
+
+
+class AsyncJobProvider:
+    """One adapter for every submit -> poll -> fetch vendor, driven by a
+    descriptor row picked by the model's provider. The user's key rides the
+    submit and poll requests only (never the pre-signed result fetch) and never
+    appears in a progress update, error, or result."""
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        on_progress: ProgressFn,
+        is_canceled: CanceledFn,
+    ) -> GenerationResult:
+        desc = ASYNC_JOB_DESCRIPTORS[request.model.provider]
+        key = keys.lookup_key(desc.provider)
+        if not key:
+            raise MissingKeyError(desc.provider)
+
+        if is_canceled():
+            raise JobCanceled()
+        on_progress(0.02)
+
+        body, width, height = _build_async_body(desc, request)
+        submit_url = desc.base_url + desc.submit_path.format(model=_slug(request.model))
+        auth = {desc.auth_header: desc.auth_template.format(key=key)}
+        submit_resp = _vendor_json(
+            submit_url,
+            desc.submit_method,
+            {**desc.submit_headers, **auth},
+            body,
+            desc.request_timeout_s,
+        )
+
+        job_id = _select_optional(submit_resp, desc.job_id_path)
+        if job_id is None:
+            raise RuntimeError(f"{desc.provider} returned an unexpected response shape")
+        if desc.poll_url_path is not None:
+            poll_url = _select_optional(submit_resp, desc.poll_url_path)
+            if poll_url is None:
+                raise RuntimeError(
+                    f"{desc.provider} returned an unexpected response shape"
+                )
+        else:
+            poll_url = desc.base_url + desc.poll_path.format(job_id=job_id)
+
+        started = time.monotonic()
+        interval = desc.poll_interval_s
+        emitted = 0.0
+        last_poll = None
+        success_states = {s.casefold() for s in desc.success_states}
+        failure_states = {s.casefold() for s in desc.failure_states}
+        while True:
+            if is_canceled():
+                _fire_cancel(desc, last_poll, auth, desc.request_timeout_s)
+                raise JobCanceled()
+            if time.monotonic() - started > desc.job_deadline_s:
+                raise RuntimeError(
+                    f"{desc.provider} job did not complete within the time budget"
+                )
+            last_poll = _vendor_json(
+                poll_url, desc.poll_method, auth, None, desc.request_timeout_s
+            )
+            status = str(_select_optional(last_poll, desc.status_path) or "")
+            folded = status.casefold()
+            if folded in success_states:
+                break
+            if folded in failure_states:
+                detail = _select_optional(last_poll, desc.error_msg_path) or status
+                raise RuntimeError(f"{desc.provider}: {detail}")
+            # Any state we do not recognize keeps the loop polling; the whole-job
+            # deadline is the backstop for a vendor that never settles.
+            emitted = _synth_progress(desc, last_poll, started, emitted)
+            on_progress(emitted)
+            _sleep_cancelable(interval, is_canceled)
+            interval = min(interval * desc.poll_backoff_factor, desc.poll_backoff_ceiling_s)
+
+        if is_canceled():
+            _fire_cancel(desc, last_poll, auth, desc.request_timeout_s)
+            raise JobCanceled()
+
+        ref = _select_optional(last_poll, desc.result_ref_path)
+        if ref is None:
+            raise RuntimeError(f"{desc.provider} returned an unexpected response shape")
+        if desc.result_fetch == "url":
+            data = _download_capped(ref, MAX_INPUT_FILE_BYTES, desc.request_timeout_s)
+        elif desc.result_fetch == "inline_b64":
+            data = base64.b64decode(ref)
+        else:
+            data = ref
+        with open(request.out_path, "wb") as handle:
+            handle.write(data)
+        return GenerationResult(
+            path=request.out_path,
+            cost_usd=request.model.price_usd,
+            width=width,
+            height=height,
+        )
+
+
 # Model-specific adapters win over the provider family, so several local
 # models can share the keyless "local" provider while running different code.
 _MODEL_PROVIDERS = {
@@ -534,7 +796,11 @@ _MODEL_PROVIDERS = {
 }
 
 _sync_image = SyncImageProvider()
-_PROVIDERS = {provider_id: _sync_image for provider_id in SYNC_IMAGE_DESCRIPTORS}
+_async_job = AsyncJobProvider()
+_PROVIDERS = {
+    **{provider_id: _sync_image for provider_id in SYNC_IMAGE_DESCRIPTORS},
+    **{provider_id: _async_job for provider_id in ASYNC_JOB_DESCRIPTORS},
+}
 
 
 def provider_for(model: ModelInfo):
