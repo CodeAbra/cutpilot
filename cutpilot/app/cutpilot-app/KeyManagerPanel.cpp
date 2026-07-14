@@ -298,10 +298,12 @@ void KeyManagerPanel::rebuild()
                             row->error->hide();
                             row->editorRow->setVisible(
                                 !row->editorRow->isVisible());
-                            if (row->editorRow->isVisible())
+                            if (row->editorRow->isVisible()) {
                                 row->editor->setFocus();
-                            else
+                            } else {
+                                row->editor->clear();
                                 runDeferredRebuild();
+                            }
                         });
                 connect(row->editor, &QLineEdit::returnPressed, this,
                         [this, row] { saveKey(row); });

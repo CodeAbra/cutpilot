@@ -90,6 +90,7 @@ private slots:
     void replaceOverwritesTheSingleItem();
     void removeDeletesAfterConfirmation();
     void entryFieldIsMasked();
+    void collapsingTheEditorClearsTheTypedKey();
     void savingAKeyFiresTheStoredSignal();
     void noSecretLeaksIntoTheSurface();
     void keyStatusReflectsEnvironmentAndKeychain();
@@ -118,6 +119,11 @@ private:
         QPushButton *save() const
         {
             return panel.findChild<QPushButton *>(QStringLiteral("keySave-")
+                                                  + kOpenai);
+        }
+        QPushButton *addReplace() const
+        {
+            return panel.findChild<QPushButton *>(QStringLiteral("keyAdd-")
                                                   + kOpenai);
         }
         QPushButton *remove() const
@@ -260,6 +266,35 @@ void KeyManagerTest::entryFieldIsMasked()
     QLineEdit *editor = rig.editor();
     QVERIFY(editor);
     QCOMPARE(editor->echoMode(), QLineEdit::Password);
+}
+
+void KeyManagerTest::collapsingTheEditorClearsTheTypedKey()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    // The Add/Replace toggle keys off live visibility, so the surface must be
+    // shown for the collapse branch to run as it does in the app's dialog.
+    rig.panel.show();
+
+    // Open the inline editor via Add/Replace, type a key, then dismiss it by
+    // toggling Add/Replace off again without saving.
+    QPushButton *addReplace = rig.addReplace();
+    QVERIFY(addReplace);
+    addReplace->click();
+    QLineEdit *editor = rig.editor();
+    QVERIFY(editor);
+    QVERIFY(editor->isVisibleTo(&rig.panel));
+    editor->setText(kPlausibleKey);
+    addReplace->click();
+
+    // The editor is dismissed and holds no secret, bounding the key's
+    // in-memory lifetime to the moment the user dismissed it. The field is
+    // checked with QVERIFY so a failure never prints the key.
+    QLineEdit *after = rig.editor();
+    QVERIFY(after);
+    QVERIFY(!after->isVisibleTo(&rig.panel));
+    QVERIFY(after->text().isEmpty());
 }
 
 void KeyManagerTest::savingAKeyFiresTheStoredSignal()
