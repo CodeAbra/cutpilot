@@ -186,9 +186,11 @@ class StubAsyncVendor:
         result_ref_path=None,
         video_body=None,
         submit_id_path=("id",),
+        error_status=None,
     ):
         self.mode = mode
         self.polls_before_ready = polls_before_ready
+        self.error_status = error_status
         self.injected_polling_url = polling_url
         self.submit_id_path = tuple(submit_id_path)
         self.status_path = tuple(status_path)
@@ -271,10 +273,16 @@ class StubAsyncVendor:
                     return
                 if vendor.mode == "stability":
                     # Completion signaled by HTTP status: 202 while running, then
-                    # a 200 whose body is the mp4 (no separate result fetch).
+                    # a 200 whose body is the mp4 (no separate result fetch). A
+                    # configured error_status makes the poll return a terminal
+                    # client/server error instead.
                     vendor.poll_headers = dict(self.headers)
                     vendor.poll_count += 1
-                    if vendor.poll_count <= vendor.polls_before_ready:
+                    if vendor.error_status is not None:
+                        self._reply_status(
+                            vendor.error_status, b"", "application/octet-stream"
+                        )
+                    elif vendor.poll_count <= vendor.polls_before_ready:
                         self._reply_status(202, b"", "application/octet-stream")
                     else:
                         self._reply_status(200, vendor.video_body, "video/mp4")
@@ -1324,6 +1332,48 @@ class SidecarTestCase(unittest.TestCase):
             self.assertEqual(handle.read()[4:8], MP4_FTYP)
         self.assertEqual(progress, sorted(progress))
         self.assertTrue(all(value < 1.0 for value in progress))
+
+    def test_stability_http_code_terminal_error_fails_promptly(self):
+        input_path = self.render_input(name="stability-error-input.png")
+        stub = StubAsyncVendor(mode="stability", error_status=400).start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(
+            stub,
+            body_encoding="multipart",
+            status_source="http_code",
+            result_fetch="bytes",
+            input_body_key="image",
+            submit_headers={"accept": "video/*"},
+            extra_body={"cfg_scale": 1.8, "motion_bucket_id": 127},
+            poll_url_path=None,
+            poll_path="/poll/{job_id}",
+            job_deadline_s=5.0,
+        )
+        model = ModelInfo(
+            id="stub/stability",
+            label="Stub Stability",
+            provider="stub",
+            price_usd=0.2,
+            needs_key=True,
+            needs_input=True,
+            output_kind="video",
+        )
+        started = time.monotonic()
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(
+                desc, model, "stability-error.mp4", input_path=input_path
+            )
+        elapsed = time.monotonic() - started
+        # A terminal 4xx settles the job at once rather than waiting out the
+        # whole video deadline.
+        self.assertLess(elapsed, desc.job_deadline_s / 2)
+        message = str(caught.exception)
+        self.assertIn("400", message)
+        # The failure message carries only the status code, never the key or a
+        # host.
+        self.assertNotIn("secret-key", message)
+        self.assertNotIn("127.0.0.1", message)
+        self.assertNotIn(str(stub.port), message)
 
     def test_stability_submit_ssrf_guarded(self):
         # The multipart submit runs through the same SSRF gate as the JSON

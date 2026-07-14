@@ -241,6 +241,11 @@ class AsyncJobDescriptor:
     status_path: tuple = ("status",)
     success_states: tuple[str, ...] = ()
     failure_states: tuple[str, ...] = ()
+    # On the http_code path, HTTP status codes that mean "still working" and
+    # should keep polling. Any 4xx/5xx outside this set is treated as a terminal
+    # job failure so a real vendor error settles at once instead of waiting out
+    # the whole deadline. Row data so a vendor with a non-202 running code fits.
+    non_terminal_poll_codes: tuple[int, ...] = (202,)
     progress_path: tuple | None = None
     error_msg_path: tuple | None = None
     result_kind: str = "image"
@@ -1099,8 +1104,17 @@ class AsyncJobProvider:
                     # A 200 is terminal; its body is the result for a bytes row.
                     result_bytes = raw
                     break
-                # A running code (202) or anything else keeps polling; the
-                # whole-job deadline is the backstop.
+                if (
+                    400 <= status_code < 600
+                    and status_code not in desc.non_terminal_poll_codes
+                ):
+                    # A 4xx/5xx is a terminal vendor error; surface it now
+                    # instead of polling to the deadline. Code only, no key.
+                    raise RuntimeError(
+                        f"{desc.provider} poll failed ({status_code})"
+                    )
+                # A running code (202) or other non-terminal code keeps polling;
+                # the whole-job deadline is the backstop.
             else:
                 last_poll = _vendor_json(
                     poll_url, desc.poll_method, auth, None, desc.request_timeout_s
