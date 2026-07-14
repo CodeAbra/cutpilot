@@ -1,5 +1,6 @@
 add_library(otf-secrets STATIC
-    src/KeychainStore.cpp)
+    src/KeychainStore.cpp
+    src/SecretStore.cpp)
 
 target_include_directories(otf-secrets PUBLIC include)
 

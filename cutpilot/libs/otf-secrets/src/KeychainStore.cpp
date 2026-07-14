@@ -87,6 +87,28 @@ QString KeychainStore::readSecret(const QString &service, const QString &account
     return value;
 }
 
+bool KeychainStore::removeSecret(const QString &service, const QString &account)
+{
+    CFMutableDictionaryRef query = itemQuery(service, account);
+    const OSStatus status = SecItemDelete(query);
+    CFRelease(query);
+    return status == errSecSuccess || status == errSecItemNotFound;
+}
+
+bool KeychainStore::hasSecret(const QString &service, const QString &account)
+{
+    CFMutableDictionaryRef query = itemQuery(service, account);
+    CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
+    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+
+    CFTypeRef result = nullptr;
+    const OSStatus status = SecItemCopyMatching(query, &result);
+    CFRelease(query);
+    if (result != nullptr)
+        CFRelease(result);
+    return status == errSecSuccess;
+}
+
 #else
 
 bool KeychainStore::available()
@@ -102,6 +124,16 @@ bool KeychainStore::writeSecret(const QString &, const QString &, const QString 
 QString KeychainStore::readSecret(const QString &, const QString &)
 {
     return QString();
+}
+
+bool KeychainStore::removeSecret(const QString &, const QString &)
+{
+    return false;
+}
+
+bool KeychainStore::hasSecret(const QString &, const QString &)
+{
+    return false;
 }
 
 #endif

@@ -2,6 +2,7 @@
 #include "CommandPalette.h"
 #include "CompositeInspector.h"
 #include "ExportController.h"
+#include "KeyManagerPanel.h"
 #include "QuickPanel.h"
 #include "RailPanels.h"
 #include "ThemeController.h"
@@ -25,7 +26,7 @@
 #include "cutpilot/render/CompositorService.h"
 #include "cutpilot/render/PreviewController.h"
 #include "cutpilot/render/PreviewItem.h"
-#include "cutpilot/secrets/KeychainStore.h"
+#include "cutpilot/secrets/SecretStore.h"
 #include "cutpilot/theme/ThemeTable.h"
 
 #include <QAction>
@@ -95,7 +96,8 @@ using cutpilot::render::CompositorService;
 using cutpilot::render::NodeLayerItem;
 using cutpilot::render::PreviewController;
 using cutpilot::render::PreviewItem;
-using cutpilot::secrets::KeychainStore;
+using cutpilot::app::KeyManagerPanel;
+using cutpilot::secrets::KeychainSecretStore;
 using cutpilot::theme::ThemeTable;
 
 namespace core = cutpilot::core;
@@ -774,18 +776,21 @@ private:
 };
 
 // The chrome surfaces the canvas asks for: the registry-driven model picker,
-// the inline prompt editor, the add-a-key flow that stores the user's own
-// vendor key in the system keychain, and the per-node menu carrying run and
+// the inline prompt editor, the key management surface over the user's own
+// vendor keys in the system keychain, and the per-node menu carrying run and
 // preview-pin actions.
 class GenerationChrome : public QObject {
 public:
     GenerationChrome(const ThemeTable &theme, CanvasView *view,
                      GenerationCoordinator *coordinator,
-                     PreviewController *previews)
+                     PreviewController *previews,
+                     cutpilot::secrets::SecretStore *secrets)
         : QObject(view)
         , m_view(view)
         , m_coordinator(coordinator)
         , m_previews(previews)
+        , m_secrets(secrets)
+        , m_theme(&theme)
         , m_editor(new PromptEditor(theme, view))
     {
         NodeLayerItem *layer = view->layer();
@@ -898,41 +903,52 @@ public:
             layer->setGateLimit(nodeId, limit);
     }
 
-    // With a node in hand the stored key immediately reruns it; from the
-    // settings surface (no node) it only lands in the keychain.
+    // Every add-a-key affordance lands on the key management surface,
+    // opened on the vendor in question. With a node in hand, the vendor's
+    // stored key immediately reruns it; without one (the account menu, a
+    // bare "manage keys") the surface just manages the keychain.
     void promptAddKey(int nodeId, const QString &provider)
     {
-        bool accepted = false;
-        const QString key = QInputDialog::getText(
-            m_view, QStringLiteral("Add your %1 API key").arg(provider),
-            QStringLiteral("Paste your own %1 API key.\n"
-                           "It is stored only in your system keychain and read "
-                           "by the generation service.")
-                .arg(provider),
-            QLineEdit::Password, QString(), &accepted);
-        if (!accepted || key.trimmed().isEmpty())
-            return;
+        QDialog dialog(m_view->window());
+        dialog.setWindowTitle(QStringLiteral("API keys"));
+        dialog.setMinimumWidth(460);
+        auto *column = new QVBoxLayout(&dialog);
+        auto *panel =
+            new KeyManagerPanel(*m_theme, m_coordinator, m_secrets, &dialog);
+        column->addWidget(panel);
+        column->addStretch(1);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                         &QDialog::reject);
+        column->addWidget(buttons);
 
-        if (!KeychainStore::available()
-            || !KeychainStore::writeSecret(QStringLiteral("cutpilot"), provider,
-                                           key.trimmed())) {
-            QMessageBox::warning(
-                m_view, QStringLiteral("Key not stored"),
-                QStringLiteral("The keychain refused the write. Set the vendor's "
-                               "API key environment variable and relaunch."));
-            return;
+        if (nodeId != -1) {
+            QObject::connect(panel, &KeyManagerPanel::keyStored, &dialog,
+                             [this, nodeId, provider,
+                              &dialog](const QString &stored) {
+                                 if (stored != provider)
+                                     return;
+                                 m_coordinator->runNode(nodeId);
+                                 dialog.accept();
+                             });
         }
-        m_coordinator->refreshModels();
-        if (nodeId != -1)
-            m_coordinator->runNode(nodeId);
+        if (!provider.isEmpty())
+            panel->openKeyEditor(provider);
+        dialog.exec();
     }
 
-    void retheme(const ThemeTable &theme) { m_editor->retheme(theme); }
+    void retheme(const ThemeTable &theme)
+    {
+        m_theme = &theme;
+        m_editor->retheme(theme);
+    }
 
 private:
     CanvasView *m_view = nullptr;
     GenerationCoordinator *m_coordinator = nullptr;
     PreviewController *m_previews = nullptr;
+    cutpilot::secrets::SecretStore *m_secrets = nullptr;
+    const ThemeTable *m_theme = nullptr;
     PromptEditor *m_editor = nullptr;
 };
 
@@ -1045,6 +1061,7 @@ int main(int argc, char *argv[])
 
     // Declared before the window so they outlive the coordinator and chrome
     // parented into its widget tree, which hold pointers to them.
+    KeychainSecretStore secretStore;
     SidecarHost host;
     GenerationClient client;
     SidecarHost convertHost{ QStringLiteral("sidecars/convert"),
@@ -1156,7 +1173,8 @@ int main(int argc, char *argv[])
         previews->setLayer(layer);
         previewPanel = new PreviewPanel(theme, previews, layer, view);
         previews->setPreviewItem(previewPanel->previewItem());
-        chrome = new GenerationChrome(theme, view, coordinator, previews);
+        chrome = new GenerationChrome(theme, view, coordinator, previews,
+                                      &secretStore);
 
         // Card pixels off the scrub path: still decodes and composite
         // thumbnails land debounced; the preview follows fresh stills.
@@ -1673,7 +1691,7 @@ int main(int argc, char *argv[])
 
         QObject::connect(
             topBar->settingsButton, &QToolButton::clicked, &window,
-            [&window, &themes, chrome, coordinator, store] {
+            [&window, &themes, &secretStore, coordinator, store] {
                 QDialog dialog(&window);
                 dialog.setWindowTitle(QStringLiteral("Settings"));
                 auto *column = new QVBoxLayout(&dialog);
@@ -1717,37 +1735,8 @@ int main(int argc, char *argv[])
                 keys->setStyleSheet(QStringLiteral("font-weight: 700;"));
                 column->addSpacing(8);
                 column->addWidget(keys);
-                QStringList providers;
-                for (const auto &model : coordinator->models()) {
-                    if (!model.needsKey || providers.contains(model.provider))
-                        continue;
-                    providers.push_back(model.provider);
-                    auto *row = new QHBoxLayout;
-                    row->addWidget(new QLabel(
-                        QStringLiteral("%1 — %2").arg(
-                            model.provider,
-                            model.hasKey
-                                ? QStringLiteral("key configured")
-                                : QStringLiteral("no key")),
-                        &dialog));
-                    auto *add = new QPushButton(
-                        model.hasKey ? QStringLiteral("Replace key…")
-                                     : QStringLiteral("Add key…"),
-                        &dialog);
-                    QObject::connect(add, &QPushButton::clicked, chrome,
-                                     [chrome, provider = model.provider] {
-                                         chrome->promptAddKey(-1, provider);
-                                     });
-                    row->addWidget(add);
-                    row->addStretch(1);
-                    column->addLayout(row);
-                }
-                if (providers.isEmpty())
-                    column->addWidget(new QLabel(
-                        QStringLiteral(
-                            "No keyed vendors registered yet — the model "
-                            "registry loads when the service is up."),
-                        &dialog));
+                column->addWidget(new KeyManagerPanel(
+                    themes.table(), coordinator, &secretStore, &dialog));
 
                 if (store) {
                     column->addSpacing(8);
@@ -1768,8 +1757,9 @@ int main(int argc, char *argv[])
                 dialog.exec();
             });
 
-        // Account: per-provider key state from the live registry, and the
-        // add-key flow — BYOK usage state, not a hosted balance.
+        // Account: per-provider key state from the live registry — BYOK
+        // usage state, not a hosted balance. Managing the keys themselves
+        // happens on the key management surface.
         auto *accountMenu = new QMenu(topBar);
         QObject::connect(accountMenu, &QMenu::aboutToShow, accountMenu,
                          [accountMenu, coordinator, chrome] {
@@ -1787,21 +1777,21 @@ int main(int argc, char *argv[])
                                              ? QStringLiteral("key configured")
                                              : QStringLiteral("no key")));
                                  state->setEnabled(false);
-                                 QObject::connect(
-                                     accountMenu->addAction(
-                                         QStringLiteral("    Add %1 key…")
-                                             .arg(model.provider)),
-                                     &QAction::triggered, chrome,
-                                     [chrome, provider = model.provider] {
-                                         chrome->promptAddKey(-1, provider);
-                                     });
                              }
                              if (providers.isEmpty()) {
                                  QAction *empty = accountMenu->addAction(
                                      QStringLiteral(
                                          "Model registry not loaded yet"));
                                  empty->setEnabled(false);
+                             } else {
+                                 accountMenu->addSeparator();
                              }
+                             QObject::connect(
+                                 accountMenu->addAction(
+                                     QStringLiteral("Manage API keys…")),
+                                 &QAction::triggered, chrome, [chrome] {
+                                     chrome->promptAddKey(-1, QString());
+                                 });
                          });
         topBar->accountButton->setMenu(accountMenu);
 

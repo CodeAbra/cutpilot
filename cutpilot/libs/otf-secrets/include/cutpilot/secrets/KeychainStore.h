@@ -22,6 +22,14 @@ public:
 
     // The stored secret, or an empty string when absent or unavailable.
     static QString readSecret(const QString &service, const QString &account);
+
+    // Delete the secret. True when the item is absent afterwards, so
+    // removing an already-missing entry succeeds.
+    static bool removeSecret(const QString &service, const QString &account);
+
+    // Whether the item exists. Only attributes are queried; the secret's
+    // bytes are never copied for a presence check.
+    static bool hasSecret(const QString &service, const QString &account);
 };
 
 } // namespace cutpilot::secrets

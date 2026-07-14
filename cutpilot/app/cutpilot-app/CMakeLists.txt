@@ -7,6 +7,8 @@ qt_add_executable(cutpilot-app
     CompositeInspector.h
     ExportController.cpp
     ExportController.h
+    KeyManagerPanel.cpp
+    KeyManagerPanel.h
     PaletteModel.cpp
     PaletteModel.h
     QuickPanel.cpp
