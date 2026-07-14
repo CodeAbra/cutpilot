@@ -18,6 +18,7 @@ ENV_VARS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "recraft": "RECRAFT_API_TOKEN",
     "google": "GEMINI_API_KEY",
+    "bytedance": "ARK_API_KEY",
 }
 
 

@@ -463,6 +463,81 @@ class SidecarTestCase(unittest.TestCase):
         self.assertIn("quota exceeded", final["message"])
         self.assertNotIn("test", final["message"])
 
+    def test_seedream_url_mode_fetches_and_writes_the_image(self):
+        self.set_env_key("ARK_API_KEY")
+        stub = StubVendor()
+        stub.body = {"data": [{"url": stub.url + "/img/x.png"}]}
+        stub.start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("bytedance", stub)
+
+        final = self.run_to_done(
+            model="bytedance/seedream-4-0",
+            prompt="a dune sea",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertTrue(content.startswith(PNG_SIGNATURE))
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertEqual(stub.last_headers.get("Authorization"), "Bearer test")
+        self.assertEqual(stub.last_body["model"], "seedream-4-0")
+
+    def test_unverified_model_is_excluded_from_models_yet_resolves(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        ids = {model["id"] for model in data["models"]}
+        self.assertNotIn("bytedance/seedream-4-0", ids)
+
+        # A direct submission still resolves the row: an absent key returns the
+        # missing-key refusal, not the unknown-model rejection.
+        status, data = self.submit(model="bytedance/seedream-4-0")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "missing_key")
+        self.assertEqual(data["provider"], "bytedance")
+
+    def test_url_download_refuses_internal_and_plaintext_hosts(self):
+        for url in (
+            "http://example.com/x.png",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.1/x.png",
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                providers._download_capped(
+                    url, providers.MAX_INPUT_FILE_BYTES, timeout=5
+                )
+            self.assertNotIn("test", str(caught.exception))
+
+        # A loopback http URL is allowed through the gate and served locally.
+        stub = StubVendor()
+        stub.start()
+        self.addCleanup(stub.stop)
+        data = providers._download_capped(
+            stub.url + "/img/x.png", providers.MAX_INPUT_FILE_BYTES, timeout=5
+        )
+        self.assertTrue(data.startswith(PNG_SIGNATURE))
+
+    def _assert_descriptor_row_valid(self, provider, desc):
+        self.assertEqual(desc.provider, provider)
+        self.assertTrue(desc.base_url)
+        self.assertTrue(desc.auth_header)
+        self.assertTrue(desc.auth_template)
+        self.assertTrue(desc.result_ref)
+        self.assertIn(desc.result_fetch, {"inline_b64", "url"})
+        self.assertIn(desc.size_mode, {"fixed_set", "passthrough"})
+
+    def test_descriptor_table_rows_are_well_formed(self):
+        for provider, desc in providers.SYNC_IMAGE_DESCRIPTORS.items():
+            self._assert_descriptor_row_valid(provider, desc)
+
+        malformed = dataclasses.replace(
+            providers.SYNC_IMAGE_DESCRIPTORS["openai"], base_url=""
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_descriptor_row_valid("openai", malformed)
+
     def test_models_report_prompt_and_input_needs(self):
         status, data = self.request("GET", "/models")
         self.assertEqual(status, 200)

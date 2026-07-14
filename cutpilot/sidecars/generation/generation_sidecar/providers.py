@@ -8,12 +8,15 @@ job queue only ever sees progress callbacks and a final result or error.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from . import keys
 from .procedural import (
@@ -150,7 +153,72 @@ SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
         result_ref=("data", 0, "b64_json"),
         result_fetch="inline_b64",
     ),
+    # The base URL region and whether the endpoint returns base64 or a URL are
+    # provisional until a live key confirms them; the url fetch mode is the
+    # conservative default until then.
+    "bytedance": SyncImageDescriptor(
+        provider="bytedance",
+        base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
+        size_mode="passthrough",
+        extra_body={},
+        result_ref=("data", 0, "url"),
+        result_fetch="url",
+    ),
 }
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _resolves_to_internal_address(host: str) -> bool:
+    """True when a host resolves to a private, link-local, reserved, loopback,
+    multicast, or unspecified address — the ranges a fetch must never reach on
+    a vendor's behalf (cloud metadata at 169.254.169.254, RFC-1918 hosts)."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return True
+    for info in infos:
+        raw = info[4][0].split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            return True
+        if (
+            address.is_private
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_loopback
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            return True
+    return False
+
+
+def _download_capped(url: str, max_bytes: int, timeout: int) -> bytes:
+    """Fetch a vendor-supplied image URL under strict bounds: https only (or
+    http to an explicit loopback host, matching the in-process transport), no
+    URL that resolves to an internal address, a hard read cap, and a timeout.
+    Bytes are returned raw and never interpreted."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    if scheme == "http":
+        if host not in _LOOPBACK_HOSTS:
+            raise RuntimeError("Refusing a non-loopback plaintext image URL")
+    elif scheme == "https":
+        if _resolves_to_internal_address(host):
+            raise RuntimeError("Refusing an image URL that targets an internal host")
+    else:
+        raise RuntimeError("Unsupported image URL scheme")
+
+    http_request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(http_request, timeout=timeout) as response:
+        data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise RuntimeError("Vendor image is too large")
+    return data
 
 
 def _slug(model: ModelInfo) -> str:
@@ -230,7 +298,14 @@ class SyncImageProvider:
         leaf = parsed
         for step in desc.result_ref:
             leaf = leaf[step]
-        image_bytes = base64.b64decode(leaf)
+        if desc.result_fetch == "url":
+            if is_canceled():
+                raise JobCanceled()
+            image_bytes = _download_capped(
+                leaf, MAX_INPUT_FILE_BYTES, desc.timeout_s
+            )
+        else:
+            image_bytes = base64.b64decode(leaf)
         with open(request.out_path, "wb") as handle:
             handle.write(image_bytes)
         return GenerationResult(

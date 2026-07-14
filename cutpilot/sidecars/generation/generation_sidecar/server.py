@@ -84,6 +84,7 @@ class GenerationHandler(BaseHTTPRequestHandler):
                     "needs_input": model.needs_input,
                 }
                 for model in list_models()
+                if not model.unverified
             ]
             self._send_json(200, {"models": models})
             return

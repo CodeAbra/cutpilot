@@ -27,6 +27,10 @@ class ModelInfo:
     model_slug: str = ""
     category: str = "image"
     output_kind: str = "image"
+    # A model whose vendor contract is not yet confirmed against a live key.
+    # The server keeps these out of the model picker and key surface until
+    # they are confirmed, while they stay resolvable for a direct smoke test.
+    unverified: bool = False
 
 
 MODELS: tuple[ModelInfo, ...] = (
@@ -76,6 +80,18 @@ MODELS: tuple[ModelInfo, ...] = (
         price_usd=0.039,
         needs_key=True,
         model_slug="gemini-2.5-flash-image",
+    ),
+    # Slug, host region (BytePlus international vs Volcengine China), and whether
+    # the endpoint returns base64 rather than a URL are all unconfirmed against a
+    # live key; kept unverified until a real generation settles them.
+    ModelInfo(
+        id="bytedance/seedream-4-0",
+        label="Seedream 4.0",
+        provider="bytedance",
+        price_usd=0.03,
+        needs_key=True,
+        model_slug="seedream-4-0",
+        unverified=True,
     ),
 )
 
