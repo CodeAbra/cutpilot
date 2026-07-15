@@ -1907,6 +1907,237 @@ class SidecarTestCase(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self._assert_video_row_valid(model_by_id("luma/ray-3"))
 
+    def test_fal_image_row_drives_full_loop_through_the_envelope(self):
+        self.set_env_key("FAL_KEY")
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=2,
+            result_kind="image",
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            submit_id_path=("request_id",),
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("fal", stub, job_deadline_s=5.0)
+
+        progress = []
+        status, submitted = self.submit(
+            model="fal/flux-schnell",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".png"))
+        with open(final["result_path"], "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+        # The slug rides the submit path (never hardcoded); the key rides
+        # submit, poll, and the envelope, and none reaches the asset.
+        self.assertEqual(stub.submit_path, "/fal-ai/flux/schnell")
+        self.assertEqual(stub.submit_headers.get("Authorization"), "Key test")
+        self.assertEqual(stub.poll_headers.get("Authorization"), "Key test")
+        self.assertEqual(stub.response_auth, "Key test")
+        self.assertIsNone(stub.asset_auth)
+
+    def test_fal_minimax_video_row_drives_full_loop(self):
+        self.set_env_key("FAL_KEY")
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=2,
+            result_kind="video",
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            submit_id_path=("request_id",),
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("fal", stub, job_deadline_s=5.0)
+
+        model = model_by_id("fal/minimax-hailuo-02")
+        progress = []
+        status, submitted = self.submit(
+            model="fal/minimax-hailuo-02",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".mp4"))
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertEqual(content[4:8], MP4_FTYP)
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertAlmostEqual(final["cost_usd"], model.price_usd)
+        self.assertEqual(progress, sorted(progress))
+        pre_terminal = [
+            snap["progress"] for snap in snapshots if snap["state"] != "done"
+        ]
+        self.assertTrue(all(value < 1.0 for value in pre_terminal))
+        # MiniMax reached through Fal: the slug rides the submit path.
+        self.assertEqual(stub.submit_path, "/fal-ai/minimax/hailuo-02/standard")
+
+    def test_replicate_image_row_drives_full_loop(self):
+        self.set_env_key("REPLICATE_API_TOKEN")
+        stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=2,
+            result_kind="image",
+            poll_url_path=("urls", "get"),
+            success_value="succeeded",
+            running_value="processing",
+            result_ref_path=("output", 0),
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("replicate", stub, job_deadline_s=5.0)
+
+        final = self.run_to_done(
+            model="replicate/flux-schnell",
+            prompt="a neon skyline",
+            width=1024,
+            height=768,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".png"))
+        with open(final["result_path"], "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+        # Bearer auth on submit and poll; the body nests inputs under "input";
+        # the slug rides the model-scoped submit path.
+        self.assertEqual(stub.submit_headers.get("Authorization"), "Bearer test")
+        self.assertEqual(stub.poll_headers.get("Authorization"), "Bearer test")
+        self.assertIn("input", stub.submit_body)
+        self.assertEqual(stub.submit_body["input"]["prompt"], "a neon skyline")
+        self.assertNotIn("prompt", stub.submit_body)
+        self.assertEqual(
+            stub.submit_path, "/v1/models/black-forest-labs/flux-schnell/predictions"
+        )
+
+    def test_higgsfield_mocked_row_drives_full_loop(self):
+        self.set_env_key("HIGGSFIELD_API_KEY")
+        stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=2,
+            result_kind="image",
+            poll_url_path=("status_url",),
+            success_value="completed",
+            running_value="processing",
+            submit_id_path=("request_id",),
+            result_ref_path=("images", 0, "url"),
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("higgsfield", stub, job_deadline_s=5.0)
+
+        final = self.run_to_done(
+            model="higgsfield/soul-standard",
+            prompt="a portrait in warm light",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".png"))
+        with open(final["result_path"], "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+        self.assertEqual(stub.submit_headers.get("Authorization"), "Key test")
+        self.assertEqual(stub.poll_headers.get("Authorization"), "Key test")
+        self.assertEqual(stub.submit_path, "/higgsfield-ai/soul/standard")
+
+    def test_aggregator_failure_and_stall_surface_cleanly_without_leaking_key(self):
+        self.set_env_key("REPLICATE_API_TOKEN")
+        fail_stub = StubAsyncVendor(
+            mode="failure",
+            poll_url_path=("urls", "get"),
+            success_value="succeeded",
+            failure_value="failed",
+        ).start()
+        self.addCleanup(fail_stub.stop)
+        self.redirect_async_row(
+            "replicate", fail_stub, error_msg_path=("details",)
+        )
+        final = self.run_to_done(
+            model="replicate/flux-schnell", prompt="x", width=1024, height=768
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("quota exceeded", final["message"])
+        self.assertNotIn("test", final["message"])
+
+        stall_stub = StubAsyncVendor(
+            mode="never", poll_url_path=("urls", "get"), running_value="processing"
+        ).start()
+        self.addCleanup(stall_stub.stop)
+        self.redirect_async_row("replicate", stall_stub, job_deadline_s=0.2)
+        started = time.monotonic()
+        final = self.run_to_done(
+            model="replicate/flux-schnell", prompt="x", width=1024, height=768
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(final["state"], "error")
+        self.assertLess(elapsed, 3.0)
+        self.assertFalse(final["result_path"])
+        self.assertNotIn("test", final["message"])
+
+    def test_aggregator_rows_excluded_from_models_yet_resolve(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        listed = {model["id"] for model in data["models"]}
+        rows = (
+            ("fal/flux-schnell", "fal"),
+            ("fal/minimax-hailuo-02", "fal"),
+            ("replicate/flux-schnell", "replicate"),
+            ("higgsfield/soul-standard", "higgsfield"),
+        )
+        for model_id, provider in rows:
+            self.assertNotIn(model_id, listed)
+            status, data = self.submit(model=model_id)
+            self.assertEqual(status, 409, model_id)
+            self.assertEqual(data["error"], "missing_key")
+            self.assertEqual(data["provider"], provider)
+
+    def test_aggregator_providers_do_not_collide_with_direct_rows(self):
+        for model_id in (
+            "fal/flux-schnell",
+            "fal/minimax-hailuo-02",
+            "replicate/flux-schnell",
+            "higgsfield/soul-standard",
+        ):
+            self.assertIs(
+                providers.provider_for(model_by_id(model_id)), providers._async_job
+            )
+        # A Fal image and a Fal video model resolve one descriptor, two kinds.
+        fal_image = model_by_id("fal/flux-schnell")
+        fal_video = model_by_id("fal/minimax-hailuo-02")
+        self.assertIs(
+            providers.ASYNC_JOB_DESCRIPTORS[fal_image.descriptor or fal_image.provider],
+            providers.ASYNC_JOB_DESCRIPTORS[fal_video.descriptor or fal_video.provider],
+        )
+        # The direct rows still route to their own adapters, and no aggregator
+        # provider shadows a direct provider id.
+        self.assertIs(
+            providers.provider_for(model_by_id("bfl/flux-2-pro-preview")),
+            providers._async_job,
+        )
+        self.assertIs(
+            providers.provider_for(model_by_id("bytedance/seedream-4-0")),
+            providers._sync_image,
+        )
+        self.assertIs(
+            providers.provider_for(model_by_id("bytedance/seedance-1-pro")),
+            providers._async_job,
+        )
+        for aggregator in ("fal", "replicate", "higgsfield"):
+            self.assertNotIn(aggregator, providers.SYNC_IMAGE_DESCRIPTORS)
+
     def test_url_download_refuses_internal_and_plaintext_hosts(self):
         for url in (
             "http://example.com/x.png",
@@ -2054,6 +2285,10 @@ class SidecarTestCase(unittest.TestCase):
         # A row either points at a result reference or returns the bytes inline.
         self.assertTrue(desc.result_ref_path or desc.result_fetch == "bytes")
         self.assertIn(desc.result_fetch, {"url", "inline_b64", "bytes"})
+        # An envelope row's result lives at a separate URL, so its poll body
+        # carries no result reference; it must name the per-kind result map.
+        if desc.result_envelope_url_path is not None:
+            self.assertTrue(desc.result_ref_by_kind)
 
     def test_async_descriptor_rows_are_well_formed(self):
         for provider, desc in providers.ASYNC_JOB_DESCRIPTORS.items():
@@ -2064,6 +2299,13 @@ class SidecarTestCase(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self._assert_async_descriptor_row_valid("bfl", malformed)
+
+        # An aggregator envelope row stripped of its per-kind result map fails.
+        malformed_envelope = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["fal"], result_ref_by_kind={}
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_async_descriptor_row_valid("fal", malformed_envelope)
 
     def test_async_failure_state_becomes_error_without_leaking_key(self):
         self.set_env_key("BFL_API_KEY")

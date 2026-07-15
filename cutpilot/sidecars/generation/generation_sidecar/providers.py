@@ -886,6 +886,17 @@ def _build_seedance_body(desc: AsyncJobDescriptor, request: GenerationRequest):
     return body, request.width, request.height
 
 
+def _build_replicate_body(desc: AsyncJobDescriptor, request: GenerationRequest):
+    """Replicate nests the model inputs under an "input" object, unlike the flat
+    builder. The slug rides the submit path, not the body. The per-model input
+    dimensions stay out of the body until a live key confirms them."""
+    return (
+        {"input": {desc.prompt_key: request.prompt, **desc.extra_body}},
+        request.width,
+        request.height,
+    )
+
+
 # Video budgets run in minutes, and a valid clip is larger than a still image;
 # both are per-row bounds, never unlimited.
 VIDEO_JOB_DEADLINE_S = 300.0
@@ -1006,6 +1017,98 @@ ASYNC_JOB_DESCRIPTORS.update(
             status_source="http_code",
             result_fetch="bytes",
             result_kind="video",
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+    }
+)
+
+
+# The aggregators: one key each reaches many hosted models, so a single
+# descriptor serves both an image and a video model, selecting the result path
+# by output kind. Each row's slug placement, status enumeration, result paths,
+# and envelope host are provisional pending a live-key confirmation; each is row
+# data, so confirming one is a one-line edit. Every backing model stays
+# unverified until then. Fal returns only a status in the poll body and names
+# the result at a separate response_url fetched with the key, so its fetch is
+# restricted to Fal's own hosts; Replicate and Higgsfield return the result in
+# the poll body. The video budgets are reused since one descriptor serves both
+# an image and a video model.
+ASYNC_JOB_DESCRIPTORS.update(
+    {
+        "fal": AsyncJobDescriptor(
+            provider="fal",
+            base_url="https://queue.fal.run",
+            auth_header="Authorization",
+            auth_template="Key {key}",
+            submit_path="/{model}",
+            model_body_key=None,
+            size_mode="none",
+            job_id_path=("request_id",),
+            poll_url_path=("status_url",),
+            result_envelope_url_path=("response_url",),
+            status_path=("status",),
+            success_states=("COMPLETED",),
+            failure_states=(),
+            terminal_error_path=("error",),
+            result_fetch="url",
+            result_ref_by_kind={
+                "image": ("images", 0, "url"),
+                "video": ("video", "url"),
+            },
+            cancel_url_submit_path=("cancel_url",),
+            authed_host_suffixes=("fal.run", "fal.ai"),
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+        "replicate": AsyncJobDescriptor(
+            provider="replicate",
+            base_url="https://api.replicate.com",
+            auth_header="Authorization",
+            auth_template="Bearer {key}",
+            submit_path="/v1/models/{model}/predictions",
+            build_body=_build_replicate_body,
+            model_body_key=None,
+            size_mode="none",
+            job_id_path=("id",),
+            poll_url_path=("urls", "get"),
+            status_path=("status",),
+            success_states=("succeeded",),
+            failure_states=("failed", "canceled"),
+            result_fetch="url",
+            # Replicate's output is a scalar URL or a list per model; the index
+            # is row data, confirmed at the live gate.
+            result_ref_by_kind={"image": ("output", 0), "video": ("output",)},
+            cancel_url_path=("urls", "cancel"),
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+        "higgsfield": AsyncJobDescriptor(
+            provider="higgsfield",
+            base_url="https://platform.higgsfield.ai",
+            auth_header="Authorization",
+            # Single combined-secret stand-in; the two-secret template lands with
+            # the multi-secret key surface. Mocked-only until then.
+            auth_template="Key {key}",
+            submit_path="/{model}",
+            model_body_key=None,
+            size_mode="none",
+            job_id_path=("request_id",),
+            poll_url_path=("status_url",),
+            status_path=("status",),
+            success_states=("completed",),
+            failure_states=("failed",),
+            result_fetch="url",
+            result_ref_by_kind={
+                "image": ("images", 0, "url"),
+                "video": ("video", "url"),
+            },
             poll_interval_s=VIDEO_POLL_INTERVAL_S,
             poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
             job_deadline_s=VIDEO_JOB_DEADLINE_S,

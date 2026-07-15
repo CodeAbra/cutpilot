@@ -25,6 +25,12 @@ ENV_VARS: dict[str, str] = {
     "luma": "LUMA_API_KEY",
     "leonardo": "LEONARDO_API_KEY",
     "stability": "STABILITY_API_KEY",
+    # Aggregators: one key each reaches many hosted models. Higgsfield's second
+    # secret slot lands with the multi-secret key surface; the single row here
+    # backs its mocked path only.
+    "fal": "FAL_KEY",
+    "replicate": "REPLICATE_API_TOKEN",
+    "higgsfield": "HIGGSFIELD_API_KEY",
 }
 
 

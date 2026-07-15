@@ -183,6 +183,58 @@ MODELS: tuple[ModelInfo, ...] = (
         output_kind="video",
         unverified=True,
     ),
+    # Aggregator rows: one key each reaches many hosted models. The
+    # underlying-model id / slug, status enumeration, and result path of each is
+    # unconfirmed against a live key; kept unverified — out of the picker — until
+    # a real generation settles them.
+    ModelInfo(
+        id="fal/flux-schnell",
+        label="Flux Schnell (Fal)",
+        provider="fal",
+        price_usd=0.003,
+        needs_key=True,
+        model_slug="fal-ai/flux/schnell",
+        category="image",
+        output_kind="image",
+        unverified=True,
+    ),
+    # MiniMax reached through Fal as a clean submit->poll->fetch, with no direct
+    # file-retrieve step.
+    ModelInfo(
+        id="fal/minimax-hailuo-02",
+        label="MiniMax Hailuo 02 (Fal)",
+        provider="fal",
+        price_usd=0.28,
+        needs_key=True,
+        model_slug="fal-ai/minimax/hailuo-02/standard",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
+    ModelInfo(
+        id="replicate/flux-schnell",
+        label="Flux Schnell (Replicate)",
+        provider="replicate",
+        price_usd=0.003,
+        needs_key=True,
+        model_slug="black-forest-labs/flux-schnell",
+        category="image",
+        output_kind="image",
+        unverified=True,
+    ),
+    # Mocked-only: the live two-secret key surface lands with the multi-secret
+    # phase.
+    ModelInfo(
+        id="higgsfield/soul-standard",
+        label="Higgsfield Soul (Standard)",
+        provider="higgsfield",
+        price_usd=0.05,
+        needs_key=True,
+        model_slug="higgsfield-ai/soul/standard",
+        category="image",
+        output_kind="image",
+        unverified=True,
+    ),
 )
 
 
