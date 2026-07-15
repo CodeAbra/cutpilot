@@ -1181,6 +1181,9 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(final["state"], "done")
         self.assertEqual(stub.last_headers.get("Authorization"), "Bearer test")
         self.assertEqual(stub.last_headers.get("Content-Type"), "application/json")
+        # The JSON path sends no Accept header; it is added only on the
+        # multipart branch, so its absence locks the byte-identity guarantee.
+        self.assertIsNone(stub.last_headers.get("Accept"))
         self.assertEqual(
             stub.last_body,
             {
