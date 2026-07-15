@@ -185,11 +185,14 @@ MODELS: tuple[ModelInfo, ...] = (
         unverified=True,
     ),
     # The exact multipart fields and the 202/200 completion semantics are
-    # unconfirmed against a live key.
+    # unconfirmed against a live key. Routed by descriptor so its async video
+    # shape does not collide with the synchronous Stability image rows that
+    # share the stability provider id and key.
     ModelInfo(
         id="stability/image-to-video",
         label="Stability Image-to-Video",
         provider="stability",
+        descriptor="stability",
         price_usd=0.2,
         needs_key=True,
         needs_input=True,
@@ -197,6 +200,49 @@ MODELS: tuple[ModelInfo, ...] = (
         model_slug="image-to-video",
         category="video",
         output_kind="video",
+        unverified=True,
+    ),
+    # Stability synchronous still-image tiers: one multipart POST returns the
+    # finished image as raw bytes. Both share the stability key and one
+    # descriptor; the tier slug rides the request path. The slug, aspect-ratio,
+    # field names, and price are unconfirmed against a live key; kept
+    # unverified — out of the picker — until a real generation settles them.
+    ModelInfo(
+        id="stability/stable-image-ultra",
+        label="Stability Stable Image Ultra",
+        provider="stability",
+        price_usd=0.08,
+        needs_key=True,
+        model_slug="ultra",
+        category="image",
+        output_kind="image",
+        unverified=True,
+    ),
+    ModelInfo(
+        id="stability/stable-image-core",
+        label="Stability Stable Image Core",
+        provider="stability",
+        price_usd=0.03,
+        needs_key=True,
+        model_slug="core",
+        category="image",
+        output_kind="image",
+        unverified=True,
+    ),
+    # Ideogram synchronous still image: a multipart POST returns a JSON result
+    # url the headerless download fetches. The slug is nominal (the path is
+    # fixed); the aspect-ratio and field names are unconfirmed against a live
+    # key; kept unverified — out of the picker — until a real generation settles
+    # them.
+    ModelInfo(
+        id="ideogram/ideogram-v3",
+        label="Ideogram 3.0",
+        provider="ideogram",
+        price_usd=0.08,
+        needs_key=True,
+        model_slug="ideogram-v3",
+        category="image",
+        output_kind="image",
         unverified=True,
     ),
     # Aggregator rows: one key each reaches many hosted models. The

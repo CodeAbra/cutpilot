@@ -30,6 +30,7 @@ ENV_VARS: dict[str, str] = {
     "luma": "LUMA_API_KEY",
     "leonardo": "LEONARDO_API_KEY",
     "stability": "STABILITY_API_KEY",
+    "ideogram": "IDEOGRAM_API_KEY",
     # Aggregators: one key each reaches many hosted models.
     "fal": "FAL_KEY",
     "replicate": "REPLICATE_API_TOKEN",

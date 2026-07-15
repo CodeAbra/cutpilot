@@ -248,6 +248,43 @@ SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
         result_ref=("data", 0, "url"),
         result_fetch="url",
     ),
+    # One shared row serves both the ultra and core tiers: the tier slug rides
+    # the {model} path segment. Accept: image/* returns the finished image as
+    # raw bytes, sidestepping the base64 JSON field-name ambiguity. The slug,
+    # the accepted aspect-ratio (colon form) and output format are provisional
+    # until a live key confirms them.
+    "stability": SyncImageDescriptor(
+        provider="stability",
+        base_url="https://api.stability.ai",
+        generate_path="/v2beta/stable-image/generate/{model}",
+        auth_header="Authorization",
+        auth_template="Bearer {key}",
+        size_mode="none",
+        extra_body={"output_format": "png", "aspect_ratio": "1:1"},
+        result_fetch="bytes",
+        body_encoding="multipart",
+        accept_header="image/*",
+        prompt_key="prompt",
+    ),
+    # The path is fixed (the {model} template is a no-op). The key rides the
+    # Api-Key custom header, not Bearer. The result is a JSON data[0].url the
+    # shipped headerless download fetches, so the key never reaches the
+    # signed-asset host. The aspect-ratio (x form) and rendering speed are
+    # provisional until a live key confirms them.
+    "ideogram": SyncImageDescriptor(
+        provider="ideogram",
+        base_url="https://api.ideogram.ai",
+        generate_path="/v1/ideogram-v3/generate",
+        auth_header="Api-Key",
+        auth_template="{key}",
+        size_mode="none",
+        extra_body={"rendering_speed": "DEFAULT", "aspect_ratio": "1x1"},
+        result_ref=("data", 0, "url"),
+        result_fetch="url",
+        body_encoding="multipart",
+        accept_header="application/json",
+        prompt_key="prompt",
+    ),
 }
 
 

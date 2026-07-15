@@ -2716,6 +2716,202 @@ class SidecarTestCase(unittest.TestCase):
             True,
         )
 
+    def test_stability_image_row_drives_full_loop(self):
+        # Both tiers share one descriptor: the ultra/core slug rides the request
+        # path, the multipart submit carries the prompt and the aspect/format
+        # fields (no model part), Accept: image/* returns the raw image, and the
+        # bytes land as a .png with a matching digest. The key rides only the
+        # Bearer submit header and never leaks.
+        self.set_env_key("STABILITY_API_KEY", "sk-stability-secret")
+        stub = StubVendor(
+            raw_result=STUB_PNG, raw_result_content_type="image/png"
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("stability", stub)
+
+        final = self.run_to_done(
+            model="stability/stable-image-ultra",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".png"))
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertTrue(content.startswith(PNG_SIGNATURE))
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertAlmostEqual(
+            final["cost_usd"], model_by_id("stability/stable-image-ultra").price_usd
+        )
+        self.assertEqual(stub.last_path, "/v2beta/stable-image/generate/ultra")
+        self.assertEqual(
+            stub.last_headers.get("Authorization"), "Bearer sk-stability-secret"
+        )
+        self.assertEqual(stub.last_headers.get("Accept"), "image/*")
+        self.assertTrue(
+            stub.last_headers.get("Content-Type", "").startswith("multipart/form-data")
+        )
+        raw = stub.last_raw
+        self.assertIn(b'name="prompt"', raw)
+        self.assertIn(b"a lighthouse at dusk", raw)
+        self.assertIn(b'name="aspect_ratio"', raw)
+        self.assertIn(b"1:1", raw)
+        self.assertIn(b'name="output_format"', raw)
+        self.assertIn(b"png", raw)
+        self.assertNotIn(b'name="model"', raw)
+        for value in final.values():
+            self.assertNotIn("sk-stability-secret", str(value))
+
+        # The same redirected descriptor serves the core tier: only the path
+        # slug differs, proving the one shared row drives both tiers.
+        core = self.run_to_done(
+            model="stability/stable-image-core",
+            prompt="a wide vista",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(core["state"], "done")
+        self.assertEqual(stub.last_path, "/v2beta/stable-image/generate/core")
+
+    def test_stability_image_failure_surfaces_message_without_leaking_key(self):
+        self.set_env_key("STABILITY_API_KEY", "sk-stability-secret")
+        stub = StubVendor(
+            status=400, body={"error": {"message": "content moderated"}}
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("stability", stub)
+
+        final = self.run_to_done(
+            model="stability/stable-image-ultra",
+            prompt="x",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("content moderated", final["message"])
+        self.assertNotIn("sk-stability-secret", final["message"])
+
+    def test_ideogram_row_drives_full_loop(self):
+        # A multipart submit returns a JSON data[0].url the shipped headerless
+        # download fetches. The key rides the Api-Key custom header on submit,
+        # not Authorization, and never reaches the signed-asset host.
+        self.set_env_key("IDEOGRAM_API_KEY", "id-ideogram-secret")
+        stub = StubVendor()
+        stub.body = {"data": [{"url": stub.url + "/img/x.png"}]}
+        stub.start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("ideogram", stub)
+
+        final = self.run_to_done(
+            model="ideogram/ideogram-v3",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertTrue(content.startswith(PNG_SIGNATURE))
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertAlmostEqual(
+            final["cost_usd"], model_by_id("ideogram/ideogram-v3").price_usd
+        )
+        self.assertEqual(stub.last_headers.get("Api-Key"), "id-ideogram-secret")
+        self.assertIsNone(stub.last_headers.get("Authorization"))
+        self.assertTrue(
+            stub.last_headers.get("Content-Type", "").startswith("multipart/form-data")
+        )
+        raw = stub.last_raw
+        self.assertIn(b'name="prompt"', raw)
+        self.assertIn(b'name="rendering_speed"', raw)
+        self.assertIn(b"DEFAULT", raw)
+        self.assertIn(b'name="aspect_ratio"', raw)
+        self.assertIn(b"1x1", raw)
+        # The signed-asset fetch carried no key and no bearer token.
+        self.assertIsNotNone(stub.asset_headers)
+        self.assertIsNone(stub.asset_headers.get("Api-Key"))
+        self.assertIsNone(stub.asset_headers.get("Authorization"))
+        for value in final.values():
+            self.assertNotIn("id-ideogram-secret", str(value))
+
+    def test_ideogram_result_url_ssrf_guarded(self):
+        self.set_env_key("IDEOGRAM_API_KEY", "id-ideogram-secret")
+        stub = StubVendor()
+        stub.body = {"data": [{"url": "https://169.254.169.254/x.png"}]}
+        stub.start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("ideogram", stub)
+
+        final = self.run_to_done(
+            model="ideogram/ideogram-v3",
+            prompt="x",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertNotIn("169.254", final["message"])
+        self.assertNotIn("id-ideogram-secret", final["message"])
+
+    def test_stability_image_and_i2v_do_not_collide(self):
+        self.assertIs(
+            providers.provider_for(model_by_id("stability/image-to-video")),
+            providers._async_job,
+        )
+        for image_id in (
+            "stability/stable-image-ultra",
+            "stability/stable-image-core",
+            "ideogram/ideogram-v3",
+        ):
+            self.assertIs(
+                providers.provider_for(model_by_id(image_id)),
+                providers._sync_image,
+                image_id,
+            )
+        self.assertEqual(
+            model_by_id("stability/image-to-video").descriptor, "stability"
+        )
+        self.assertIn("stability", providers.ASYNC_JOB_DESCRIPTORS)
+        self.assertIn("stability", providers.SYNC_IMAGE_DESCRIPTORS)
+
+    def test_new_image_rows_excluded_from_models_yet_key_registrable(self):
+        image_rows = (
+            "stability/stable-image-ultra",
+            "stability/stable-image-core",
+            "ideogram/ideogram-v3",
+        )
+        _, data = self.request("GET", "/models")
+        listed = {entry["id"] for entry in data["models"]}
+        for model_id in image_rows:
+            self.assertNotIn(model_id, listed)
+
+        # A default submit (no opt-in) is refused as an unverified model.
+        for model_id in image_rows:
+            status, data = self.submit(
+                model=model_id, prompt="x", width=1024, height=1024
+            )
+            self.assertEqual(status, 409, model_id)
+            self.assertEqual(data["error"], "unverified_model")
+
+        # Ideogram is a key-registrable single-secret vendor that never surfaces
+        # in the picker; setting its key flips has_key without listing the row.
+        status, data = self.request("GET", "/models?include_hidden=1")
+        vendors = {entry["provider"]: entry for entry in data["key_vendors"]}
+        self.assertIn("ideogram", vendors)
+        slots = vendors["ideogram"]["secret_slots"]
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(slots[0]["account"], "ideogram")
+        self.assertFalse(
+            any(v["provider"] == "ideogram" and v["has_key"] for v in data["key_vendors"])
+        )
+        self.set_env_key("IDEOGRAM_API_KEY", "id-ideogram-secret")
+        status, data = self.request("GET", "/models?include_hidden=1")
+        listed = {entry["id"] for entry in data["models"]}
+        self.assertTrue(
+            any(v["provider"] == "ideogram" and v["has_key"] for v in data["key_vendors"])
+        )
+        self.assertNotIn("ideogram/ideogram-v3", listed)
+
     def test_video_row_failure_surfaces_message_without_leaking_key(self):
         self.set_env_key("LUMA_API_KEY")
         stub = self._video_stub_for("luma", mode="failure").start()
