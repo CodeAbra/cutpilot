@@ -671,7 +671,9 @@ def _resolve_size(
 ) -> tuple[int, int]:
     if desc.size_mode in ("passthrough", "none"):
         # "none": the endpoint carries no size field; the requested dimensions
-        # pass through unchanged and are reported on the result.
+        # pass through unchanged and are reported on the result. For a row that
+        # sends a fixed aspect_ratio the reported WxH is the request, not the
+        # aspect-fixed output — reconcile when live aspect handling lands.
         return width, height
     # fixed_set: the endpoint accepts only a fixed set; pick the closest aspect.
     aspect = width / max(1, height)
