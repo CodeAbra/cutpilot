@@ -101,6 +101,7 @@ bool sameNode(const core::Node &a, const core::Node &b)
         || a.mediaPath != b.mediaPath || a.externalType != b.externalType
         || a.externalData != b.externalData || !(a.comp == b.comp)
         || a.resultPath != b.resultPath || a.resultDigest != b.resultDigest
+        || a.resultKind != b.resultKind
         || a.ports.size() != b.ports.size())
         return false;
     for (int i = 0; i < a.ports.size(); ++i) {
@@ -137,6 +138,34 @@ private slots:
         QCOMPARE(wire.id, board.connections().first().id);
         QCOMPARE(wire.fromNodeId, board.connections().first().fromNodeId);
         QCOMPARE(wire.toPortIndex, board.connections().first().toPortIndex);
+    }
+
+    void videoResultKindRoundTripsAndImageStaysEmpty()
+    {
+        core::NodeGraph graph;
+        core::Node video = core::catalogPrototype(QStringLiteral("Generate Image"));
+        video.resultPath = QStringLiteral("/tmp/result.mp4");
+        video.resultKind = QStringLiteral("video");
+        graph.addNode(video);
+        core::Node image = core::catalogPrototype(QStringLiteral("Generate Image"));
+        image.resultPath = QStringLiteral("/tmp/result.png");
+        const int imageId = graph.addNode(image);
+
+        const QJsonObject json = core::workflowToJson(graph, QString());
+
+        // The image result writes no kind key; a document from before this
+        // field then loads as an image.
+        for (const QJsonValue &value :
+             json[QLatin1String("nodes")].toArray()) {
+            const QJsonObject node = value.toObject();
+            if (node[QLatin1String("id")].toInt() == imageId)
+                QVERIFY(!node.contains(QLatin1String("resultKind")));
+        }
+
+        core::NodeGraph restored;
+        QVERIFY(core::workflowFromJson(json, restored, nullptr));
+        QCOMPARE(restored.nodes()[0].resultKind, QStringLiteral("video"));
+        QVERIFY(restored.nodes()[1].resultKind.isEmpty());
     }
 
     void restoredIdsDoNotCollideWithNewAdds()

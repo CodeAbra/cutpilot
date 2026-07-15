@@ -1152,6 +1152,11 @@ int main(int argc, char *argv[])
                 for (const core::Node &node : layer->graph().nodes()) {
                     if (node.resultPath.isEmpty())
                         continue;
+                    // A video result is left for the compositor to adopt and
+                    // pre-roll; decoding it as an image would show nothing and
+                    // force a large file through the GUI thread at load.
+                    if (node.resultKind == QLatin1String("video"))
+                        continue;
                     const QImage media(node.resultPath);
                     if (!media.isNull())
                         layer->setNodeMedia(node.id, media);
@@ -1173,6 +1178,10 @@ int main(int argc, char *argv[])
             // Run results land outside the command stack; a finished result
             // still belongs in the document, or a reopened board forgets it.
             QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady,
+                             store, [store] { store->scheduleSave(); });
+            // A finished video result also lands outside the command stack, so
+            // it must be persisted or a reopened board forgets it.
+            QObject::connect(coordinator, &GenerationCoordinator::nodeVideoReady,
                              store, [store] { store->scheduleSave(); });
         }
         previews = new PreviewController(view);

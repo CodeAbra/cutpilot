@@ -193,6 +193,10 @@ QJsonObject nodeToJson(const Node &node)
         json[QLatin1String("costUsd")] = node.costUsd;
         json[QLatin1String("resultWidth")] = node.resultWidth;
         json[QLatin1String("resultHeight")] = node.resultHeight;
+        // Written only for a video result; its absence loads as an image, so a
+        // document from before this field stays byte-compatible.
+        if (!node.resultKind.isEmpty())
+            json[QLatin1String("resultKind")] = node.resultKind;
     }
     return json;
 }
@@ -257,6 +261,7 @@ bool nodeFromJson(const QJsonObject &json, Node &node)
     node.costUsd = json[QLatin1String("costUsd")].toDouble(-1.0);
     node.resultWidth = json[QLatin1String("resultWidth")].toInt();
     node.resultHeight = json[QLatin1String("resultHeight")].toInt();
+    node.resultKind = json[QLatin1String("resultKind")].toString();
     return true;
 }
 
