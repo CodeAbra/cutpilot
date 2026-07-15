@@ -405,6 +405,10 @@ def _guard_url(url: str) -> tuple[str, str, int, str, str]:
     transport); every resolved address of an https host must be external. Shared
     by the initial fetch and every redirect hop so there is one enforcement
     point."""
+    if not isinstance(url, str):
+        # A vendor field that should hold a URL but is a number, object, or
+        # null settles as an unexpected shape rather than crashing on urlsplit.
+        raise RuntimeError("Refusing a URL of an unexpected shape")
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
     host = parts.hostname or ""
@@ -704,6 +708,8 @@ def _authed_host_allowed(url, desc) -> bool:
     This is stricter than _guard_url, which only blocks internal hosts and would
     still permit an arbitrary external host — so a vendor-controlled URL cannot
     exfiltrate the key to an off-host address."""
+    if not isinstance(url, str):
+        return False
     try:
         host = (urlsplit(url).hostname or "").lower()
         base_host = (urlsplit(desc.base_url).hostname or "").lower()

@@ -1391,6 +1391,29 @@ class SidecarTestCase(unittest.TestCase):
             )
         )
 
+    def test_non_string_poll_url_settles_clean_without_crashing(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        )
+        # A vendor field that should hold a poll URL but is a number reaches the
+        # URL guard as a non-string. It must settle as an unexpected shape, not
+        # crash the job with an uncaught TypeError from urlsplit.
+        stub.injected_polling_url = 123
+        stub.start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(stub)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._image_model(), "nonstring-poll.png")
+        message = str(caught.exception)
+        self.assertIn("unexpected response shape", message)
+        self.assertIsNone(stub.poll_headers)
+        self.assertEqual(stub.poll_count, 0)
+        self.assertNotIn("secret-key", message)
+
     def test_envelope_url_ssrf_guarded(self):
         stub = StubAsyncVendor(
             envelope=True,
