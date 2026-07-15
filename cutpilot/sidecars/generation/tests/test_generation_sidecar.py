@@ -1309,6 +1309,64 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(stub.last_headers.get("Authorization"), "Bearer test")
         self.assertEqual(stub.last_body["model"], "seedream-4-0")
 
+    def test_sync_multipart_bytes_submit_and_result(self):
+        # The new multipart + raw-bytes sync capability driven in isolation over
+        # an existing sync provider row, with no new registry entry: the request
+        # is a well-formed multipart body carrying the prompt and the extra
+        # fields (and no model/size part), the slug is templated onto the path,
+        # the Accept header asks for raw bytes, and the POST body lands as the
+        # image with a matching digest. The resolved key never leaves the submit
+        # auth header.
+        self.set_env_key("OPENAI_API_KEY", "sekret-key-value")
+        stub = StubVendor(
+            raw_result=STUB_PNG, raw_result_content_type="image/png"
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor(
+            "openai",
+            stub,
+            body_encoding="multipart",
+            accept_header="image/*",
+            result_fetch="bytes",
+            size_mode="none",
+            generate_path="/gen/{model}",
+            extra_body={"aspect_ratio": "1:1", "output_format": "png"},
+        )
+
+        final = self.run_to_done(
+            model="openai/gpt-image-1",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(
+            stub.last_headers.get("Content-Type", "").startswith("multipart/form-data")
+        )
+        self.assertEqual(stub.last_headers.get("Accept"), "image/*")
+        self.assertEqual(
+            stub.last_headers.get("Authorization"), "Bearer sekret-key-value"
+        )
+        self.assertEqual(stub.last_path, "/gen/gpt-image-1")
+        self.assertIsNone(stub.last_body)
+        raw = stub.last_raw
+        self.assertIn(b'name="prompt"', raw)
+        self.assertIn(b"a lighthouse at dusk", raw)
+        self.assertIn(b'name="aspect_ratio"', raw)
+        self.assertIn(b"1:1", raw)
+        self.assertIn(b'name="output_format"', raw)
+        self.assertIn(b"png", raw)
+        self.assertNotIn(b'name="model"', raw)
+        self.assertNotIn(b'name="size"', raw)
+
+        with open(final["result_path"], "rb") as handle:
+            body = handle.read()
+        self.assertTrue(body.startswith(PNG_SIGNATURE))
+        self.assertEqual(body, STUB_PNG)
+        self.assertEqual(final["result_digest"], hashlib.sha256(body).hexdigest())
+        for value in final.values():
+            self.assertNotIn("sekret-key-value", str(value))
+
     def test_async_engine_submit_poll_ready_writes_image_and_carries_x_key(self):
         stub = StubAsyncVendor(mode="ready", polls_before_ready=2).start()
         self.addCleanup(stub.stop)
@@ -3171,11 +3229,18 @@ class SidecarTestCase(unittest.TestCase):
     def _assert_descriptor_row_valid(self, provider, desc):
         self.assertEqual(desc.provider, provider)
         self.assertTrue(desc.base_url)
+        self.assertTrue(desc.generate_path)
         self.assertTrue(desc.auth_header)
         self.assertTrue(desc.auth_template)
-        self.assertTrue(desc.result_ref)
-        self.assertIn(desc.result_fetch, {"inline_b64", "url"})
-        self.assertIn(desc.size_mode, {"fixed_set", "passthrough"})
+        self.assertIn(desc.result_fetch, {"inline_b64", "url", "bytes"})
+        self.assertIn(desc.size_mode, {"fixed_set", "passthrough", "none"})
+        # A multipart row rides its prompt under a named form field.
+        if desc.body_encoding == "multipart":
+            self.assertTrue(desc.prompt_key)
+        # A row that does not return the image inline in the POST body must name
+        # where the image reference lives in the JSON response.
+        if desc.result_fetch != "bytes":
+            self.assertTrue(desc.result_ref)
 
     def _assert_async_descriptor_row_valid(self, key, desc):
         self.assertTrue(desc.provider)
@@ -3388,6 +3453,29 @@ class SidecarTestCase(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self._assert_descriptor_row_valid("openai", malformed)
+
+        # A multipart raw-bytes result mode is valid and needs no result
+        # reference (the POST body is the image).
+        bytes_row = dataclasses.replace(
+            providers.SYNC_IMAGE_DESCRIPTORS["openai"],
+            body_encoding="multipart",
+            result_fetch="bytes",
+            result_ref=(),
+            size_mode="none",
+        )
+        self._assert_descriptor_row_valid("openai", bytes_row)
+
+        # A multipart row without a prompt form-field name is rejected.
+        no_prompt = dataclasses.replace(bytes_row, prompt_key="")
+        with self.assertRaises(AssertionError):
+            self._assert_descriptor_row_valid("openai", no_prompt)
+
+        # An unknown result-fetch mode is rejected.
+        unknown = dataclasses.replace(
+            providers.SYNC_IMAGE_DESCRIPTORS["openai"], result_fetch="teleport"
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_descriptor_row_valid("openai", unknown)
 
     def test_models_report_prompt_and_input_needs(self):
         status, data = self.request("GET", "/models")

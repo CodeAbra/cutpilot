@@ -195,6 +195,16 @@ class SyncImageDescriptor:
     result_ref: tuple = ()
     result_fetch: str = "inline_b64"
     timeout_s: int = 120
+    # How the submit body is encoded on the wire. "json" builds the shipped
+    # OpenAI-compatible object; "multipart" builds a form-data body whose scalar
+    # parts come from the prompt and extra_body (no auto model/size field).
+    body_encoding: str = "json"
+    # An Accept header value sent only when non-empty. A vendor that answers a
+    # POST with the finished image asks for image/* so the response body is the
+    # raw image rather than a base64 JSON envelope.
+    accept_header: str = ""
+    # The multipart form-field name the prompt rides under.
+    prompt_key: str = "prompt"
 
 
 SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
@@ -591,10 +601,38 @@ def _slug(model: ModelInfo) -> str:
     return model.model_slug or model.id.split("/", 1)[1]
 
 
+def _build_sync_multipart_body(
+    desc: SyncImageDescriptor, request: GenerationRequest
+) -> tuple[bytes, str]:
+    """Build a multipart/form-data submit body for the synchronous image path:
+    a value-only form part for the prompt under the row's prompt field name,
+    then one part per extra_body field in insertion order. No model or size
+    field is emitted — the slug rides the path and the aspect ratio rides
+    extra_body. The boundary is seeded from os.urandom so a crafted prompt
+    cannot forge a part boundary. Returns (body_bytes, content_type) — a
+    distinct arity from the async file-part builder so the two never mix."""
+    boundary = "cutpilot" + hashlib.sha256(os.urandom(32)).hexdigest()
+    fields = {desc.prompt_key: request.prompt, **desc.extra_body}
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
+        )
+    parts.append(f"--{boundary}--\r\n".encode())
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return b"".join(parts), content_type
+
+
 def _resolve_size(
     desc: SyncImageDescriptor, width: int, height: int
 ) -> tuple[int, int]:
-    if desc.size_mode == "passthrough":
+    if desc.size_mode in ("passthrough", "none"):
+        # "none": the endpoint carries no size field; the requested dimensions
+        # pass through unchanged and are reported on the result.
         return width, height
     # fixed_set: the endpoint accepts only a fixed set; pick the closest aspect.
     aspect = width / max(1, height)
@@ -618,29 +656,40 @@ class SyncImageProvider:
             raise MissingKeyError(desc.provider)
 
         width, height = _resolve_size(desc, request.width, request.height)
-        body = {
-            "model": _slug(request.model),
-            "prompt": request.prompt,
-            "size": desc.size_format.format(w=width, h=height),
-            **desc.extra_body,
-        }
-        payload = json.dumps(body).encode()
+        url = desc.base_url + desc.generate_path.format(model=_slug(request.model))
+        if desc.body_encoding == "multipart":
+            payload, content_type = _build_sync_multipart_body(desc, request)
+            headers = {
+                desc.auth_header: desc.auth_template.format(key=key),
+                "Content-Type": content_type,
+            }
+            if desc.accept_header:
+                headers["Accept"] = desc.accept_header
+        else:
+            body = {
+                "model": _slug(request.model),
+                "prompt": request.prompt,
+                "size": desc.size_format.format(w=width, h=height),
+                **desc.extra_body,
+            }
+            payload = json.dumps(body).encode()
+            headers = {
+                desc.auth_header: desc.auth_template.format(key=key),
+                "Content-Type": "application/json",
+            }
 
         on_progress(0.05)
         http_request = urllib.request.Request(
-            desc.base_url + desc.generate_path,
+            url,
             data=payload,
-            headers={
-                desc.auth_header: desc.auth_template.format(key=key),
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
             with urllib.request.urlopen(
                 http_request, timeout=desc.timeout_s
             ) as response:
-                parsed = json.loads(response.read())
+                raw_response = response.read()
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
@@ -661,22 +710,27 @@ class SyncImageProvider:
             raise JobCanceled()
 
         on_progress(0.9)
-        leaf = parsed
-        try:
-            for step in desc.result_ref:
-                leaf = leaf[step]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError(
-                f"{desc.provider} returned an unexpected response shape"
-            ) from exc
-        if desc.result_fetch == "url":
-            if is_canceled():
-                raise JobCanceled()
-            image_bytes = _download_capped(
-                leaf, MAX_INPUT_FILE_BYTES, desc.timeout_s
-            )
+        if desc.result_fetch == "bytes":
+            # The POST response body is the finished image; no JSON parse.
+            image_bytes = raw_response
         else:
-            image_bytes = base64.b64decode(leaf)
+            parsed = json.loads(raw_response)
+            leaf = parsed
+            try:
+                for step in desc.result_ref:
+                    leaf = leaf[step]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError(
+                    f"{desc.provider} returned an unexpected response shape"
+                ) from exc
+            if desc.result_fetch == "url":
+                if is_canceled():
+                    raise JobCanceled()
+                image_bytes = _download_capped(
+                    leaf, MAX_INPUT_FILE_BYTES, desc.timeout_s
+                )
+            else:
+                image_bytes = base64.b64decode(leaf)
         with open(request.out_path, "wb") as handle:
             handle.write(image_bytes)
         return GenerationResult(
