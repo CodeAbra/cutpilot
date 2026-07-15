@@ -652,6 +652,66 @@ class SidecarTestCase(unittest.TestCase):
                 self.assertFalse(model["unverified"], model["id"])
         self.assertNotIn("runway/gen4-turbo", listed)
 
+    def test_key_vendors_channel_carries_value_free_secret_slots(self):
+        status, data = self.request("GET", "/models?include_hidden=1")
+        self.assertEqual(status, 200)
+        vendors = {entry["provider"]: entry for entry in data["key_vendors"]}
+
+        # A two-secret vendor lists both slots with their labels and accounts.
+        self.assertIn("kling", vendors)
+        kling_slots = vendors["kling"]["secret_slots"]
+        self.assertEqual(
+            [(s["name"], s["label"], s["account"]) for s in kling_slots],
+            [
+                ("access_key", "Access Key", "kling.access_key"),
+                ("secret_key", "Secret Key", "kling.secret_key"),
+            ],
+        )
+
+        # A single-secret vendor lists one slot whose account is the provider id.
+        openai_slots = vendors["openai"]["secret_slots"]
+        self.assertEqual(len(openai_slots), 1)
+        self.assertEqual(openai_slots[0]["account"], "openai")
+        self.assertEqual(openai_slots[0]["label"], "API Key")
+
+        # No slot ever carries a value.
+        for entry in data["key_vendors"]:
+            for slot in entry["secret_slots"]:
+                self.assertNotIn("value", slot)
+                self.assertEqual(set(slot.keys()), {"name", "label", "account"})
+
+        # Every slot account matches what the sidecar itself reads for that
+        # provider, so the surface and the service never disagree.
+        for entry in data["key_vendors"]:
+            expected = [slot.account for slot in keys.slots_for(entry["provider"])]
+            self.assertEqual(
+                [slot["account"] for slot in entry["secret_slots"]], expected
+            )
+
+    def test_key_registrable_vendors_stay_out_of_the_model_list(self):
+        status, data = self.request("GET", "/models?include_hidden=1")
+        self.assertEqual(status, 200)
+        listed = {model["id"] for model in data["models"]}
+        vendors = {entry["provider"] for entry in data["key_vendors"]}
+
+        # Kling and Higgsfield are key-registrable but never pickable.
+        self.assertIn("kling", vendors)
+        self.assertIn("higgsfield", vendors)
+        self.assertNotIn("kling/kling-v2-master", listed)
+        self.assertNotIn("higgsfield/soul-standard", listed)
+
+        # Setting both fake secrets flips the vendor's presence without ever
+        # surfacing it in the model list.
+        self.assertFalse(any(v["provider"] == "kling" and v["has_key"]
+                             for v in data["key_vendors"]))
+        self.set_env_key("KLING_ACCESS_KEY", "kling-access-000000")
+        self.set_env_key("KLING_SECRET_KEY", "kling-secret-000000")
+        status, data = self.request("GET", "/models?include_hidden=1")
+        listed = {model["id"] for model in data["models"]}
+        self.assertTrue(any(v["provider"] == "kling" and v["has_key"]
+                            for v in data["key_vendors"]))
+        self.assertNotIn("kling/kling-v2-master", listed)
+
     def test_same_inputs_produce_identical_images(self):
         digests = []
         for _ in range(2):

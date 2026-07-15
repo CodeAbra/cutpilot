@@ -78,8 +78,9 @@ class GenerationHandler(BaseHTTPRequestHandler):
             # keyless ones, so an unconfirmed vendor row never becomes runnable
             # through this route; the picker still filters every unverified row.
             include_hidden = "include_hidden=1" in query.split("&")
-            models = [
-                {
+
+            def _entry(model) -> dict:
+                return {
                     "id": model.id,
                     "label": model.label,
                     "provider": model.provider,
@@ -90,11 +91,30 @@ class GenerationHandler(BaseHTTPRequestHandler):
                     "needs_input": model.needs_input,
                     "unverified": model.unverified,
                 }
+
+            models = [
+                _entry(model)
                 for model in list_models()
                 if not model.unverified
                 or (include_hidden and not model.needs_key)
             ]
-            self._send_json(200, {"models": models})
+            # A value-free channel for the key surface: every verified row plus
+            # every unconfirmed vendor that needs a key, so a key can be
+            # registered for a vendor before it is confirmed — without ever
+            # entering the picker or the runnable set. secret_slots carries the
+            # labels and keychain accounts the surface writes, never a value.
+            key_vendors = []
+            if include_hidden:
+                for model in list_models():
+                    if model.unverified and not model.needs_key:
+                        continue
+                    entry = _entry(model)
+                    entry["secret_slots"] = [
+                        {"name": slot.name, "label": slot.label, "account": slot.account}
+                        for slot in keys.slots_for(model.provider)
+                    ]
+                    key_vendors.append(entry)
+            self._send_json(200, {"models": models, "key_vendors": key_vendors})
             return
         match = _JOB_PATH.match(self.path)
         if match and match.group(2) == "events":
