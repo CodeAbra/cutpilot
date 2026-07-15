@@ -147,6 +147,11 @@ public:
     // still images are generated and written under the system temp location.
     Q_INVOKABLE void seedCompositeBoard();
 
+    // Seed one generate node carrying a finished video result at the given
+    // path, for the on-screen video-result demo. Returns the node id so the
+    // caller can pin it to the preview.
+    Q_INVOKABLE int seedVideoResultBoard(const QString &fixturePath);
+
     // Land a mapped ComfyUI workflow on the board as one undo step. The
     // outcome carries the per-node tier report for the chrome to present.
     core::ComfyImportOutcome importComfyWorkflow(const QJsonObject &result,

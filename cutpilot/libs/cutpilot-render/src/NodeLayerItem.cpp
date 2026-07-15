@@ -483,6 +483,23 @@ void NodeLayerItem::seedCompositeBoard()
     update();
 }
 
+int NodeLayerItem::seedVideoResultBoard(const QString &fixturePath)
+{
+    core::Node node = defaultNode(QPointF(420.0, 300.0));
+    node.title = QStringLiteral("Generated Video");
+    node.modelId = QStringLiteral("local/procedural-video-v1");
+    node.modelLabel = QStringLiteral("Procedural Video (local)");
+    node.runState = core::RunState::Done;
+    node.resultPath = fixturePath;
+    node.resultKind = QStringLiteral("video");
+    const int nodeId = m_graph.addNode(node);
+
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+    return nodeId;
+}
+
 void NodeLayerItem::seedStressBoard(int count)
 {
     constexpr int kMaxStressNodes = 5000;
@@ -1936,6 +1953,20 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
         m_geometryDirty = true;
         update();
         emit promptEditRequested(hitId);
+        event->accept();
+        return;
+    }
+    // A generate node that produced a video opens the transport from its body;
+    // the model chip and run control keep their own actions.
+    if (hitNode->kind == core::NodeKind::Generate
+        && hitNode->resultKind == QLatin1String("video")
+        && !hitNode->resultPath.isEmpty()
+        && !NodeCardLayout::modelChipRect(*hitNode).contains(world)
+        && !NodeCardLayout::runButtonRect(*hitNode).contains(world)) {
+        m_graph.selectOnly(hitId);
+        m_geometryDirty = true;
+        update();
+        emit videoTransportRequested(hitId);
         event->accept();
         return;
     }

@@ -1133,12 +1133,18 @@ int main(int argc, char *argv[])
         bool stressRequested = false;
         const int stressCount =
             qEnvironmentVariableIntValue("CUTPILOT_STRESS_NODES", &stressRequested);
+        const QString videoDemoFixture =
+            qEnvironmentVariable("CUTPILOT_VIDEO_RESULT_DEMO");
+        int videoDemoNodeId = -1;
         const bool demoBoard = (stressRequested && stressCount > 0)
-            || qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0;
+            || qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0
+            || !videoDemoFixture.isEmpty();
         if (stressRequested && stressCount > 0) {
             layer->seedStressBoard(stressCount);
         } else if (qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0) {
             layer->seedCompositeBoard();
+        } else if (!videoDemoFixture.isEmpty()) {
+            videoDemoNodeId = layer->seedVideoResultBoard(videoDemoFixture);
         } else {
             store = new WorkflowStore(&layer->graph(), view);
             if (store->load()) {
@@ -1173,6 +1179,8 @@ int main(int argc, char *argv[])
         previews->setLayer(layer);
         previewPanel = new PreviewPanel(theme, previews, layer, view);
         previews->setPreviewItem(previewPanel->previewItem());
+        if (videoDemoNodeId != -1)
+            previews->pin(PreviewController::Buffer::A, videoDemoNodeId);
         chrome = new GenerationChrome(theme, view, coordinator, previews,
                                       &secretStore);
 
@@ -1183,6 +1191,10 @@ int main(int argc, char *argv[])
         QObject::connect(media, &CompositorService::mediaUpdated, previews,
                          &PreviewController::refresh);
         QObject::connect(coordinator, &GenerationCoordinator::nodeMediaReady,
+                         media, &CompositorService::scheduleRefresh);
+        // A finished video result carries no decoded image, so the still wire
+        // above never fires for it; the video pipeline adopts and pre-rolls it.
+        QObject::connect(coordinator, &GenerationCoordinator::nodeVideoReady,
                          media, &CompositorService::scheduleRefresh);
 
         // The compositing inspector, the media file picker, and the video

@@ -29,6 +29,27 @@ constexpr int kThumbnailSourceDim = 512;
 // cards, small enough that per-frame conversion never taxes the UI thread.
 constexpr int kVideoProxyDim = 640;
 
+// The video pipeline adopts imported video nodes and generate nodes whose
+// result is a video; the latter play from the result file rather than a
+// picked media path.
+bool isAdoptableVideo(const core::Node &node)
+{
+    if (node.kind == core::NodeKind::Video)
+        return true;
+    return node.kind == core::NodeKind::Generate
+        && node.resultKind == QLatin1String("video")
+        && !node.resultPath.isEmpty();
+}
+
+// One source for both shapes, so a generate-video node is never handed an empty
+// path where an imported video would carry its picked file.
+QString videoSourcePath(const core::Node &node)
+{
+    if (node.kind == core::NodeKind::Generate)
+        return node.resultPath;
+    return node.mediaPath;
+}
+
 QImage decodeBounded(const QString &path)
 {
     QImageReader reader(path);
@@ -173,14 +194,15 @@ void CompositorService::reconcileVideos()
 {
     QVector<int> videoIds;
     for (const core::Node &node : m_layer->graph().nodes()) {
-        if (node.kind == core::NodeKind::Video)
+        if (isAdoptableVideo(node))
             videoIds.push_back(node.id);
     }
 
     for (int nodeId : videoIds) {
         core::Node *node = m_layer->graph().nodeById(nodeId);
+        const QString sourcePath = videoSourcePath(*node);
         VideoPlayback *playback = m_videos.value(nodeId);
-        if (playback && playback->path == node->mediaPath)
+        if (playback && playback->path == sourcePath)
             continue;
 
         if (!playback) {
@@ -239,15 +261,15 @@ void CompositorService::reconcileVideos()
                     });
         }
 
-        playback->path = node->mediaPath;
+        playback->path = sourcePath;
         playback->userPlaying = false;
         playback->preRolling = false;
-        if (node->mediaPath.isEmpty()) {
+        if (sourcePath.isEmpty()) {
             playback->player->setSource(QUrl());
             m_layer->clearNodeMedia(nodeId);
         } else {
             playback->player->setSource(
-                QUrl::fromLocalFile(node->mediaPath));
+                QUrl::fromLocalFile(sourcePath));
         }
         emit videoStateChanged(nodeId);
     }

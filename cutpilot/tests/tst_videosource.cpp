@@ -46,10 +46,13 @@ private slots:
     void framesArriveAtProxyResolution();
     void scrubbingSeeksWithoutBlocking();
     void playbackAdvancesOnItsOwn();
+    void generateVideoResultAdoptsAndScrubs();
 
 private:
     QTemporaryDir m_dir;
     QString m_videoPath;
+
+    enum class Source { ImportedVideo, GenerateResult };
 
     struct Rig {
         render::CanvasController camera;
@@ -57,13 +60,22 @@ private:
         CompositorService media;
         int videoId = -1;
 
-        explicit Rig(const QString &path)
+        explicit Rig(const QString &path, Source source = Source::ImportedVideo)
         {
             layer.setSize(QSizeF(1600, 1000));
             layer.setController(&camera);
-            core::Node video = core::compositeNodePrototype(NodeKind::Video);
-            video.mediaPath = path;
-            videoId = layer.graph().addNode(video);
+            core::Node node;
+            if (source == Source::GenerateResult) {
+                node.kind = NodeKind::Generate;
+                node.title = QStringLiteral("Generated Video");
+                node.worldSize = QSizeF(280, 200);
+                node.resultPath = path;
+                node.resultKind = QStringLiteral("video");
+            } else {
+                node = core::compositeNodePrototype(NodeKind::Video);
+                node.mediaPath = path;
+            }
+            videoId = layer.graph().addNode(node);
             media.setLayer(&layer);
             media.scheduleRefresh();
         }
@@ -156,6 +168,33 @@ void VideoSourceTest::playbackAdvancesOnItsOwn()
 
     rig.media.setVideoPlaying(rig.videoId, false);
     QVERIFY(!rig.media.videoPlaying(rig.videoId));
+}
+
+void VideoSourceTest::generateVideoResultAdoptsAndScrubs()
+{
+    // A generate node whose result is a video is adopted by the same pipeline
+    // an imported video uses: the pre-roll frame lands as card media (proving
+    // adoption and the poster), and a late scrub reaches the second color.
+    Rig rig(m_videoPath, Source::GenerateResult);
+
+    QTRY_VERIFY_WITH_TIMEOUT(!rig.layer.nodeMediaImage(rig.videoId).isNull(),
+                             15000);
+    const QImage frame = rig.layer.nodeMediaImage(rig.videoId);
+    QVERIFY(frame.width() <= 640);
+    QVERIFY(frame.height() <= 640);
+    const QColor first = centerColor(frame);
+    QVERIFY2(first.red() > 180 && first.blue() < 90,
+             qPrintable(QStringLiteral("poster should be red, got %1")
+                            .arg(first.name())));
+
+    QTRY_VERIFY_WITH_TIMEOUT(rig.media.videoDurationMs(rig.videoId) > 0, 15000);
+    rig.media.scrubVideo(rig.videoId, 0.75);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            const QColor c = centerColor(rig.layer.nodeMediaImage(rig.videoId));
+            return c.blue() > 180 && c.red() < 90;
+        }(),
+        15000);
 }
 
 int main(int argc, char *argv[])
