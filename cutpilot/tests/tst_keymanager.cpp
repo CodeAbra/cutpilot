@@ -114,6 +114,7 @@ private slots:
     void aPartialMultiSecretSaveStoresOneAndDoesNotUnblock();
     void removingAMultiSecretVendorDeletesEverySlot();
     void noMultiSecretValueLeaksIntoTheSurface();
+    void anUnconfirmedVendorIsKeyRegistrableButNotPickable();
     void captureSurfaceImage();
 
 private:
@@ -597,6 +598,28 @@ void KeyManagerTest::noMultiSecretValueLeaksIntoTheSurface()
         QVERIFY(!field->placeholderText().contains(kKlingAccessKey));
         QVERIFY(!field->placeholderText().contains(kKlingSecretKey));
     }
+}
+
+void KeyManagerTest::anUnconfirmedVendorIsKeyRegistrableButNotPickable()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    // Kling is a key-registrable vendor: it reaches the key surface's source.
+    bool klingInVendors = false;
+    for (const auto &vendor : rig.coordinator.keyVendors()) {
+        if (vendor.provider == kKling)
+            klingInVendors = true;
+    }
+    QVERIFY(klingInVendors);
+
+    // It is absent from the picker / runnable source, so it can never be
+    // selected or run while unconfirmed.
+    for (const auto &model : rig.coordinator.models())
+        QVERIFY(model.provider != kKling);
+
+    // The panel renders a key row for it; a picker built from models() has none.
+    QVERIFY(rig.panel.findChild<QWidget *>(QStringLiteral("keyRow-") + kKling));
 }
 
 void KeyManagerTest::captureSurfaceImage()
