@@ -224,10 +224,17 @@ void KeyManagerPanel::rebuild()
     // Vendors in registry order of importance: the keyed ones first, each
     // group alphabetical. A vendor is keyed when any of its models is. The key
     // surface sources the key-vendor channel, so an unconfirmed vendor is
-    // key-registrable here without ever entering the picker.
+    // key-registrable here without ever entering the picker. If a service omits
+    // that channel, fall back to the model registry so the shipped
+    // single-secret vendors still render rather than leaving the surface empty;
+    // an unconfirmed vendor simply stays absent, exactly as before the channel
+    // existed.
+    const QVector<ipc::ModelInfo> &keyVendors = m_coordinator->keyVendors();
+    const QVector<ipc::ModelInfo> &vendorSource =
+        keyVendors.isEmpty() ? m_coordinator->models() : keyVendors;
     QMap<QString, bool> vendors;
     QHash<QString, QVector<ipc::SecretSlot>> slotsByProvider;
-    for (const auto &model : m_coordinator->keyVendors()) {
+    for (const auto &model : vendorSource) {
         vendors[model.provider] = vendors.value(model.provider) || model.needsKey;
         if (!slotsByProvider.contains(model.provider) && !model.secretSlots.isEmpty())
             slotsByProvider.insert(model.provider, model.secretSlots);
@@ -454,11 +461,20 @@ void KeyManagerPanel::refreshRow(VendorRow *row)
     // Replace / Remove controls key off any stored slot.
     const bool inKeychain = row->needsKey && total > 0 && present == total;
     const bool anyStored = present > 0;
+    const QVector<ipc::ModelInfo> &keyVendors = m_coordinator->keyVendors();
+    const QVector<ipc::ModelInfo> &presenceSource =
+        keyVendors.isEmpty() ? m_coordinator->models() : keyVendors;
     bool registryHasKey = false;
-    for (const auto &model : m_coordinator->keyVendors()) {
+    for (const auto &model : presenceSource) {
         if (model.provider == row->provider && model.needsKey && model.hasKey)
             registryHasKey = true;
     }
+
+    // A save that landed only part of the key locally waits here: once the
+    // service reports the whole key present (its remaining slots supplied by
+    // the environment), the run-unblock fires exactly once.
+    if (registryHasKey && m_pendingUnblock.remove(row->provider))
+        emit keyStored(row->provider);
 
     QString text;
     QColor color;
@@ -563,16 +579,20 @@ void KeyManagerPanel::saveKey(VendorRow *row)
     refreshRow(row);
 
     // Only a complete key unblocks a run: the service refuses a job whose
-    // provider is missing any secret, so keyStored fires — and the registry is
-    // re-pulled — only once every slot is present. A partial save just refreshes
-    // the row's state.
-    const bool allPresent =
+    // provider is missing any secret. Every slot present in the keychain is a
+    // full key on its own, so the run-unblock fires at once and holds even when
+    // the service is down. Otherwise the remaining slots may come from the
+    // environment: re-pull the registry and let the refreshed vendor channel's
+    // presence signal decide, so a mixed env+keychain key still unblocks.
+    m_coordinator->refreshModels();
+    const bool keychainComplete =
         row->slotsPresent(m_secrets, keychainService()) == row->slotFields.size();
-    if (allPresent) {
-        m_coordinator->refreshModels();
+    if (keychainComplete) {
+        m_pendingUnblock.remove(row->provider);
         runDeferredRebuild();
         emit keyStored(row->provider);
     } else {
+        m_pendingUnblock.insert(row->provider);
         runDeferredRebuild();
     }
 }
@@ -592,6 +612,7 @@ void KeyManagerPanel::removeKey(VendorRow *row)
             return;
         }
     }
+    m_pendingUnblock.remove(row->provider);
     row->confirmRow->hide();
     row->error->hide();
     refreshRow(row);

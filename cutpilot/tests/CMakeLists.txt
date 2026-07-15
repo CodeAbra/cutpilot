@@ -229,7 +229,7 @@ qt_add_executable(tst_keymanager tst_keymanager.cpp
 target_include_directories(tst_keymanager PRIVATE
     ${CMAKE_SOURCE_DIR}/app/cutpilot-app)
 target_link_libraries(tst_keymanager PRIVATE Qt6::Test Qt6::Widgets
-    cutpilot-ipc cutpilot-theme otf-secrets cutpilot-core)
+    Qt6::Network cutpilot-ipc cutpilot-theme otf-secrets cutpilot-core)
 add_test(NAME app.keymanager COMMAND tst_keymanager)
 # Pin keychain isolation at the ctest level too, so it holds regardless of
 # in-test setup ordering.

@@ -1,6 +1,7 @@
 #include <QtTest/QtTest>
 
 #include <QApplication>
+#include <QHostAddress>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMap>
@@ -8,6 +9,8 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 
 #include "KeyManagerPanel.h"
@@ -115,6 +118,8 @@ private slots:
     void removingAMultiSecretVendorDeletesEverySlot();
     void noMultiSecretValueLeaksIntoTheSurface();
     void anUnconfirmedVendorIsKeyRegistrableButNotPickable();
+    void aMixedEnvAndKeychainKeyUnblocksThroughTheService();
+    void theKeySurfaceSurvivesAServiceWithoutTheVendorChannel();
     void captureSurfaceImage();
 
 private:
@@ -620,6 +625,97 @@ void KeyManagerTest::anUnconfirmedVendorIsKeyRegistrableButNotPickable()
 
     // The panel renders a key row for it; a picker built from models() has none.
     QVERIFY(rig.panel.findChild<QWidget *>(QStringLiteral("keyRow-") + kKling));
+}
+
+void KeyManagerTest::aMixedEnvAndKeychainKeyUnblocksThroughTheService()
+{
+    // The environment supplies the whole Kling pair, so a fresh service reports
+    // the vendor keyed. The value is a presence-only placeholder; the service
+    // echoes back only a boolean.
+    qputenv("KLING_ACCESS_KEY", "env-access-placeholder-000000");
+    qputenv("KLING_SECRET_KEY", "env-secret-placeholder-000000");
+    struct KlingEnvGuard {
+        ~KlingEnvGuard()
+        {
+            qunsetenv("KLING_ACCESS_KEY");
+            qunsetenv("KLING_SECRET_KEY");
+        }
+    } envGuard;
+    ipc::SidecarHost keyedHost;
+    QSignalSpy readySpy(&keyedHost, &ipc::SidecarHost::ready);
+    QSignalSpy failedSpy(&keyedHost, &ipc::SidecarHost::failed);
+    keyedHost.start();
+    QTRY_VERIFY_WITH_TIMEOUT(readySpy.count() == 1 || failedSpy.count() == 1,
+                             15000);
+    if (failedSpy.count() > 0)
+        QFAIL(qPrintable(failedSpy.first().first().toString()));
+    ipc::GenerationClient keyedClient;
+    keyedClient.setEndpoint(keyedHost.port(), keyedHost.token());
+
+    Rig rig(&keyedClient);
+    QVERIFY(waitForModels(rig));
+
+    // The panel's own store holds neither slot; the user adds only the secret
+    // slot here, so a keychain-only slot count sees a partial key.
+    QSignalSpy storedSpy(&rig.panel, &KeyManagerPanel::keyStored);
+    rig.panel.openKeyEditor(kKling);
+    rig.klingSecret()->setText(kKlingSecretKey);
+    rig.klingSave()->click();
+
+    QVERIFY(rig.secrets.hasSecret(kService, kKlingSecret));
+    QVERIFY(!rig.secrets.hasSecret(kService, kKlingAccess));
+    // The run-unblock keys off the service's presence signal, not the local
+    // slot count: the service sees a complete key (secret from the keychain,
+    // access from the environment), so the stored signal fires for the vendor.
+    QVERIFY(QTest::qWaitFor([&] { return storedSpy.count() >= 1; }, 10000));
+    QCOMPARE(storedSpy.first().first().toString(), kKling);
+
+    keyedHost.stop();
+}
+
+void KeyManagerTest::theKeySurfaceSurvivesAServiceWithoutTheVendorChannel()
+{
+    // A mismatched service answers /models without the key-vendor channel. The
+    // surface must still render the shipped single-secret vendors from the model
+    // registry rather than emptying out.
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    connect(&server, &QTcpServer::newConnection, &server, [&server] {
+        QTcpSocket *socket = server.nextPendingConnection();
+        connect(socket, &QTcpSocket::readyRead, socket, [socket] {
+            socket->readAll();
+            const QByteArray body =
+                QByteArrayLiteral("{\"models\":[{\"id\":\"openai/gpt-image-1\","
+                                  "\"label\":\"GPT Image 1\","
+                                  "\"provider\":\"openai\",\"price_usd\":0.042,"
+                                  "\"needs_key\":true,\"has_key\":false}]}");
+            const QByteArray response =
+                QByteArrayLiteral("HTTP/1.1 200 OK\r\n"
+                                  "Content-Type: application/json\r\n"
+                                  "Content-Length: ")
+                + QByteArray::number(body.size())
+                + QByteArrayLiteral("\r\nConnection: close\r\n\r\n") + body;
+            socket->write(response);
+            socket->disconnectFromHost();
+        });
+    });
+
+    ipc::GenerationClient client;
+    client.setEndpoint(server.serverPort(), QByteArrayLiteral("unused-token"));
+
+    Rig rig(&client);
+    QSignalSpy modelsSpy(&rig.coordinator,
+                         &ipc::GenerationCoordinator::modelsReady);
+    rig.coordinator.serviceBecameReady();
+    QVERIFY(QTest::qWaitFor([&] { return modelsSpy.count() >= 1; }, 10000));
+
+    // The channel is absent, so the coordinator's key-vendor source is empty.
+    QVERIFY(rig.coordinator.keyVendors().isEmpty());
+    // The panel falls back to the model registry: the OpenAI row still renders
+    // its single-secret editor, and the empty-state notice is not shown.
+    QVERIFY(rig.panel.findChild<QWidget *>(QStringLiteral("keyRow-") + kOpenai));
+    QVERIFY(rig.editor());
+    QVERIFY(rig.save());
 }
 
 void KeyManagerTest::captureSurfaceImage()

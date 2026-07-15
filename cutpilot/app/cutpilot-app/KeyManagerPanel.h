@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <QWidget>
@@ -80,6 +81,11 @@ private:
     // the next rebuild creates the row, then cleared. Holds only a provider
     // name, never a key.
     QString m_pendingEditorProvider;
+    // A vendor whose keychain write landed only part of the key locally, so the
+    // run-unblock waits for the service to confirm the whole key is present
+    // (the other slots may come from the environment). The refreshed vendor
+    // channel decides. Holds only provider names, never a key.
+    QSet<QString> m_pendingUnblock;
 };
 
 } // namespace cutpilot::app
