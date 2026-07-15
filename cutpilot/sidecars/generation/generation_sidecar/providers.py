@@ -316,6 +316,9 @@ ASYNC_JOB_DESCRIPTORS: dict[str, AsyncJobDescriptor] = {
         result_ref_path=("result", "sample"),
         result_fetch="url",
         cancel_url_path=None,
+        # The submit response names a regional polling host under the vendor's
+        # own domain, so the key-carrying poll gate must trust that domain.
+        authed_host_suffixes=("bfl.ai",),
         expected_duration_s=4.0,
     ),
 }
@@ -1084,6 +1087,7 @@ ASYNC_JOB_DESCRIPTORS.update(
             # is row data, confirmed at the live gate.
             result_ref_by_kind={"image": ("output", 0), "video": ("output",)},
             cancel_url_path=("urls", "cancel"),
+            authed_host_suffixes=("replicate.com",),
             poll_interval_s=VIDEO_POLL_INTERVAL_S,
             poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
             job_deadline_s=VIDEO_JOB_DEADLINE_S,
@@ -1109,6 +1113,7 @@ ASYNC_JOB_DESCRIPTORS.update(
                 "image": ("images", 0, "url"),
                 "video": ("video", "url"),
             },
+            authed_host_suffixes=("higgsfield.ai",),
             poll_interval_s=VIDEO_POLL_INTERVAL_S,
             poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
             job_deadline_s=VIDEO_JOB_DEADLINE_S,
@@ -1219,12 +1224,18 @@ class AsyncJobProvider:
         if job_id is None:
             raise RuntimeError(f"{desc.provider} returned an unexpected response shape")
         if desc.poll_url_path is not None:
+            # The poll URL comes straight from the submit response and is polled
+            # with the key on every iteration, so it carries the same trust as
+            # the envelope fetch: refuse a URL off the aggregator's own host
+            # before the key is ever sent.
             poll_url = _select_optional(submit_resp, desc.poll_url_path)
-            if poll_url is None:
+            if poll_url is None or not _authed_host_allowed(poll_url, desc):
                 raise RuntimeError(
                     f"{desc.provider} returned an unexpected response shape"
                 )
         else:
+            # A poll URL built from the descriptor's own hardcoded base is
+            # already trusted and needs no host gate.
             poll_url = desc.base_url + desc.poll_path.format(job_id=job_id)
 
         # A queue vendor names the result and the cancel URL in the submit

@@ -1346,6 +1346,51 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("secret-key", message)
         self.assertNotIn("localhost", message)
 
+    def test_offhost_status_url_refuses_to_send_the_key(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        )
+        # The submit response names a poll URL on a loopback alias the gate
+        # resolves but that is neither the stub's own base host nor a declared
+        # trusted suffix. The poll carries the key on every iteration, so it must
+        # be refused before the first request.
+        stub.injected_polling_url = f"http://localhost:{stub.port}/poll/1"
+        stub.start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(stub)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._image_model(), "offhost-poll.png")
+        message = str(caught.exception)
+        # The off-host poll was refused before any request, so the key was never
+        # sent: no poll recorded, no Authorization seen, no leak.
+        self.assertIsNone(stub.poll_headers)
+        self.assertEqual(stub.poll_count, 0)
+        self.assertNotIn("secret-key", message)
+        self.assertNotIn("localhost", message)
+
+    def test_bfl_regional_poll_host_is_trusted_by_the_key_gate(self):
+        # The shipped BFL row names its poll URL on a regional host under its own
+        # domain; the key-carrying poll gate must accept that host so the happy
+        # path is not false-refused, while any off-host poll URL is refused.
+        desc = providers.ASYNC_JOB_DESCRIPTORS["bfl"]
+        self.assertTrue(
+            providers._authed_host_allowed(
+                "https://api.us1.bfl.ai/v1/get_result?id=abc", desc
+            )
+        )
+        self.assertTrue(
+            providers._authed_host_allowed("https://api.bfl.ai/v1/get_result", desc)
+        )
+        self.assertFalse(
+            providers._authed_host_allowed(
+                "https://api.bfl.ai.attacker.example/poll", desc
+            )
+        )
+
     def test_envelope_url_ssrf_guarded(self):
         stub = StubAsyncVendor(
             envelope=True,
