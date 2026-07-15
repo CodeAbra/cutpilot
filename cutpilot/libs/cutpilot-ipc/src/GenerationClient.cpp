@@ -37,6 +37,9 @@ JobUpdate updateFromJson(const QJsonObject &object)
     update.costUsd = object.value(QStringLiteral("cost_usd")).toDouble(-1.0);
     update.width = object.value(QStringLiteral("width")).toInt();
     update.height = object.value(QStringLiteral("height")).toInt();
+    const QString kind = object.value(QStringLiteral("kind")).toString();
+    if (!kind.isEmpty())
+        update.resultKind = kind;
     return update;
 }
 
@@ -98,7 +101,10 @@ void GenerationClient::fetchModels()
         emit modelsFailed(QStringLiteral("Generation service unavailable"));
         return;
     }
-    QNetworkReply *reply = get(QStringLiteral("/models"));
+    // Keyless hidden drivers are fetched alongside the picker registry; the
+    // coordinator resolves a node's explicit model from the full set while the
+    // picker still shows only confirmed rows.
+    QNetworkReply *reply = get(QStringLiteral("/models?include_hidden=1"));
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
@@ -122,6 +128,8 @@ void GenerationClient::fetchModels()
                 object.value(QStringLiteral("needs_prompt")).toBool(true);
             model.needsInput =
                 object.value(QStringLiteral("needs_input")).toBool(false);
+            model.unverified =
+                object.value(QStringLiteral("unverified")).toBool(false);
             models.push_back(model);
         }
         emit modelsFetched(models);

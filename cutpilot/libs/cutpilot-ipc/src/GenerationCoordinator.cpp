@@ -288,7 +288,7 @@ QVector<QString> GenerationCoordinator::inputDigests(const core::Node &node,
 
 const ModelInfo *GenerationCoordinator::modelById(const QString &id) const
 {
-    for (const ModelInfo &model : m_models) {
+    for (const ModelInfo &model : m_runnableModels) {
         if (model.id == id)
             return &model;
     }
@@ -475,8 +475,9 @@ bool GenerationCoordinator::applyCachedResult(core::Node *node,
     node->costUsd = entry->costUsd;
     node->resultWidth = entry->width;
     node->resultHeight = entry->height;
+    node->resultKind = entry->kind;
     touchNode(node);
-    decodeResult(node->id, entry->resultPath);
+    deliverResult(node->id, entry->resultPath, entry->kind);
     return true;
 }
 
@@ -993,7 +994,15 @@ void GenerationCoordinator::refreshEstimates()
 
 void GenerationCoordinator::onModelsFetched(const QVector<ModelInfo> &models)
 {
-    m_models = models;
+    m_runnableModels = models;
+    // The picker only ever offers confirmed rows; hidden drivers stay resolvable
+    // through m_runnableModels but never surface as a pickable or default model.
+    m_models.clear();
+    m_models.reserve(models.size());
+    for (const ModelInfo &model : models) {
+        if (!model.unverified)
+            m_models.push_back(model);
+    }
     if (!m_models.isEmpty()) {
         // Ids first, then per-id touches: the synchronous emit inside
         // touchNode must never run against a live iterator over the graph.
@@ -1112,7 +1121,8 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
         node->costUsd = update.costUsd;
         node->resultWidth = update.width;
         node->resultHeight = update.height;
-        decodeResult(nodeId, update.resultPath);
+        node->resultKind = update.resultKind;
+        deliverResult(nodeId, update.resultPath, update.resultKind);
         settled = true;
         if (inRun) {
             m_run.inFlight.remove(nodeId);
@@ -1128,6 +1138,7 @@ void GenerationCoordinator::onJobUpdated(const JobUpdate &update)
                 entry.costUsd = update.costUsd;
                 entry.width = update.width;
                 entry.height = update.height;
+                entry.kind = update.resultKind;
                 m_cache.store(signature, entry);
             }
         }
@@ -1195,6 +1206,19 @@ void GenerationCoordinator::onStreamClosed(const QString &jobId)
         m_run.failed.insert(nodeId);
         advanceRun();
     }
+}
+
+void GenerationCoordinator::deliverResult(int nodeId, const QString &path,
+                                          const QString &kind)
+{
+    // A video never runs through the image decoder: QImage on an .mp4 yields a
+    // null frame that would waste a worker and race the video pipeline's own
+    // frame. Route it to the video pipeline; decode everything else as a still.
+    if (kind == QLatin1String("video")) {
+        emit nodeVideoReady(nodeId, path);
+        return;
+    }
+    decodeResult(nodeId, path);
 }
 
 void GenerationCoordinator::decodeResult(int nodeId, const QString &path)

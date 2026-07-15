@@ -17,6 +17,10 @@ struct ModelInfo {
     bool hasKey = false;
     bool needsPrompt = true;
     bool needsInput = false;
+    // Kept out of the model picker: a model whose vendor contract is not yet
+    // confirmed against a live key, or a keyless local driver. Still resolvable
+    // by explicit id so a node that already carries it can run.
+    bool unverified = false;
 };
 
 // A job's lifecycle as the service streams it.
@@ -40,6 +44,8 @@ struct JobUpdate {
     double costUsd = -1.0;
     int width = 0;
     int height = 0;
+    // The result file's kind; a frame absent the field stays an image.
+    QString resultKind = QStringLiteral("image");
 };
 
 // Why a submission was turned down before a job existed.

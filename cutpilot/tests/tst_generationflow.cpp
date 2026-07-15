@@ -171,6 +171,7 @@ private slots:
     void vanishedReferenceFileRefusesTheRunWithGuidance();
     void compositeWiredInputRefusesWithTheHonestReason();
     void unchangedRerunServesTheCachedResult();
+    void videoResultRoutesToTheVideoPipelineAndReuses();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
     void emptyPromptRefusesTheRunWithoutSubmitting();
@@ -600,6 +601,56 @@ void GenerationFlowTest::unchangedRerunServesTheCachedResult()
     QCOMPARE(submissionSpy.count(), 1);
     QCOMPARE(fileDigest(node->resultPath), first);
     QVERIFY(!coordinator.runActive());
+}
+
+void GenerationFlowTest::videoResultRoutesToTheVideoPipelineAndReuses()
+{
+    core::NodeGraph graph;
+    const Pipeline pipeline =
+        buildPipeline(graph, QStringLiteral("a slow pan over dunes"));
+    // The node carries the keyless local video driver explicitly; a hidden
+    // driver never becomes a picker default, so it is set on the node here.
+    core::Node *generate = graph.nodeById(pipeline.generateId);
+    generate->modelId = QStringLiteral("local/procedural-video-v1");
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    // The hidden driver is resolvable, but it never appears in the picker list.
+    bool inPicker = false;
+    for (const ipc::ModelInfo &model : coordinator.models()) {
+        if (model.id == QStringLiteral("local/procedural-video-v1"))
+            inPicker = true;
+    }
+    QVERIFY(!inPicker);
+
+    QSignalSpy videoSpy(&coordinator, &ipc::GenerationCoordinator::nodeVideoReady);
+    QSignalSpy mediaSpy(&coordinator, &ipc::GenerationCoordinator::nodeMediaReady);
+
+    coordinator.runNode(pipeline.generateId);
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(pipeline.generateId)->runState,
+                              core::RunState::Done, 30000);
+
+    // A video result routes to the video pipeline, never to the image decoder.
+    const core::Node *node = graph.nodeById(pipeline.generateId);
+    QCOMPARE(node->resultKind, QStringLiteral("video"));
+    QVERIFY(node->resultPath.endsWith(QStringLiteral(".mp4")));
+    QVERIFY(QFile::exists(node->resultPath));
+
+    QTRY_COMPARE_WITH_TIMEOUT(videoSpy.count(), 1, 10000);
+    QCOMPARE(videoSpy.first().at(0).toInt(), pipeline.generateId);
+    QCOMPARE(videoSpy.first().at(1).toString(), node->resultPath);
+    QCOMPARE(mediaSpy.count(), 0);
+
+    // A reused video re-enters the video path, not a null image decode.
+    coordinator.runNode(pipeline.generateId);
+    const core::Node *reused = graph.nodeById(pipeline.generateId);
+    QCOMPARE(reused->statusMessage, QStringLiteral("Reused"));
+    QCOMPARE(reused->resultKind, QStringLiteral("video"));
+    QCOMPARE(videoSpy.count(), 2);
+    QCOMPARE(mediaSpy.count(), 0);
 }
 
 void GenerationFlowTest::stopCancelsAnInFlightRun()

@@ -198,6 +198,9 @@ struct Node {
     double costUsd = -1.0;
     int resultWidth = 0;
     int resultHeight = 0;
+    // What the result file is: empty or "image" decodes as a still; "video"
+    // routes the result through the video pipeline instead of an image decode.
+    QString resultKind;
 
     // Bumped on every content or status change so cached rasters and textures
     // know to refresh; geometry-only changes (move, select) leave it alone.

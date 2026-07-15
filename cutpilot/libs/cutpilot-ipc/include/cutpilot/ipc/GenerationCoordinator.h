@@ -99,6 +99,9 @@ signals:
     // The finished result decoded off the GUI thread and is ready to display.
     void nodeMediaReady(int nodeId, const QImage &image);
 
+    // A finished video result at path is ready for the video pipeline to adopt.
+    void nodeVideoReady(int nodeId, const QString &path);
+
     void modelsReady();
     void addKeyNeeded(int nodeId, const QString &provider);
 
@@ -133,6 +136,7 @@ private:
     const ModelInfo *modelById(const QString &id) const;
     void touchNode(core::Node *node);
     void decodeResult(int nodeId, const QString &path);
+    void deliverResult(int nodeId, const QString &path, const QString &kind);
 
     void startRun(const QVector<int> &subset, const QSet<int> &forced);
     void advanceRun();
@@ -178,7 +182,11 @@ private:
     GenerationClient *m_client = nullptr;
     bool m_serviceReady = false;
     QString m_unavailableReason;
+    // The picker registry (confirmed rows only). m_runnableModels is the
+    // superset that also carries keyless hidden drivers, so a node's explicit
+    // model resolves even when it is deliberately kept out of the picker.
     QVector<ModelInfo> m_models;
+    QVector<ModelInfo> m_runnableModels;
 
     QHash<QString, int> m_nodeByJob;
     QHash<int, QString> m_jobByNode;

@@ -71,7 +71,13 @@ class GenerationHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._send_json(200, {"status": "serving", "version": __version__})
             return
-        if self.path == "/models":
+        path, _, query = self.path.partition("?")
+        if path == "/models":
+            # A hidden entry is one kept out of the picker: an unconfirmed vendor
+            # row or a keyless local driver. include_hidden surfaces only the
+            # keyless ones, so an unconfirmed vendor row never becomes runnable
+            # through this route; the picker still filters every unverified row.
+            include_hidden = "include_hidden=1" in query.split("&")
             models = [
                 {
                     "id": model.id,
@@ -82,9 +88,11 @@ class GenerationHandler(BaseHTTPRequestHandler):
                     "has_key": (not model.needs_key) or keys.has_key(model.provider),
                     "needs_prompt": model.needs_prompt,
                     "needs_input": model.needs_input,
+                    "unverified": model.unverified,
                 }
                 for model in list_models()
                 if not model.unverified
+                or (include_hidden and not model.needs_key)
             ]
             self._send_json(200, {"models": models})
             return

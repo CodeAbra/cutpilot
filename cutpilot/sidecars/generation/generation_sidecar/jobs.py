@@ -40,6 +40,9 @@ class JobSnapshot:
     width: int
     height: int
     version: int
+    # Whether the result file is a still or a video, so the client routes it to
+    # the right decode path. Defaulted, so every existing image job is unchanged.
+    kind: str = "image"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -179,4 +182,5 @@ class JobManager:
             cost_usd=result.cost_usd,
             width=result.width,
             height=result.height,
+            kind=request.model.output_kind,
         )

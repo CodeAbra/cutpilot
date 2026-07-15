@@ -63,6 +63,21 @@ MODELS: tuple[ModelInfo, ...] = (
         needs_prompt=False,
         needs_input=True,
     ),
+    # A keyless local video result, kept out of the picker and key surface, that
+    # exercises the video Done path end to end through the real service and
+    # client. Its bytes are not a playable clip; real playback is proven with an
+    # encoded fixture. No vendor row is touched, so nothing un-quarantines.
+    ModelInfo(
+        id="local/procedural-video-v1",
+        label="Procedural Video (local)",
+        provider="local",
+        price_usd=0.004,
+        needs_key=False,
+        needs_prompt=False,
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
     ModelInfo(
         id="openai/gpt-image-1",
         label="GPT Image 1",

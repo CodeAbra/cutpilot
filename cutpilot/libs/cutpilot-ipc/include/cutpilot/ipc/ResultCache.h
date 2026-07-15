@@ -21,6 +21,9 @@ public:
         double costUsd = 0.0;
         int width = 0;
         int height = 0;
+        // Remembers whether the cached result was a video, so a reused result
+        // re-enters the same decode path it first took.
+        QString kind;
     };
 
     // The canonical signature. Every field is length-prefixed before hashing,

@@ -616,9 +616,39 @@ class SidecarTestCase(unittest.TestCase):
         final = snapshots[-1]
         self.assertAlmostEqual(final["cost_usd"], 0.002)
         self.assertEqual((final["width"], final["height"]), (192, 128))
+        self.assertEqual(final["kind"], "image")
+        self.assertTrue(final["result_path"].endswith(".png"))
         with open(final["result_path"], "rb") as handle:
             content = handle.read()
         self.assertTrue(content.startswith(PNG_SIGNATURE))
+
+    def test_video_model_reports_video_kind_and_mp4_path(self):
+        status, submitted = self.submit(model="local/procedural-video-v1")
+        self.assertEqual(status, 202)
+
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(final["kind"], "video")
+        self.assertTrue(final["result_path"].endswith(".mp4"))
+
+    def test_video_model_stays_out_of_the_model_list(self):
+        status, data = self.request("GET", "/models")
+        self.assertEqual(status, 200)
+        listed = {model["id"] for model in data["models"]}
+        self.assertNotIn("local/procedural-video-v1", listed)
+
+    def test_include_hidden_surfaces_only_keyless_drivers(self):
+        status, data = self.request("GET", "/models?include_hidden=1")
+        self.assertEqual(status, 200)
+        listed = {model["id"] for model in data["models"]}
+        # The keyless local video driver becomes resolvable.
+        self.assertIn("local/procedural-video-v1", listed)
+        # No unconfirmed vendor row (which needs a key) is ever surfaced.
+        for model in data["models"]:
+            if model["needs_key"]:
+                self.assertFalse(model["unverified"], model["id"])
+        self.assertNotIn("runway/gen4-turbo", listed)
 
     def test_same_inputs_produce_identical_images(self):
         digests = []
@@ -1962,7 +1992,13 @@ class SidecarTestCase(unittest.TestCase):
             self.assertTrue(desc.input_body_key or desc.build_body is not None)
 
     def test_video_rows_are_well_formed(self):
-        video_models = [m for m in list_models() if m.output_kind == "video"]
+        # Vendor video rows route through an async poll descriptor. The keyless
+        # local driver is not a vendor row and runs its own synchronous adapter.
+        video_models = [
+            m
+            for m in list_models()
+            if m.output_kind == "video" and m.provider != "local"
+        ]
         self.assertTrue(video_models)
         for model in video_models:
             self._assert_video_row_valid(model)

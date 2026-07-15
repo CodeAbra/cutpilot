@@ -110,6 +110,35 @@ class ProceduralProvider:
         )
 
 
+class ProceduralVideoProvider:
+    """Deterministic offline video result: writes seeded bytes to the .mp4 path
+    so the video Done path runs end to end. The bytes are not a decodable clip;
+    real playback is proven separately with an encoded fixture."""
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        on_progress: ProgressFn,
+        is_canceled: CanceledFn,
+    ) -> GenerationResult:
+        payload = bytearray()
+        bands = 24
+        for band in range(bands):
+            if is_canceled():
+                raise JobCanceled()
+            payload.extend((request.seed + band).to_bytes(4, "little", signed=False))
+            on_progress((band + 1) / bands)
+            time.sleep(PROCEDURAL_BAND_PAUSE_S)
+        with open(request.out_path, "wb") as handle:
+            handle.write(bytes(payload))
+        return GenerationResult(
+            path=request.out_path,
+            cost_usd=request.model.price_usd,
+            width=request.width,
+            height=request.height,
+        )
+
+
 @dataclass(frozen=True)
 class SyncImageDescriptor:
     """A vendor's synchronous image endpoint expressed as data.
@@ -1394,6 +1423,7 @@ _MODEL_PROVIDERS = {
     "local/procedural-v1": ProceduralProvider(),
     "local/procedural-upscale-v1": ProceduralUpscaleProvider(),
     "local/procedural-edit-v1": ProceduralEditProvider(),
+    "local/procedural-video-v1": ProceduralVideoProvider(),
 }
 
 _sync_image = SyncImageProvider()
