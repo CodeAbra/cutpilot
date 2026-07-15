@@ -1977,6 +1977,15 @@ int main(int argc, char *argv[])
                         QCoreApplication::quit();
                 });
             });
+    } else if (!shotPath.isEmpty()
+               && !qEnvironmentVariable("CUTPILOT_VIDEO_RESULT_DEMO").isEmpty()) {
+        // The video pipeline loads the clip and pre-rolls frame 0 into the node
+        // body and the pinned preview; the capture waits for that to settle.
+        QTimer::singleShot(3500, &window, [&window, shotPath, statsActive] {
+            window.grab().save(shotPath);
+            if (!statsActive)
+                QCoreApplication::quit();
+        });
     } else if (!shotPath.isEmpty()) {
         QTimer::singleShot(1500, &window, [&window, shotPath, statsActive] {
             window.grab().save(shotPath);
