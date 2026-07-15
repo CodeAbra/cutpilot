@@ -65,6 +65,8 @@ GenerationCoordinator::GenerationCoordinator(core::NodeGraph *graph,
 {
     connect(client, &GenerationClient::modelsFetched, this,
             &GenerationCoordinator::onModelsFetched);
+    connect(client, &GenerationClient::keyVendorsFetched, this,
+            &GenerationCoordinator::onKeyVendorsFetched);
     connect(client, &GenerationClient::jobSubmitted, this,
             &GenerationCoordinator::onJobSubmitted);
     connect(client, &GenerationClient::submitRefused, this,
@@ -1022,6 +1024,16 @@ void GenerationCoordinator::onModelsFetched(const QVector<ModelInfo> &models)
     }
     refreshEstimates();
     emit modelsReady();
+}
+
+void GenerationCoordinator::onKeyVendorsFetched(
+    const QVector<ModelInfo> &keyVendors)
+{
+    // The key surface's own source. The picker (m_models) and the runnable set
+    // (m_runnableModels) are untouched, so an unconfirmed vendor reaching the
+    // key surface never becomes pickable or runnable.
+    m_keyVendors = keyVendors;
+    emit keyVendorsReady();
 }
 
 void GenerationCoordinator::onJobSubmitted(int nodeId, const QString &jobId,

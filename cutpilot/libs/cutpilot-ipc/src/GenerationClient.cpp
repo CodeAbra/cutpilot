@@ -133,6 +133,43 @@ void GenerationClient::fetchModels()
             models.push_back(model);
         }
         emit modelsFetched(models);
+
+        // The key-vendor channel rides the same reply: the key surface's row
+        // source, each vendor with its labeled secret slots. The picker and the
+        // runnable set stay driven by modelsFetched above.
+        QVector<ModelInfo> keyVendors;
+        const QJsonArray vendorEntries =
+            body.value(QStringLiteral("key_vendors")).toArray();
+        keyVendors.reserve(vendorEntries.size());
+        for (const auto &entry : vendorEntries) {
+            const QJsonObject object = entry.toObject();
+            ModelInfo vendor;
+            vendor.id = object.value(QStringLiteral("id")).toString();
+            vendor.label = object.value(QStringLiteral("label")).toString();
+            vendor.provider = object.value(QStringLiteral("provider")).toString();
+            vendor.priceUsd = object.value(QStringLiteral("price_usd")).toDouble();
+            vendor.needsKey = object.value(QStringLiteral("needs_key")).toBool();
+            vendor.hasKey = object.value(QStringLiteral("has_key")).toBool();
+            vendor.needsPrompt =
+                object.value(QStringLiteral("needs_prompt")).toBool(true);
+            vendor.needsInput =
+                object.value(QStringLiteral("needs_input")).toBool(false);
+            vendor.unverified =
+                object.value(QStringLiteral("unverified")).toBool(false);
+            const QJsonArray slotArray =
+                object.value(QStringLiteral("secret_slots")).toArray();
+            for (const auto &slotValue : slotArray) {
+                const QJsonObject slotObject = slotValue.toObject();
+                SecretSlot slot;
+                slot.name = slotObject.value(QStringLiteral("name")).toString();
+                slot.label = slotObject.value(QStringLiteral("label")).toString();
+                slot.account =
+                    slotObject.value(QStringLiteral("account")).toString();
+                vendor.secretSlots.push_back(slot);
+            }
+            keyVendors.push_back(vendor);
+        }
+        emit keyVendorsFetched(keyVendors);
     });
 }
 

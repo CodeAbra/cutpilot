@@ -45,6 +45,10 @@ public:
 signals:
     void healthChecked(bool serving, const QString &version);
     void modelsFetched(const QVector<ModelInfo> &models);
+    // The key-registrable vendors, each carrying its secret slots (labels and
+    // keychain accounts, never values). Feeds the key surface only; the picker
+    // and runnable set come from modelsFetched.
+    void keyVendorsFetched(const QVector<ModelInfo> &keyVendors);
     void modelsFailed(const QString &error);
     void jobSubmitted(int contextId, const QString &jobId, double estimatedCostUsd);
     void submitRefused(int contextId, cutpilot::ipc::SubmitRefusal refusal,

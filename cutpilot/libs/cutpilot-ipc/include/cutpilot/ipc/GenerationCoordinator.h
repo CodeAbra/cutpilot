@@ -55,6 +55,11 @@ public:
 
     bool serviceReady() const { return m_serviceReady; }
     const QVector<ModelInfo> &models() const { return m_models; }
+    // The key-registrable vendors with their secret slots, for the key surface
+    // only. A superset of the picker that also carries unconfirmed vendors, so a
+    // key can be registered before a vendor is confirmed without it becoming
+    // pickable or runnable.
+    const QVector<ModelInfo> &keyVendors() const { return m_keyVendors; }
 
     // Re-pull the registry, e.g. after a key was added so per-provider key
     // presence is current.
@@ -103,6 +108,8 @@ signals:
     void nodeVideoReady(int nodeId, const QString &path);
 
     void modelsReady();
+    // The key-vendor channel landed; the key surface rebuilds from keyVendors().
+    void keyVendorsReady();
     void addKeyNeeded(int nodeId, const QString &provider);
 
     // The run's live counts, spend, and pause state moved.
@@ -173,6 +180,7 @@ private:
     void announceRun();
 
     void onModelsFetched(const QVector<ModelInfo> &models);
+    void onKeyVendorsFetched(const QVector<ModelInfo> &keyVendors);
     void onJobSubmitted(int nodeId, const QString &jobId, double estimatedCostUsd);
     void onSubmitRefused(int nodeId, SubmitRefusal refusal, const QString &detail);
     void onJobUpdated(const JobUpdate &update);
@@ -187,6 +195,9 @@ private:
     // model resolves even when it is deliberately kept out of the picker.
     QVector<ModelInfo> m_models;
     QVector<ModelInfo> m_runnableModels;
+    // The key-registrable vendors with their secret slots, feeding the key
+    // surface only. Never merged into the picker or the runnable set.
+    QVector<ModelInfo> m_keyVendors;
 
     QHash<QString, int> m_nodeByJob;
     QHash<int, QString> m_jobByNode;

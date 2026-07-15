@@ -1,8 +1,19 @@
 #pragma once
 
 #include <QString>
+#include <QVector>
 
 namespace cutpilot::ipc {
+
+// One secret a provider needs, as the key surface renders it: the label beside
+// its masked field and the keychain account it is written to. The account is
+// supplied by the service, never constructed on the client, so the surface and
+// the service always agree on where a secret lives. Never carries a value.
+struct SecretSlot {
+    QString name;
+    QString label;
+    QString account;
+};
 
 // One entry of the generation service's model registry. hasKey reports whether
 // the vendor's BYOK key is currently configured — never the key itself.
@@ -21,6 +32,10 @@ struct ModelInfo {
     // confirmed against a live key, or a keyless local driver. Still resolvable
     // by explicit id so a node that already carries it can run.
     bool unverified = false;
+    // The secrets this vendor needs, on the key-vendor channel only. Empty on a
+    // picker/runnable row; the key surface reads it to render one masked field
+    // per slot. Never carries a value.
+    QVector<SecretSlot> secretSlots;
 };
 
 // A job's lifecycle as the service streams it.

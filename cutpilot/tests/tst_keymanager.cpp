@@ -26,12 +26,17 @@ namespace {
 // The keychain scheme the surface and the generation service share.
 const QString kService = QStringLiteral("cutpilot");
 const QString kOpenai = QStringLiteral("openai");
+const QString kKling = QStringLiteral("kling");
+const QString kKlingAccess = QStringLiteral("kling.access_key");
+const QString kKlingSecret = QStringLiteral("kling.secret_key");
 
 // Obviously non-real placeholder secrets. They exist only inside the process:
 // the in-memory store below and, for the environment cases, a presence-only
 // boolean the service reports back. No real vendor key is ever used.
 const QString kPlausibleKey = QStringLiteral("plausible-key-abcdefgh01234567");
 const QString kReplacementKey = QStringLiteral("replacement-key-zyxwvut98765432");
+const QString kKlingAccessKey = QStringLiteral("kling-access-abcdefgh01234567");
+const QString kKlingSecretKey = QStringLiteral("kling-secret-zyxwvut98765432");
 
 // Clears OPENAI_API_KEY when the scope exits, even if an assertion aborts the
 // slot early, so an environment key set for one case never leaks into a later
@@ -104,6 +109,11 @@ private slots:
     void keyStatusReflectsEnvironmentAndKeychain();
     void editSurvivesARegistryRefresh();
     void saveFlushesADeferredRebuildWhenTheServiceIsDown();
+    void multiSecretRowRendersALabeledMaskedFieldPerSlot();
+    void savingEveryMultiSecretFieldWritesEachAccountAndFiresStoredOnce();
+    void aPartialMultiSecretSaveStoresOneAndDoesNotUnblock();
+    void removingAMultiSecretVendorDeletesEverySlot();
+    void noMultiSecretValueLeaksIntoTheSurface();
     void captureSurfaceImage();
 
 private:
@@ -149,6 +159,37 @@ private:
         {
             return panel.findChild<QLabel *>(QStringLiteral("keyStatus-")
                                              + kOpenai);
+        }
+
+        QLineEdit *klingAccess() const
+        {
+            return panel.findChild<QLineEdit *>(
+                QStringLiteral("keyEdit-kling-access_key"));
+        }
+        QLineEdit *klingSecret() const
+        {
+            return panel.findChild<QLineEdit *>(
+                QStringLiteral("keyEdit-kling-secret_key"));
+        }
+        QPushButton *klingSave() const
+        {
+            return panel.findChild<QPushButton *>(QStringLiteral("keySave-")
+                                                  + kKling);
+        }
+        QPushButton *klingRemove() const
+        {
+            return panel.findChild<QPushButton *>(QStringLiteral("keyRemove-")
+                                                  + kKling);
+        }
+        QPushButton *klingConfirmRemove() const
+        {
+            return panel.findChild<QPushButton *>(
+                QStringLiteral("keyConfirmRemove-") + kKling);
+        }
+        QLabel *klingStatus() const
+        {
+            return panel.findChild<QLabel *>(QStringLiteral("keyStatus-")
+                                             + kKling);
         }
     };
 
@@ -448,6 +489,114 @@ void KeyManagerTest::saveFlushesADeferredRebuildWhenTheServiceIsDown()
 
     QVERIFY(rig.secrets.hasSecret(kService, kOpenai));
     QVERIFY(QTest::qWaitFor([&] { return deferredEditor.isNull(); }, 5000));
+}
+
+void KeyManagerTest::multiSecretRowRendersALabeledMaskedFieldPerSlot()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    QLineEdit *access = rig.klingAccess();
+    QLineEdit *secret = rig.klingSecret();
+    QVERIFY(access);
+    QVERIFY(secret);
+    QCOMPARE(access->echoMode(), QLineEdit::Password);
+    QCOMPARE(secret->echoMode(), QLineEdit::Password);
+    QCOMPARE(access->placeholderText(), QStringLiteral("Access Key"));
+    QCOMPARE(secret->placeholderText(), QStringLiteral("Secret Key"));
+
+    QStringList labels;
+    for (const QLabel *label : rig.panel.findChildren<QLabel *>())
+        labels << label->text();
+    QVERIFY(labels.contains(QStringLiteral("Access Key")));
+    QVERIFY(labels.contains(QStringLiteral("Secret Key")));
+}
+
+void KeyManagerTest::savingEveryMultiSecretFieldWritesEachAccountAndFiresStoredOnce()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    QSignalSpy storedSpy(&rig.panel, &KeyManagerPanel::keyStored);
+    rig.panel.openKeyEditor(kKling);
+    rig.klingAccess()->setText(kKlingAccessKey);
+    rig.klingSecret()->setText(kKlingSecretKey);
+    rig.klingSave()->click();
+
+    QVERIFY(rig.secrets.hasSecret(kService, kKlingAccess));
+    QVERIFY(rig.secrets.hasSecret(kService, kKlingSecret));
+    // The accounts are written verbatim from the channel. Values are compared
+    // with QVERIFY so a failure never prints a secret.
+    QVERIFY(rig.secrets.readSecret(kService, kKlingAccess) == kKlingAccessKey);
+    QVERIFY(rig.secrets.readSecret(kService, kKlingSecret) == kKlingSecretKey);
+    QCOMPARE(storedSpy.count(), 1);
+    QCOMPARE(storedSpy.first().first().toString(), kKling);
+}
+
+void KeyManagerTest::aPartialMultiSecretSaveStoresOneAndDoesNotUnblock()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    QSignalSpy storedSpy(&rig.panel, &KeyManagerPanel::keyStored);
+    rig.panel.openKeyEditor(kKling);
+    rig.klingAccess()->setText(kKlingAccessKey);
+    // The secret field is left empty.
+    rig.klingSave()->click();
+
+    QVERIFY(rig.secrets.hasSecret(kService, kKlingAccess));
+    QVERIFY(!rig.secrets.hasSecret(kService, kKlingSecret));
+    // A partial key must not fire the run-unblock signal — the service refuses
+    // a job whose provider is missing a secret.
+    QCOMPARE(storedSpy.count(), 0);
+    QCOMPARE(rig.klingStatus()->text(),
+             QStringLiteral("Partially set — 1 of 2"));
+}
+
+void KeyManagerTest::removingAMultiSecretVendorDeletesEverySlot()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    rig.panel.openKeyEditor(kKling);
+    rig.klingAccess()->setText(kKlingAccessKey);
+    rig.klingSecret()->setText(kKlingSecretKey);
+    rig.klingSave()->click();
+    QVERIFY(rig.secrets.hasSecret(kService, kKlingAccess));
+    QVERIFY(rig.secrets.hasSecret(kService, kKlingSecret));
+
+    rig.klingRemove()->click();
+    rig.klingConfirmRemove()->click();
+
+    QVERIFY(!rig.secrets.hasSecret(kService, kKlingAccess));
+    QVERIFY(!rig.secrets.hasSecret(kService, kKlingSecret));
+}
+
+void KeyManagerTest::noMultiSecretValueLeaksIntoTheSurface()
+{
+    Rig rig(&m_client);
+    QVERIFY(waitForModels(rig));
+
+    rig.panel.openKeyEditor(kKling);
+    rig.klingAccess()->setText(kKlingAccessKey);
+    rig.klingSecret()->setText(kKlingSecretKey);
+    rig.klingSave()->click();
+
+    // Neither secret survives in any rendered text, tooltip, placeholder, or
+    // object name across both fields. Secrets are never passed to QVERIFY's
+    // message, so a failure cannot print them either.
+    for (const QLabel *label : rig.panel.findChildren<QLabel *>()) {
+        QVERIFY(!label->text().contains(kKlingAccessKey));
+        QVERIFY(!label->text().contains(kKlingSecretKey));
+        QVERIFY(!label->toolTip().contains(kKlingAccessKey));
+        QVERIFY(!label->toolTip().contains(kKlingSecretKey));
+    }
+    for (const QLineEdit *field : rig.panel.findChildren<QLineEdit *>()) {
+        QVERIFY(!field->text().contains(kKlingAccessKey));
+        QVERIFY(!field->text().contains(kKlingSecretKey));
+        QVERIFY(!field->placeholderText().contains(kKlingAccessKey));
+        QVERIFY(!field->placeholderText().contains(kKlingSecretKey));
+    }
 }
 
 void KeyManagerTest::captureSurfaceImage()
