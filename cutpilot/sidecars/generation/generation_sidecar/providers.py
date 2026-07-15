@@ -648,7 +648,9 @@ def _build_sync_multipart_body(
     extra_body. The boundary is seeded from os.urandom so a crafted prompt
     cannot forge a part boundary. Returns (body_bytes, content_type) — a
     distinct arity from the async file-part builder so the two never mix."""
-    boundary = "cutpilot" + hashlib.sha256(os.urandom(32)).hexdigest()
+    # 8-char label plus 60 hex chars stays under the RFC 2046 70-char boundary
+    # limit while keeping 240 bits of entropy against a forged part boundary.
+    boundary = "cutpilot" + hashlib.sha256(os.urandom(32)).hexdigest()[:60]
     fields = {desc.prompt_key: request.prompt, **desc.extra_body}
     parts: list[bytes] = []
     for name, value in fields.items():
