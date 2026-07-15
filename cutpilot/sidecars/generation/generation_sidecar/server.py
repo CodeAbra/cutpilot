@@ -179,6 +179,21 @@ class GenerationHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "unknown_model"})
             return
 
+        if (
+            model.unverified
+            and model.needs_key
+            and os.environ.get("CUTPILOT_ALLOW_UNVERIFIED_SUBMIT") != "1"
+        ):
+            # An unverified vendor transport is registrable for a key but must
+            # not run through the normal route until a live gate confirms it.
+            # The opt-in env var is the deliberate escape hatch for that manual
+            # gate. Keyless local rows carry no external transport and stay
+            # runnable.
+            self._send_json(
+                409, {"error": "unverified_model", "provider": model.provider}
+            )
+            return
+
         prompt = str(payload.get("prompt", "")).strip()
         if model.needs_prompt and not prompt:
             self._send_json(400, {"error": "empty_prompt"})

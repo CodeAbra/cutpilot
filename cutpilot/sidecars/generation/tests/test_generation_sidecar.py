@@ -743,6 +743,30 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(data["error"], "missing_key")
         self.assertEqual(data["provider"], "openai")
 
+    def test_unverified_model_is_not_runnable_without_the_opt_in(self):
+        # An unverified transport is key-registrable but must not run through
+        # the normal route: the submit is refused before the key gate, so the
+        # rejection is independent of whether a key is present.
+        status, data = self.submit(model="kling/kling-v2-master")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "unverified_model")
+        self.assertEqual(data["provider"], "kling")
+
+        # The explicit opt-in is the manual live-smoke escape hatch: it lets the
+        # unverified model resolve and proceed to the key gate (here refused for
+        # a missing key, proving the unverified block was lifted, not the auth).
+        self.set_env_key("CUTPILOT_ALLOW_UNVERIFIED_SUBMIT", "1")
+        status, data = self.submit(model="kling/kling-v2-master")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "missing_key")
+        self.assertEqual(data["provider"], "kling")
+
+    def test_confirmed_models_stay_submittable(self):
+        # A shipped keyless model is unaffected by the unverified gate.
+        status, submitted = self.submit(model="local/procedural-v1")
+        self.assertEqual(status, 202)
+        self.assertEqual(submitted["state"], "queued")
+
     def test_single_secret_slot_and_presence_stay_byte_identical(self):
         # A single-secret provider is one slot whose account is the provider id,
         # so every shipped key resolves exactly as before.
@@ -817,9 +841,16 @@ class SidecarTestCase(unittest.TestCase):
         os.environ[name] = value
         self.addCleanup(lambda: os.environ.pop(name, None))
 
+    def allow_unverified_submit(self):
+        """Open the manual live-smoke gate so an unverified vendor row reaches
+        the pipeline, mirroring the deliberate operator opt-in."""
+        self.set_env_key("CUTPILOT_ALLOW_UNVERIFIED_SUBMIT", "1")
+
     def redirect_descriptor(self, provider, stub, **overrides):
         """Point a provider's descriptor at an in-process stub for the duration
-        of the test, leaving every other field intact."""
+        of the test, leaving every other field intact. Driving a vendor
+        transport implies the operator smoke-gate is open."""
+        self.allow_unverified_submit()
         base_row = providers.SYNC_IMAGE_DESCRIPTORS[provider]
         replaced = dataclasses.replace(base_row, base_url=stub.url, **overrides)
         patcher = patch.dict(
@@ -830,7 +861,9 @@ class SidecarTestCase(unittest.TestCase):
 
     def redirect_async_descriptor(self, stub, **overrides):
         """Point the BFL async descriptor at an in-process stub with fast
-        timings for the duration of the test, leaving every other field intact."""
+        timings for the duration of the test, leaving every other field intact.
+        Driving a vendor transport implies the operator smoke-gate is open."""
+        self.allow_unverified_submit()
         replaced = dataclasses.replace(
             providers.ASYNC_JOB_DESCRIPTORS["bfl"],
             base_url=stub.url,
@@ -844,7 +877,9 @@ class SidecarTestCase(unittest.TestCase):
 
     def redirect_async_row(self, descriptor_id, stub, **overrides):
         """Point an arbitrary async descriptor at an in-process stub with fast
-        timings for the duration of the test, leaving every other field intact."""
+        timings for the duration of the test, leaving every other field intact.
+        Driving a vendor transport implies the operator smoke-gate is open."""
+        self.allow_unverified_submit()
         replaced = dataclasses.replace(
             providers.ASYNC_JOB_DESCRIPTORS[descriptor_id],
             base_url=stub.url,
@@ -1242,8 +1277,10 @@ class SidecarTestCase(unittest.TestCase):
         ids = {model["id"] for model in data["models"]}
         self.assertNotIn("bfl/flux-2-pro-preview", ids)
 
-        # A direct submission still resolves the row: an absent key returns the
-        # missing-key refusal, not the unknown-model rejection.
+        # With the smoke-gate opt-in a direct submission resolves the row: an
+        # absent key returns the missing-key refusal, not the unknown-model
+        # rejection.
+        self.allow_unverified_submit()
         status, data = self.submit(model="bfl/flux-2-pro-preview")
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "missing_key")
@@ -1255,8 +1292,10 @@ class SidecarTestCase(unittest.TestCase):
         ids = {model["id"] for model in data["models"]}
         self.assertNotIn("bytedance/seedream-4-0", ids)
 
-        # A direct submission still resolves the row: an absent key returns the
-        # missing-key refusal, not the unknown-model rejection.
+        # With the smoke-gate opt-in a direct submission resolves the row: an
+        # absent key returns the missing-key refusal, not the unknown-model
+        # rejection.
+        self.allow_unverified_submit()
         status, data = self.submit(model="bytedance/seedream-4-0")
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "missing_key")
@@ -2061,6 +2100,7 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("test", final["message"])
 
     def test_video_rows_are_excluded_from_models_yet_resolve(self):
+        self.allow_unverified_submit()
         status, data = self.request("GET", "/models")
         self.assertEqual(status, 200)
         listed = {model["id"] for model in data["models"]}
@@ -2264,6 +2304,7 @@ class SidecarTestCase(unittest.TestCase):
     def test_higgsfield_stays_keyless_until_both_secrets_land(self):
         # One of two secrets is not enough: the run is refused as keyless until
         # every slot is present.
+        self.allow_unverified_submit()
         self.set_env_key("HIGGSFIELD_API_KEY", "higgs-api-key-000000")
         status, data = self.submit(model="higgsfield/soul-standard")
         self.assertEqual(status, 409)
@@ -2366,6 +2407,7 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("test", final["message"])
 
     def test_aggregator_rows_excluded_from_models_yet_resolve(self):
+        self.allow_unverified_submit()
         status, data = self.request("GET", "/models")
         self.assertEqual(status, 200)
         listed = {model["id"] for model in data["models"]}

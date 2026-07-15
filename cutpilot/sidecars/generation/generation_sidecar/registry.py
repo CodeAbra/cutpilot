@@ -33,8 +33,9 @@ class ModelInfo:
     # asynchronous video row under the same vendor account).
     descriptor: str = ""
     # A model whose vendor contract is not yet confirmed against a live key.
-    # The server keeps these out of the model picker and key surface until
-    # they are confirmed, while they stay resolvable for a direct smoke test.
+    # The server keeps these out of the model picker and key surface, and a
+    # keyed vendor row is refused by the run route until an operator opt-in
+    # opens the manual smoke gate that confirms it.
     unverified: bool = False
 
 
