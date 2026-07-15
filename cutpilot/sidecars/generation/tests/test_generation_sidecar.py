@@ -100,16 +100,32 @@ def _deep_merge(base, extra):
 
 class StubVendor:
     """An in-process stand-in for a sync-image vendor. Records the last POST it
-    received (headers + parsed JSON body) and returns a canned (status, json).
-    In url mode it also serves the returned PNG at /img/<name>.png. Bound to
-    127.0.0.1 on an ephemeral port; never reaches the network."""
+    received (headers, parsed JSON body, the exact raw bytes, and the request
+    path) and returns a canned reply: either a JSON (status, body), or — when
+    raw_result is set — the raw response bytes under a chosen content type (the
+    shape a vendor that answers a POST with the finished image directly). In url
+    mode it also serves the returned PNG at /img/<name>.png and records the auth
+    headers that fetch carried. Bound to 127.0.0.1 on an ephemeral port; never
+    reaches the network."""
 
-    def __init__(self, status=200, body=None, redirect_location=None):
+    def __init__(
+        self,
+        status=200,
+        body=None,
+        redirect_location=None,
+        raw_result=None,
+        raw_result_content_type="image/png",
+    ):
         self.status = status
         self.body = body if body is not None else {"data": [{"b64_json": STUB_PNG_B64}]}
         self.redirect_location = redirect_location
+        self.raw_result = raw_result
+        self.raw_result_content_type = raw_result_content_type
         self.last_headers = None
         self.last_body = None
+        self.last_raw = None
+        self.last_path = None
+        self.asset_headers = None
         vendor = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -122,10 +138,21 @@ class StubVendor:
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length) if length > 0 else b""
                 vendor.last_headers = dict(self.headers)
+                vendor.last_raw = raw
+                vendor.last_path = self.path
                 try:
                     vendor.last_body = json.loads(raw) if raw else {}
                 except json.JSONDecodeError:
+                    # A multipart submit body is binary, not JSON; last_raw
+                    # keeps the exact bytes for field assertions.
                     vendor.last_body = None
+                if vendor.raw_result is not None:
+                    self.send_response(vendor.status)
+                    self.send_header("Content-Type", vendor.raw_result_content_type)
+                    self.send_header("Content-Length", str(len(vendor.raw_result)))
+                    self.end_headers()
+                    self.wfile.write(vendor.raw_result)
+                    return
                 payload = json.dumps(vendor.body).encode()
                 self.send_response(vendor.status)
                 self.send_header("Content-Type", "application/json")
@@ -135,6 +162,7 @@ class StubVendor:
 
             def do_GET(self):
                 if self.path.startswith("/img/"):
+                    vendor.asset_headers = dict(self.headers)
                     if vendor.redirect_location is not None:
                         self.send_response(302)
                         self.send_header("Location", vendor.redirect_location)
@@ -557,13 +585,15 @@ class SidecarTestCase(unittest.TestCase):
         body.update(overrides)
         return self.request("POST", "/jobs", body=body)
 
-    def _stub_http(self, stub, method, path, body=None):
+    def _stub_http(self, stub, method, path, body=None, headers=None):
         """A raw request straight at a stub vendor (not through the engine),
         for asserting the stub replays a vendor's wire shape."""
         connection = http.client.HTTPConnection("127.0.0.1", stub.port, timeout=10)
         payload = json.dumps(body).encode() if body is not None else None
-        headers = {"Content-Type": "application/json"} if payload else {}
-        connection.request(method, path, body=payload, headers=headers)
+        req_headers = {"Content-Type": "application/json"} if payload else {}
+        if headers:
+            req_headers.update(headers)
+        connection.request(method, path, body=payload, headers=req_headers)
         response = connection.getresponse()
         status = response.status
         raw = response.read()
@@ -680,6 +710,44 @@ class SidecarTestCase(unittest.TestCase):
         self.assertIs(errored["done"], True)
         self.assertEqual(errored["error"]["message"], "quota exceeded")
         self.assertIsNone(providers._select_optional(errored, result_ref))
+
+    def test_stub_sync_raw_bytes_and_capture(self):
+        # A pure-harness check of the sync stub's raw-bytes reply mode and its
+        # request capture: a POST of a binary (non-JSON) body gets the raw image
+        # back under the chosen content type, the exact posted bytes and path are
+        # recorded, the JSON parse yields None on the binary body, and an asset
+        # GET records the headers it carried so a later test can assert absence.
+        stub = StubVendor(
+            raw_result=STUB_PNG, raw_result_content_type="image/png"
+        ).start()
+        self.addCleanup(stub.stop)
+
+        multipart = b"--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n1\r\n--b--\r\n"
+        connection = http.client.HTTPConnection("127.0.0.1", stub.port, timeout=10)
+        connection.request(
+            "POST",
+            "/gen/ultra",
+            body=multipart,
+            headers={"Content-Type": "multipart/form-data; boundary=b"},
+        )
+        response = connection.getresponse()
+        content_type = response.headers.get("Content-Type")
+        payload = response.read()
+        connection.close()
+
+        self.assertEqual(content_type, "image/png")
+        self.assertEqual(payload, STUB_PNG)
+        self.assertEqual(stub.last_raw, multipart)
+        self.assertEqual(stub.last_path, "/gen/ultra")
+        self.assertIsNone(stub.last_body)
+
+        status, raw = self._stub_http(
+            stub, "GET", "/img/x.png", headers={"Api-Key": "sekret"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, STUB_PNG)
+        self.assertIsNotNone(stub.asset_headers)
+        self.assertEqual(stub.asset_headers.get("Api-Key"), "sekret")
 
     def test_rejects_missing_and_wrong_tokens(self):
         for token in (None, "wrong-token"):
