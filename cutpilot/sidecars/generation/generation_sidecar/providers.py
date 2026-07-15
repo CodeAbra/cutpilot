@@ -256,6 +256,26 @@ class AsyncJobDescriptor:
     # Image rows keep the default; video rows widen it.
     result_max_bytes: int = MAX_INPUT_FILE_BYTES
     cancel_url_path: tuple | None = None
+    # A selector into the submit response naming a separate URL where the result
+    # lives (a queue vendor returns only a status in the poll body). None keeps
+    # the result in the last poll body, as every direct row does.
+    result_envelope_url_path: tuple | None = None
+    # A selector on the terminal status body for a vendor error a "success"
+    # terminal state can still carry, so a completed-with-error settles as an
+    # error rather than a blind result read. None means the state alone is
+    # authoritative.
+    terminal_error_path: tuple | None = None
+    # A selector into the submit response for a cancel URL (a queue vendor names
+    # it there, not in the poll body). None keeps the poll-body cancel behavior.
+    cancel_url_submit_path: tuple | None = None
+    # Extra host suffixes, beyond the descriptor's own base host, the key may be
+    # sent to on an authed fetch of a vendor-supplied URL. Empty trusts only the
+    # base host, so the key is never sent to a vendor-controlled external host.
+    authed_host_suffixes: tuple[str, ...] = ()
+    # An aggregator hosts many models with different result shapes, so the
+    # model's output kind selects the result reference. An empty map keeps the
+    # single result_ref_path for every direct row.
+    result_ref_by_kind: dict[str, tuple] = field(default_factory=dict)
     expected_duration_s: float = 4.0
 
 
@@ -675,6 +695,27 @@ def _select_optional(obj, path):
     return leaf
 
 
+def _authed_host_allowed(url, desc) -> bool:
+    """Whether a vendor-supplied URL may carry the user's key: its host must
+    equal the descriptor's own base host or end with a declared trusted suffix.
+    This is stricter than _guard_url, which only blocks internal hosts and would
+    still permit an arbitrary external host — so a vendor-controlled URL cannot
+    exfiltrate the key to an off-host address."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+        base_host = (urlsplit(desc.base_url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if base_host and host == base_host:
+        return True
+    return any(
+        host == suffix or host.endswith("." + suffix)
+        for suffix in desc.authed_host_suffixes
+    )
+
+
 def _vendor_json(url, method, headers, body, timeout):
     """Send one request to a vendor job endpoint and return its parsed JSON.
 
@@ -1002,14 +1043,22 @@ def _sleep_cancelable(interval: float, is_canceled: CanceledFn) -> None:
         remaining -= CANCEL_SLICE_S
 
 
-def _fire_cancel(desc: AsyncJobDescriptor, last_poll, headers, timeout) -> None:
-    """Best-effort cancel: when the descriptor names a cancel URL and the last
-    poll carried one, POST it and ignore any failure. A descriptor without a
-    cancel URL cancels cooperatively (stop polling)."""
-    if desc.cancel_url_path is None or last_poll is None:
-        return
-    cancel_url = _select_optional(last_poll, desc.cancel_url_path)
+def _fire_cancel(
+    desc: AsyncJobDescriptor, last_poll, submit_cancel_url, headers, timeout
+) -> None:
+    """Best-effort cancel: prefer a cancel URL echoed in the last poll body,
+    else one named in the submit response. The POST carries the key, so it fires
+    only when the chosen URL is the aggregator's own host (the same trust gate as
+    the authed result fetch); otherwise the cancel degrades cooperatively (stop
+    polling). Any failure is ignored."""
+    cancel_url = None
+    if desc.cancel_url_path is not None and last_poll is not None:
+        cancel_url = _select_optional(last_poll, desc.cancel_url_path)
+    if not cancel_url and submit_cancel_url:
+        cancel_url = submit_cancel_url
     if not cancel_url:
+        return
+    if not _authed_host_allowed(cancel_url, desc):
         return
     try:
         _vendor_json(cancel_url, "POST", headers, None, timeout)
@@ -1075,6 +1124,15 @@ class AsyncJobProvider:
         else:
             poll_url = desc.base_url + desc.poll_path.format(job_id=job_id)
 
+        # A queue vendor names the result and the cancel URL in the submit
+        # response, not the poll body; retain each when the row declares it.
+        envelope_url = None
+        if desc.result_envelope_url_path is not None:
+            envelope_url = _select_optional(submit_resp, desc.result_envelope_url_path)
+        submit_cancel_url = None
+        if desc.cancel_url_submit_path is not None:
+            submit_cancel_url = _select_optional(submit_resp, desc.cancel_url_submit_path)
+
         started = time.monotonic()
         # Floor the cadence so a zero or non-growing poll interval cannot
         # busy-poll the vendor until the deadline.
@@ -1088,7 +1146,7 @@ class AsyncJobProvider:
         failure_states = {s.casefold() for s in desc.failure_states}
         while True:
             if is_canceled():
-                _fire_cancel(desc, last_poll, auth, desc.request_timeout_s)
+                _fire_cancel(desc, last_poll, submit_cancel_url, auth, desc.request_timeout_s)
                 raise JobCanceled()
             if time.monotonic() - started > desc.job_deadline_s:
                 raise RuntimeError(
@@ -1124,6 +1182,15 @@ class AsyncJobProvider:
                 status = str(_select_optional(last_poll, desc.status_path) or "")
                 folded = status.casefold()
                 if folded in success_states:
+                    # A terminal success state can still carry a vendor error
+                    # (a queue vendor's completed-with-error), so read it before
+                    # a blind result fetch and settle as an error.
+                    if desc.terminal_error_path is not None:
+                        terminal_error = _select_optional(
+                            last_poll, desc.terminal_error_path
+                        )
+                        if terminal_error:
+                            raise RuntimeError(f"{desc.provider}: {terminal_error}")
                     break
                 if folded in failure_states:
                     detail = status
@@ -1139,7 +1206,7 @@ class AsyncJobProvider:
             interval = min(interval * desc.poll_backoff_factor, desc.poll_backoff_ceiling_s)
 
         if is_canceled():
-            _fire_cancel(desc, last_poll, auth, desc.request_timeout_s)
+            _fire_cancel(desc, last_poll, submit_cancel_url, auth, desc.request_timeout_s)
             raise JobCanceled()
 
         if desc.result_fetch == "bytes":
@@ -1152,7 +1219,26 @@ class AsyncJobProvider:
                 )
             data = result_bytes
         else:
-            ref = _select_optional(last_poll, desc.result_ref_path)
+            # An aggregator hosts many models with different result shapes, so
+            # the model's output kind selects the reference; an empty map keeps
+            # the single result_ref_path for every direct row.
+            result_ref = desc.result_ref_by_kind.get(
+                request.model.output_kind, desc.result_ref_path
+            )
+            if envelope_url is not None:
+                # The result lives at a separate URL named in the submit
+                # response, and this fetch carries the key — so refuse a URL
+                # off the aggregator's own host before the key is ever sent.
+                if not _authed_host_allowed(envelope_url, desc):
+                    raise RuntimeError(
+                        f"{desc.provider} returned an unexpected response shape"
+                    )
+                source = _vendor_json(
+                    envelope_url, "GET", auth, None, desc.request_timeout_s
+                )
+            else:
+                source = last_poll
+            ref = _select_optional(source, result_ref)
             if ref is None:
                 raise RuntimeError(
                     f"{desc.provider} returned an unexpected response shape"

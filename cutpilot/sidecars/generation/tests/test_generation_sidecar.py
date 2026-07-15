@@ -236,6 +236,9 @@ class StubAsyncVendor:
         # refusal assertions.
         self.response_hit = False
         self.response_auth = None
+        # The Authorization header seen on the pre-signed asset routes, which
+        # must carry none (the key rides submit/poll/envelope only).
+        self.asset_auth = None
         vendor = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -305,9 +308,11 @@ class StubAsyncVendor:
 
             def do_GET(self):
                 if self.path.startswith("/img/"):
+                    vendor.asset_auth = self.headers.get("Authorization")
                     self._reply(STUB_PNG, content_type="image/png")
                     return
                 if self.path.startswith("/video/"):
+                    vendor.asset_auth = self.headers.get("Authorization")
                     self._reply(vendor.video_body, content_type="video/mp4")
                     return
                 if self.path.startswith("/response/"):
@@ -1214,6 +1219,187 @@ class SidecarTestCase(unittest.TestCase):
         )
         fields.update(overrides)
         return providers.AsyncJobDescriptor(**fields)
+
+    def _envelope_descriptor(self, stub, **overrides):
+        """A queue-vendor descriptor pointed at an envelope stub: the terminal
+        poll carries a status only and the result lives at a separate
+        response_url, fetched with the key and host-restricted to the stub."""
+        fields = dict(
+            auth_header="Authorization",
+            auth_template="Key {key}",
+            poll_url_path=("status_url",),
+            result_envelope_url_path=("response_url",),
+            success_states=("COMPLETED",),
+            failure_states=(),
+            result_ref_path=("images", 0, "url"),
+        )
+        fields.update(overrides)
+        return self._stub_async_descriptor(stub, **fields)
+
+    def _image_model(self, model_id="stub/image-1"):
+        return ModelInfo(
+            id=model_id,
+            label="Stub Image",
+            provider="stub",
+            price_usd=0.05,
+            needs_key=True,
+            output_kind="image",
+        )
+
+    def _drive_to_cancel(self, desc, model, out_name):
+        out_path = os.path.join(self.gen_dir, out_name)
+        request = providers.GenerationRequest(
+            model=model, prompt="x", width=1024, height=1024, seed=7, out_path=out_path
+        )
+        calls = {"n": 0}
+
+        def is_canceled():
+            calls["n"] += 1
+            return calls["n"] > 2
+
+        with patch.dict(
+            providers.ASYNC_JOB_DESCRIPTORS, {"stub": desc}
+        ), patch.object(providers.keys, "lookup_key", return_value="secret-key"):
+            with self.assertRaises(providers.JobCanceled):
+                providers.AsyncJobProvider().generate(
+                    request, on_progress=lambda fraction: None, is_canceled=is_canceled
+                )
+
+    def test_envelope_indirection_fetches_result_from_submit_response_url(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(stub)
+        result, _ = self._run_async_direct(desc, self._image_model(), "envelope.png")
+        with open(result.path, "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+        # The key rides submit, poll, and the envelope fetch; the pre-signed
+        # asset carries none.
+        self.assertEqual(stub.submit_headers.get("Authorization"), "Key secret-key")
+        self.assertEqual(stub.poll_headers.get("Authorization"), "Key secret-key")
+        self.assertTrue(stub.response_hit)
+        self.assertEqual(stub.response_auth, "Key secret-key")
+        self.assertIsNone(stub.asset_auth)
+
+    def test_envelope_non_2xx_settles_error_without_leaking_key(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            error_status=500,
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(stub)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._image_model(), "envelope-fail.png")
+        message = str(caught.exception)
+        self.assertNotIn("secret-key", message)
+        self.assertNotIn(str(stub.port), message)
+
+    def test_terminal_completed_with_error_field_settles_error(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            terminal_error="content moderated",
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(stub, terminal_error_path=("error",))
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._image_model(), "terminal-error.png")
+        message = str(caught.exception)
+        self.assertIn("content moderated", message)
+        self.assertNotIn("secret-key", message)
+        # The terminal-error read settles the job before any envelope fetch.
+        self.assertFalse(stub.response_hit)
+
+    def test_offhost_response_url_refuses_to_send_the_key(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        )
+        # A loopback alias the gate resolves but that is neither the stub's own
+        # base host nor a declared trusted suffix.
+        stub.injected_response_url = f"http://localhost:{stub.port}/response/1"
+        stub.start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(stub)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._image_model(), "offhost.png")
+        message = str(caught.exception)
+        # The off-host envelope was refused before any request, so the key was
+        # never sent: no request recorded, no Authorization seen, no leak.
+        self.assertFalse(stub.response_hit)
+        self.assertIsNone(stub.response_auth)
+        self.assertNotIn("secret-key", message)
+        self.assertNotIn("localhost", message)
+
+    def test_envelope_url_ssrf_guarded(self):
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        )
+        # Point the envelope at the cloud-metadata host and trust its host on the
+        # allowlist, so the host gate passes and the SSRF gate is what refuses it.
+        stub.injected_response_url = "https://169.254.169.254/response/1"
+        stub.start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(
+            stub, authed_host_suffixes=("169.254.169.254",)
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._image_model(), "envelope-ssrf.png")
+        message = str(caught.exception)
+        self.assertNotIn("169.254", message)
+        self.assertNotIn("secret-key", message)
+
+    def test_fal_cancel_url_captured_from_submit_fires_through_the_host_gate(self):
+        stub = StubAsyncVendor(
+            mode="cancel",
+            envelope=True,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        )
+        stub.injected_cancel_url = f"{stub.url}/cancel/1"
+        stub.start()
+        self.addCleanup(stub.stop)
+        desc = self._envelope_descriptor(
+            stub, cancel_url_submit_path=("cancel_url",), job_deadline_s=5.0
+        )
+        self._drive_to_cancel(desc, self._image_model(), "cancel-submit.png")
+        self.assertTrue(stub.cancel_hit)
+
+        # An off-host submit cancel URL degrades cooperatively: the job still
+        # settles canceled and the off-host cancel route is never hit.
+        stub2 = StubAsyncVendor(
+            mode="cancel",
+            envelope=True,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+        )
+        stub2.injected_cancel_url = f"http://localhost:{stub2.port}/cancel/1"
+        stub2.start()
+        self.addCleanup(stub2.stop)
+        desc2 = self._envelope_descriptor(
+            stub2, cancel_url_submit_path=("cancel_url",), job_deadline_s=5.0
+        )
+        self._drive_to_cancel(desc2, self._image_model(), "cancel-offhost.png")
+        self.assertFalse(stub2.cancel_hit)
 
     def test_async_slug_rides_the_body_when_configured(self):
         stub = StubAsyncVendor(
