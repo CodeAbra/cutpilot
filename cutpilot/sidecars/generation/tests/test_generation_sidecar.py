@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from generation_sidecar import keys  # noqa: E402
 from generation_sidecar import providers  # noqa: E402
 from generation_sidecar.jobs import JobManager  # noqa: E402
 from generation_sidecar.procedural import (  # noqa: E402
@@ -680,6 +681,44 @@ class SidecarTestCase(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "missing_key")
         self.assertEqual(data["provider"], "openai")
+
+    def test_single_secret_slot_and_presence_stay_byte_identical(self):
+        # A single-secret provider is one slot whose account is the provider id,
+        # so every shipped key resolves exactly as before.
+        slots = keys.slots_for("openai")
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(slots[0].name, "key")
+        self.assertEqual(slots[0].account, "openai")
+        self.assertEqual(slots[0].env_var, "OPENAI_API_KEY")
+
+        self.assertFalse(keys.has_key("openai"))
+        self.assertIsNone(keys.lookup_secrets("openai"))
+        self.set_env_key("OPENAI_API_KEY", "openai-presence-000000")
+        self.assertTrue(keys.has_key("openai"))
+        self.assertEqual(keys.lookup_secrets("openai"), {"key": "openai-presence-000000"})
+
+    def test_multi_secret_presence_is_all_or_nothing(self):
+        slots = keys.slots_for("kling")
+        self.assertEqual([slot.name for slot in slots], ["access_key", "secret_key"])
+        self.assertEqual(
+            [slot.account for slot in slots],
+            ["kling.access_key", "kling.secret_key"],
+        )
+        self.assertEqual([slot.label for slot in slots], ["Access Key", "Secret Key"])
+
+        # No secret configured, then only one: the provider stays keyless until
+        # every slot lands.
+        self.assertFalse(keys.has_key("kling"))
+        self.assertIsNone(keys.lookup_secrets("kling"))
+        self.set_env_key("KLING_ACCESS_KEY", "kling-access-000000")
+        self.assertFalse(keys.has_key("kling"))
+        self.assertIsNone(keys.lookup_secrets("kling"))
+        self.set_env_key("KLING_SECRET_KEY", "kling-secret-000000")
+        self.assertTrue(keys.has_key("kling"))
+        self.assertEqual(
+            keys.lookup_secrets("kling"),
+            {"access_key": "kling-access-000000", "secret_key": "kling-secret-000000"},
+        )
 
     def test_invalid_submissions_are_rejected(self):
         status, data = self.submit(model="nonexistent/model")
