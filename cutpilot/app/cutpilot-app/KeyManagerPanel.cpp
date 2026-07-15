@@ -586,7 +586,9 @@ void KeyManagerPanel::saveKey(VendorRow *row)
     // presence signal decide, so a mixed env+keychain key still unblocks.
     m_coordinator->refreshModels();
     const bool keychainComplete =
-        row->slotsPresent(m_secrets, keychainService()) == row->slotFields.size();
+        !row->slotFields.isEmpty()
+        && row->slotsPresent(m_secrets, keychainService())
+               == row->slotFields.size();
     if (keychainComplete) {
         m_pendingUnblock.remove(row->provider);
         runDeferredRebuild();
