@@ -42,10 +42,13 @@ bool isAdoptableVideo(const core::Node &node)
 }
 
 // One source for both shapes, so a generate-video node is never handed an empty
-// path where an imported video would carry its picked file.
+// path where an imported video would carry its picked file. Self-guarding: a
+// generate node yields its result only when that result is a video, so an image
+// generate node can never route a still path into the video player.
 QString videoSourcePath(const core::Node &node)
 {
-    if (node.kind == core::NodeKind::Generate)
+    if (node.kind == core::NodeKind::Generate
+        && node.resultKind == QLatin1String("video"))
         return node.resultPath;
     return node.mediaPath;
 }

@@ -47,6 +47,7 @@ private slots:
     void scrubbingSeeksWithoutBlocking();
     void playbackAdvancesOnItsOwn();
     void generateVideoResultAdoptsAndScrubs();
+    void imageResultGenerateNodeStaysUnadopted();
 
 private:
     QTemporaryDir m_dir;
@@ -195,6 +196,32 @@ void VideoSourceTest::generateVideoResultAdoptsAndScrubs()
             return c.blue() > 180 && c.red() < 90;
         }(),
         15000);
+}
+
+void VideoSourceTest::imageResultGenerateNodeStaysUnadopted()
+{
+    // A generate node whose result is an image is never routed into the video
+    // player, even if its result path happens to point at a decodable video —
+    // the video pipeline sources such a path only for a video result.
+    render::CanvasController camera;
+    render::NodeLayerItem layer;
+    CompositorService media;
+    layer.setSize(QSizeF(1600, 1000));
+    layer.setController(&camera);
+
+    core::Node node;
+    node.kind = NodeKind::Generate;
+    node.title = QStringLiteral("Generated Image");
+    node.worldSize = QSizeF(280, 200);
+    node.resultPath = m_videoPath;
+    node.resultKind = QStringLiteral("image");
+    const int nodeId = layer.graph().addNode(node);
+    media.setLayer(&layer);
+    media.scheduleRefresh();
+
+    QTest::qWait(1500);
+    QCOMPARE(media.videoDurationMs(nodeId), qint64(0));
+    QVERIFY(!media.videoPlaying(nodeId));
 }
 
 int main(int argc, char *argv[])
