@@ -197,6 +197,7 @@ class StubAsyncVendor:
         terminal_error_path=("error",),
         cancel_url=None,
         cancel_url_submit_path=("cancel_url",),
+        redirect_asset=False,
     ):
         self.mode = mode
         self.polls_before_ready = polls_before_ready
@@ -226,6 +227,10 @@ class StubAsyncVendor:
         self.terminal_error_path = tuple(terminal_error_path)
         self.injected_cancel_url = cancel_url
         self.cancel_url_submit_path = tuple(cancel_url_submit_path)
+        # When set, the asset routes reply with a 302 to a second loopback path
+        # on this same stub, so a test can prove the key rode the first hop and
+        # was dropped on the redirected hop.
+        self.redirect_asset = redirect_asset
         self.submit_headers = None
         self.submit_body = None
         self.submit_raw = None
@@ -241,6 +246,17 @@ class StubAsyncVendor:
         # The Authorization header seen on the pre-signed asset routes, which
         # must carry none (the key rides submit/poll/envelope only).
         self.asset_auth = None
+        # The vendor key header seen on the asset routes: an authed result fetch
+        # (Veo's video.uri download) carries it on the first hop, so a test can
+        # assert the key rode the fetch and — via the redirected hop below — was
+        # dropped on the 302 to signed storage.
+        self.asset_api_key = None
+        # The redirected asset hop (a signed-storage stand-in): whether it was
+        # hit and the auth headers it carried, which must be none once the key
+        # is dropped on the redirect.
+        self.signed_hit = False
+        self.signed_auth = None
+        self.signed_api_key = None
         vendor = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -308,13 +324,39 @@ class StubAsyncVendor:
                     )
                 self._reply(response)
 
+            def _redirect_to(self, location):
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_GET(self):
+                if self.path.startswith("/signed/"):
+                    # A signed-storage stand-in reached only via the asset
+                    # redirect: it records the auth headers it saw so a test can
+                    # assert the key was dropped before the redirected hop.
+                    vendor.signed_hit = True
+                    vendor.signed_auth = self.headers.get("Authorization")
+                    vendor.signed_api_key = self.headers.get("x-goog-api-key")
+                    if self.path.endswith(".mp4"):
+                        self._reply(vendor.video_body, content_type="video/mp4")
+                    else:
+                        self._reply(STUB_PNG, content_type="image/png")
+                    return
                 if self.path.startswith("/img/"):
                     vendor.asset_auth = self.headers.get("Authorization")
+                    vendor.asset_api_key = self.headers.get("x-goog-api-key")
+                    if vendor.redirect_asset:
+                        self._redirect_to(f"{vendor.url}/signed/1.png")
+                        return
                     self._reply(STUB_PNG, content_type="image/png")
                     return
                 if self.path.startswith("/video/"):
                     vendor.asset_auth = self.headers.get("Authorization")
+                    vendor.asset_api_key = self.headers.get("x-goog-api-key")
+                    if vendor.redirect_asset:
+                        self._redirect_to(f"{vendor.url}/signed/1.mp4")
+                        return
                     self._reply(vendor.video_body, content_type="video/mp4")
                     return
                 if self.path.startswith("/response/"):
@@ -377,6 +419,15 @@ class StubAsyncVendor:
                 _deep_merge(
                     payload, _nest(self.terminal_error_path, self.terminal_error)
                 )
+            return payload
+        if self.terminal_error is not None:
+            # A terminal completion that carries a vendor error and no result
+            # reference: the completion signal is set and the payload names the
+            # error, so a boolean-done row settles it as a failure before any
+            # result fetch.
+            _deep_merge(
+                payload, _nest(self.terminal_error_path, self.terminal_error)
+            )
             return payload
         if self.result_kind == "video":
             url = f"{self.url}/video/1.mp4"
@@ -547,6 +598,81 @@ class SidecarTestCase(unittest.TestCase):
             self.assertEqual(poll["status"], "COMPLETED")
             self.assertNotIn("images", poll)
             self.assertNotIn("video", poll)
+
+    def test_stub_operation_poll_shape_and_redirect(self):
+        # A pure-harness check that the stub replays the operation-poll shape a
+        # boolean-done video row reads: the submit nests the operation name, the
+        # polls flip a boolean done, the terminal poll names the result uri at a
+        # deep path, an asset route can 302 to a signed-storage stand-in, and a
+        # terminal error replaces the result reference.
+        result_ref = (
+            "response",
+            "generateVideoResponse",
+            "generatedSamples",
+            0,
+            "video",
+            "uri",
+        )
+        stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=2,
+            status_path=("done",),
+            running_value=False,
+            success_value=True,
+            result_kind="video",
+            result_ref_path=result_ref,
+            submit_id_path=("name",),
+            redirect_asset=True,
+        ).start()
+        self.addCleanup(stub.stop)
+
+        status, raw = self._stub_http(stub, "POST", "/submit", body={})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)["name"], "1")
+
+        _, raw = self._stub_http(stub, "GET", "/poll/1")
+        self.assertIs(json.loads(raw)["done"], False)
+        self._stub_http(stub, "GET", "/poll/1")
+        _, raw = self._stub_http(stub, "GET", "/poll/1")
+        terminal = json.loads(raw)
+        self.assertIs(terminal["done"], True)
+        self.assertTrue(
+            providers._select_optional(terminal, result_ref).endswith("/video/1.mp4")
+        )
+
+        # The asset route 302s to a signed-storage stand-in that serves bytes.
+        connection = http.client.HTTPConnection("127.0.0.1", stub.port, timeout=10)
+        connection.request("GET", "/video/1.mp4")
+        redirect = connection.getresponse()
+        redirect.read()
+        connection.close()
+        self.assertEqual(redirect.status, 302)
+        self.assertTrue(redirect.headers.get("Location").endswith("/signed/1.mp4"))
+        status, signed = self._stub_http(stub, "GET", "/signed/1.mp4")
+        self.assertEqual(status, 200)
+        self.assertEqual(signed[4:8], MP4_FTYP)
+        self.assertTrue(stub.signed_hit)
+
+        # A terminal error replaces the result reference: done:true with an
+        # error object and no result uri, driving the boolean-done failure split.
+        err_stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=0,
+            status_path=("done",),
+            running_value=False,
+            success_value=True,
+            result_kind="video",
+            result_ref_path=result_ref,
+            submit_id_path=("name",),
+            terminal_error={"code": 7, "message": "quota exceeded"},
+        ).start()
+        self.addCleanup(err_stub.stop)
+        self._stub_http(err_stub, "POST", "/submit", body={})
+        _, raw = self._stub_http(err_stub, "GET", "/poll/1")
+        errored = json.loads(raw)
+        self.assertIs(errored["done"], True)
+        self.assertEqual(errored["error"]["message"], "quota exceeded")
+        self.assertIsNone(providers._select_optional(errored, result_ref))
 
     def test_rejects_missing_and_wrong_tokens(self):
         for token in (None, "wrong-token"):
