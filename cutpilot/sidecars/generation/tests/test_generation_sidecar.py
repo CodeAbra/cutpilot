@@ -1961,6 +1961,94 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("secret-key", message)
         self.assertNotIn("169.254.169.254", message)
 
+    _OPERATION_RESULT_REF = (
+        "response",
+        "generateVideoResponse",
+        "generatedSamples",
+        0,
+        "video",
+        "uri",
+    )
+
+    def _done_bool_stub(self, **overrides):
+        fields = dict(
+            status_path=("done",),
+            running_value=False,
+            success_value=True,
+            result_kind="video",
+            result_ref_path=self._OPERATION_RESULT_REF,
+            submit_id_path=("name",),
+        )
+        fields.update(overrides)
+        return StubAsyncVendor(**fields)
+
+    def _done_bool_descriptor(self, stub, **overrides):
+        """A descriptor whose completion is a JSON boolean done rather than a
+        status word, with the operation name rebuilt into the poll URL from the
+        trusted base and the result fetched with the key."""
+        fields = dict(
+            auth_header="x-goog-api-key",
+            auth_template="{key}",
+            status_source="done_bool",
+            status_path=("done",),
+            success_states=(),
+            failure_states=(),
+            terminal_error_path=("error",),
+            result_kind="video",
+            result_fetch="authed_url",
+            result_ref_path=self._OPERATION_RESULT_REF,
+            job_id_path=("name",),
+            poll_url_path=None,
+            poll_path="/poll/{job_id}",
+        )
+        fields.update(overrides)
+        return self._stub_async_descriptor(stub, **fields)
+
+    def test_done_bool_polls_until_true_then_succeeds(self):
+        stub = self._done_bool_stub(mode="ready", polls_before_ready=2).start()
+        self.addCleanup(stub.stop)
+        desc = self._done_bool_descriptor(stub)
+        result, progress = self._run_async_direct(
+            desc, self._video_model(), "donebool.mp4"
+        )
+        with open(result.path, "rb") as handle:
+            content = handle.read()
+        self.assertEqual(content[4:8], MP4_FTYP)
+        # Progress is monotonic and never reaches 1.0 before the terminal state.
+        self.assertEqual(progress, sorted(progress))
+        self.assertTrue(all(value < 1.0 for value in progress))
+        # The operation name "1" was rebuilt into the poll URL from the base and
+        # polled until done flipped true.
+        self.assertGreaterEqual(stub.poll_count, 3)
+        self.assertEqual(stub.asset_api_key, "secret-key")
+
+    def test_done_bool_true_with_error_settles_error(self):
+        stub = self._done_bool_stub(
+            mode="ready",
+            polls_before_ready=0,
+            terminal_error={"code": 3, "message": "safety filter triggered"},
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._done_bool_descriptor(stub)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._video_model(), "donebool-error.mp4")
+        message = str(caught.exception)
+        self.assertIn("safety filter triggered", message)
+        self.assertNotIn("secret-key", message)
+        # The error settled before any result fetch: the key never rode an asset.
+        self.assertIsNone(stub.asset_api_key)
+
+    def test_done_bool_false_keeps_polling_until_deadline(self):
+        stub = self._done_bool_stub(mode="never").start()
+        self.addCleanup(stub.stop)
+        desc = self._done_bool_descriptor(stub, job_deadline_s=0.3)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._video_model(), "donebool-never.mp4")
+        message = str(caught.exception)
+        self.assertIn("time budget", message)
+        self.assertNotIn("secret-key", message)
+        self.assertIsNone(stub.asset_api_key)
+
     def test_result_extension_follows_output_kind(self):
         manager = JobManager(self.gen_dir)
 
@@ -2841,8 +2929,11 @@ class SidecarTestCase(unittest.TestCase):
         self.assertTrue(desc.job_id_path)
         self.assertTrue(desc.status_path)
         # A json-field row settles on a named success state; an http-code row
-        # settles on the status code instead.
-        self.assertTrue(desc.success_states or desc.status_source == "http_code")
+        # settles on the status code, and a boolean-done row on a truthy done.
+        self.assertTrue(
+            desc.success_states
+            or desc.status_source in ("http_code", "done_bool")
+        )
         # A row either points at a result reference or returns the bytes inline.
         self.assertTrue(desc.result_ref_path or desc.result_fetch == "bytes")
         self.assertIn(
@@ -2874,6 +2965,16 @@ class SidecarTestCase(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self._assert_async_descriptor_row_valid("bfl", unknown)
+
+        # A boolean-done row settles on a truthy done, so it carries no named
+        # success state and still passes the check.
+        done_bool = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["bfl"],
+            status_source="done_bool",
+            status_path=("done",),
+            success_states=(),
+        )
+        self._assert_async_descriptor_row_valid("bfl", done_bool)
 
         # An aggregator envelope row stripped of its per-kind result map fails.
         malformed_envelope = dataclasses.replace(

@@ -1423,6 +1423,24 @@ class AsyncJobProvider:
                     )
                 # A running code (202) or other non-terminal code keeps polling;
                 # the whole-job deadline is the backstop.
+            elif desc.status_source == "done_bool":
+                last_poll = _vendor_json(
+                    poll_url, desc.poll_method, auth, None, desc.request_timeout_s
+                )
+                done = _select_optional(last_poll, desc.status_path)
+                if done:
+                    # A truthy boolean done is terminal. A completion can still
+                    # carry a vendor error, so read it before a blind result
+                    # fetch and settle as an error.
+                    if desc.terminal_error_path is not None:
+                        terminal_error = _select_optional(
+                            last_poll, desc.terminal_error_path
+                        )
+                        if terminal_error:
+                            raise RuntimeError(f"{desc.provider}: {terminal_error}")
+                    break
+                # A falsy or absent done keeps polling; the whole-job deadline is
+                # the backstop.
             else:
                 last_poll = _vendor_json(
                     poll_url, desc.poll_method, auth, None, desc.request_timeout_s
