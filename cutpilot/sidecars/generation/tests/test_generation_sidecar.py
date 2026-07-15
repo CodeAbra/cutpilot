@@ -3123,6 +3123,12 @@ class SidecarTestCase(unittest.TestCase):
             desc.success_states
             or desc.status_source in ("http_code", "done_bool")
         )
+        # A boolean-done row has no failure state vocabulary, so it needs a
+        # terminal error path to split a done-with-error completion from a real
+        # success; without it the error would be swallowed as an unexpected
+        # result shape.
+        if desc.status_source == "done_bool":
+            self.assertIsNotNone(desc.terminal_error_path)
         # A row either points at a result reference or returns the bytes inline.
         self.assertTrue(desc.result_ref_path or desc.result_fetch == "bytes")
         self.assertIn(
@@ -3156,14 +3162,32 @@ class SidecarTestCase(unittest.TestCase):
             self._assert_async_descriptor_row_valid("bfl", unknown)
 
         # A boolean-done row settles on a truthy done, so it carries no named
-        # success state and still passes the check.
+        # success state and still passes the check when it names a terminal
+        # error path to split a done-with-error completion from success.
         done_bool = dataclasses.replace(
             providers.ASYNC_JOB_DESCRIPTORS["bfl"],
             status_source="done_bool",
             status_path=("done",),
             success_states=(),
+            terminal_error_path=("error",),
         )
         self._assert_async_descriptor_row_valid("bfl", done_bool)
+
+        # A boolean-done row without a terminal error path cannot tell a
+        # done-with-error completion from a real success, so the check rejects
+        # it before it can reach production.
+        done_bool_no_error = dataclasses.replace(
+            done_bool, terminal_error_path=None
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_async_descriptor_row_valid("bfl", done_bool_no_error)
+
+        # The shipped Veo rows use the boolean-done branch and carry the
+        # terminal error path, so they stay valid.
+        for key in ("veo", "veo-i2v"):
+            desc = providers.ASYNC_JOB_DESCRIPTORS.get(key)
+            if desc is not None:
+                self._assert_async_descriptor_row_valid(key, desc)
 
         # An aggregator envelope row stripped of its per-kind result map fails.
         malformed_envelope = dataclasses.replace(
