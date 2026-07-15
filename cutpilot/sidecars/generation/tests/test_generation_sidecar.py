@@ -1401,6 +1401,59 @@ class SidecarTestCase(unittest.TestCase):
         self._drive_to_cancel(desc2, self._image_model(), "cancel-offhost.png")
         self.assertFalse(stub2.cancel_hit)
 
+    def test_result_ref_by_kind_selects_path_by_output_kind(self):
+        by_kind = {"image": ("images", 0, "url"), "video": ("video", "url")}
+        # One descriptor, an image model: the envelope's images[0].url resolves.
+        img_stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            result_kind="image",
+        ).start()
+        self.addCleanup(img_stub.stop)
+        img_desc = self._envelope_descriptor(img_stub, result_ref_by_kind=by_kind)
+        result, _ = self._run_async_direct(
+            img_desc, self._image_model(), "perkind-image.png"
+        )
+        with open(result.path, "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+
+        # The same descriptor, a video model: the envelope's video.url resolves.
+        vid_stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            result_kind="video",
+        ).start()
+        self.addCleanup(vid_stub.stop)
+        vid_desc = self._envelope_descriptor(vid_stub, result_ref_by_kind=by_kind)
+        video_model = ModelInfo(
+            id="stub/video-1",
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            output_kind="video",
+        )
+        result, _ = self._run_async_direct(vid_desc, video_model, "perkind-video.mp4")
+        with open(result.path, "rb") as handle:
+            self.assertEqual(handle.read()[4:8], MP4_FTYP)
+
+    def test_result_ref_by_kind_falls_back_to_result_ref_path(self):
+        # An empty kind map keeps the single result_ref_path, and the result
+        # lives in the poll body (direct-row parity, no envelope).
+        stub = StubAsyncVendor(mode="ready", polls_before_ready=1).start()
+        self.addCleanup(stub.stop)
+        desc = self._stub_async_descriptor(stub, result_ref_path=("result", "sample"))
+        self.assertEqual(desc.result_ref_by_kind, {})
+        result, _ = self._run_async_direct(desc, self._image_model(), "fallback.png")
+        with open(result.path, "rb") as handle:
+            self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
+
     def test_async_slug_rides_the_body_when_configured(self):
         stub = StubAsyncVendor(
             mode="ready", polls_before_ready=1, result_kind="video"
