@@ -178,6 +178,7 @@ class StubAsyncVendor:
         mode="ready",
         polls_before_ready=2,
         polling_url=None,
+        poll_url_path=("polling_url",),
         status_path=("status",),
         running_value="Pending",
         success_value="Ready",
@@ -187,11 +188,19 @@ class StubAsyncVendor:
         video_body=None,
         submit_id_path=("id",),
         error_status=None,
+        envelope=False,
+        response_url=None,
+        response_url_path=("response_url",),
+        terminal_error=None,
+        terminal_error_path=("error",),
+        cancel_url=None,
+        cancel_url_submit_path=("cancel_url",),
     ):
         self.mode = mode
         self.polls_before_ready = polls_before_ready
         self.error_status = error_status
         self.injected_polling_url = polling_url
+        self.poll_url_path = tuple(poll_url_path)
         self.submit_id_path = tuple(submit_id_path)
         self.status_path = tuple(status_path)
         self.running_value = running_value
@@ -204,6 +213,17 @@ class StubAsyncVendor:
             )
         self.result_ref_path = tuple(result_ref_path)
         self.video_body = video_body if video_body is not None else STUB_MP4
+        # Fal's queue shape: the terminal poll body carries only a status, and
+        # the result lives at a separate response_url named in the submit
+        # response. Off by default so every other vendor's poll-body result is
+        # unchanged.
+        self.envelope = envelope
+        self.injected_response_url = response_url
+        self.response_url_path = tuple(response_url_path)
+        self.terminal_error = terminal_error
+        self.terminal_error_path = tuple(terminal_error_path)
+        self.injected_cancel_url = cancel_url
+        self.cancel_url_submit_path = tuple(cancel_url_submit_path)
         self.submit_headers = None
         self.submit_body = None
         self.submit_raw = None
@@ -211,6 +231,11 @@ class StubAsyncVendor:
         self.poll_headers = None
         self.poll_count = 0
         self.cancel_hit = False
+        # Whether the separate response_url envelope route was fetched, and the
+        # Authorization header it carried, for the auth-split and off-host
+        # refusal assertions.
+        self.response_hit = False
+        self.response_auth = None
         vendor = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -261,7 +286,21 @@ class StubAsyncVendor:
                 else:
                     polling_url = f"{vendor.url}/poll/1"
                 response = _nest(vendor.submit_id_path, "1")
-                _deep_merge(response, {"polling_url": polling_url})
+                _deep_merge(response, _nest(vendor.poll_url_path, polling_url))
+                if vendor.envelope:
+                    response_url = (
+                        vendor.injected_response_url
+                        if vendor.injected_response_url is not None
+                        else f"{vendor.url}/response/1"
+                    )
+                    _deep_merge(
+                        response, _nest(vendor.response_url_path, response_url)
+                    )
+                if vendor.mode == "cancel" and vendor.injected_cancel_url is not None:
+                    _deep_merge(
+                        response,
+                        _nest(vendor.cancel_url_submit_path, vendor.injected_cancel_url),
+                    )
                 self._reply(response)
 
             def do_GET(self):
@@ -270,6 +309,26 @@ class StubAsyncVendor:
                     return
                 if self.path.startswith("/video/"):
                     self._reply(vendor.video_body, content_type="video/mp4")
+                    return
+                if self.path.startswith("/response/"):
+                    # The separate result envelope: it is fetched with the key,
+                    # so record the Authorization it carried and that it was hit
+                    # at all. A configured error_status makes it a non-2xx so the
+                    # envelope-failure path can be exercised.
+                    vendor.response_hit = True
+                    vendor.response_auth = self.headers.get("Authorization")
+                    if vendor.error_status is not None:
+                        self._reply_status(
+                            vendor.error_status, b"", "application/json"
+                        )
+                        return
+                    if vendor.result_kind == "video":
+                        envelope = {"video": {"url": f"{vendor.url}/video/1.mp4"}}
+                    else:
+                        envelope = {
+                            "images": [{"url": f"{vendor.url}/img/1.png"}]
+                        }
+                    self._reply(envelope)
                     return
                 if vendor.mode == "stability":
                     # Completion signaled by HTTP status: 202 while running, then
@@ -302,11 +361,20 @@ class StubAsyncVendor:
         return _nest(self.status_path, self.running_value)
 
     def _success_payload(self):
+        payload = _nest(self.status_path, self.success_value)
+        if self.envelope:
+            # A Fal-shaped terminal poll carries a status only; the result lives
+            # at the separate response_url. A terminal state can still name a
+            # vendor error the envelope read would otherwise miss.
+            if self.terminal_error is not None:
+                _deep_merge(
+                    payload, _nest(self.terminal_error_path, self.terminal_error)
+                )
+            return payload
         if self.result_kind == "video":
             url = f"{self.url}/video/1.mp4"
         else:
             url = f"{self.url}/img/1.png"
-        payload = _nest(self.status_path, self.success_value)
         return _deep_merge(payload, _nest(self.result_ref_path, url))
 
     def _poll_payload(self):
@@ -423,6 +491,55 @@ class SidecarTestCase(unittest.TestCase):
         }
         body.update(overrides)
         return self.request("POST", "/jobs", body=body)
+
+    def _stub_http(self, stub, method, path, body=None):
+        """A raw request straight at a stub vendor (not through the engine),
+        for asserting the stub replays a vendor's wire shape."""
+        connection = http.client.HTTPConnection("127.0.0.1", stub.port, timeout=10)
+        payload = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if payload else {}
+        connection.request(method, path, body=payload, headers=headers)
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read()
+        connection.close()
+        return status, raw
+
+    def test_stub_envelope_route_serves_the_model_shape(self):
+        # A pure-harness check: the envelope stub nests the poll URL and the
+        # separate response_url where a Fal row reads them, the terminal poll
+        # carries a status but no result reference, and the response route
+        # returns the model-shaped result for both an image and a video kind.
+        for result_kind, ref_key in (("image", "images"), ("video", "video")):
+            stub = StubAsyncVendor(
+                envelope=True,
+                result_kind=result_kind,
+                polls_before_ready=0,
+                poll_url_path=("status_url",),
+                response_url_path=("response_url",),
+                success_value="COMPLETED",
+            ).start()
+            self.addCleanup(stub.stop)
+
+            status, raw = self._stub_http(
+                stub, "POST", "/fal-ai/model", body={"prompt": "x"}
+            )
+            self.assertEqual(status, 200)
+            submit = json.loads(raw)
+            self.assertEqual(submit["status_url"], f"{stub.url}/poll/1")
+            self.assertEqual(submit["response_url"], f"{stub.url}/response/1")
+
+            status, raw = self._stub_http(stub, "GET", "/response/1")
+            self.assertEqual(status, 200)
+            envelope = json.loads(raw)
+            self.assertIn(ref_key, envelope)
+
+            status, raw = self._stub_http(stub, "GET", "/poll/1")
+            self.assertEqual(status, 200)
+            poll = json.loads(raw)
+            self.assertEqual(poll["status"], "COMPLETED")
+            self.assertNotIn("images", poll)
+            self.assertNotIn("video", poll)
 
     def test_rejects_missing_and_wrong_tokens(self):
         for token in (None, "wrong-token"):
