@@ -1004,6 +1004,9 @@ def _build_veo_body(desc: AsyncJobDescriptor, request: GenerationRequest):
     (aspectRatio / resolution / duration)."""
     instance = {"prompt": request.prompt}
     if desc.input_body_key and request.input_path:
+        # The declared type assumes a PNG plate; a non-PNG input (JPEG/WebP)
+        # would carry a mismatched tag. Sniff the input magic bytes and set the
+        # type from them once a live i2v key confirms the vendor contract.
         instance[desc.input_body_key] = {
             "inlineData": {
                 "mimeType": "image/png",
