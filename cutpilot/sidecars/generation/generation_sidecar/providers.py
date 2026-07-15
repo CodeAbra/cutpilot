@@ -727,7 +727,12 @@ class SyncImageProvider:
             raise MissingKeyError(desc.provider)
 
         width, height = _resolve_size(desc, request.width, request.height)
-        url = desc.base_url + desc.generate_path.format(model=_slug(request.model))
+        # Only a path that carries the {model} placeholder is templated; a
+        # literal brace elsewhere in a future path would otherwise raise here.
+        generate_path = desc.generate_path
+        if "{model}" in generate_path:
+            generate_path = generate_path.format(model=_slug(request.model))
+        url = desc.base_url + generate_path
         if desc.body_encoding == "multipart":
             payload, content_type = _build_sync_multipart_body(desc, request)
             headers = {
