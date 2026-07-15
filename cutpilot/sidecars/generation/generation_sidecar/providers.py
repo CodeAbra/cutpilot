@@ -676,6 +676,40 @@ def _resolve_size(
     return min(desc.sizes, key=lambda s: abs(s[0] / s[1] - aspect))
 
 
+def _vendor_error_detail(body) -> str:
+    """Pull a human-readable failure reason from a vendor error envelope,
+    carrying no key or header material. Handles the OpenAI object shape
+    (error.message), a bare string error, the Stability shape (an errors array
+    of strings, optionally alongside a name), and a top-level message. Returns
+    "" when no known field carries a reason, leaving the caller to report the
+    status code alone rather than a blank."""
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    elif isinstance(error, str) and error:
+        return error
+    errors = body.get("errors")
+    if isinstance(errors, (list, tuple)):
+        for item in errors:
+            if isinstance(item, str) and item:
+                return item
+    elif isinstance(errors, dict):
+        for item in errors.values():
+            if isinstance(item, str) and item:
+                return item
+    message = body.get("message")
+    if isinstance(message, str) and message:
+        return message
+    name = body.get("name")
+    if isinstance(name, str) and name:
+        return name
+    return ""
+
+
 class SyncImageProvider:
     """One adapter for every synchronous image vendor, driven by a descriptor
     row picked by the model's provider. The key is the user's own (env or
@@ -730,14 +764,15 @@ class SyncImageProvider:
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
-                detail = json.loads(exc.read()).get("error", {}).get("message", "")
+                detail = _vendor_error_detail(json.loads(exc.read()))
             except Exception:
                 pass
             finally:
                 exc.close()
-            raise RuntimeError(
-                f"{desc.provider} request failed ({exc.code}): {detail}"
-            ) from exc
+            reason = f"{desc.provider} request failed ({exc.code})"
+            if detail:
+                reason = f"{reason}: {detail}"
+            raise RuntimeError(reason) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(
                 f"{desc.provider} request failed: {exc.reason}"

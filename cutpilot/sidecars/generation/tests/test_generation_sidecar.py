@@ -2792,6 +2792,67 @@ class SidecarTestCase(unittest.TestCase):
         self.assertIn("content moderated", final["message"])
         self.assertNotIn("sk-stability-secret", final["message"])
 
+    def test_stability_native_error_shape_surfaces_reason_without_leaking_key(self):
+        # Stability's stable-image API reports errors as a name plus an errors
+        # array of strings, not the OpenAI error.message object. The reason must
+        # still reach the user, non-blank, with no key material.
+        self.set_env_key("STABILITY_API_KEY", "sk-stability-secret")
+        stub = StubVendor(
+            status=400,
+            body={"name": "bad_request", "errors": ["your prompt was flagged"]},
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("stability", stub)
+
+        final = self.run_to_done(
+            model="stability/stable-image-ultra",
+            prompt="x",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("your prompt was flagged", final["message"])
+        self.assertNotIn("sk-stability-secret", final["message"])
+
+    def test_ideogram_native_error_shape_surfaces_reason_without_leaking_key(self):
+        # Ideogram reports a bare string error rather than an error.message
+        # object. The reason must reach the user, non-blank, with no key.
+        self.set_env_key("IDEOGRAM_API_KEY", "id-ideogram-secret")
+        stub = StubVendor(
+            status=422, body={"error": "invalid api request"}
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("ideogram", stub)
+
+        final = self.run_to_done(
+            model="ideogram/ideogram-v3",
+            prompt="x",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("invalid api request", final["message"])
+        self.assertNotIn("id-ideogram-secret", final["message"])
+
+    def test_vendor_error_with_no_known_reason_field_reports_code(self):
+        # An envelope with no field the walk recognizes must still surface a
+        # non-blank reason: the status code alone, never a dangling colon.
+        self.set_env_key("STABILITY_API_KEY", "sk-stability-secret")
+        stub = StubVendor(status=503, body={"unexpected": "shape"}).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("stability", stub)
+
+        final = self.run_to_done(
+            model="stability/stable-image-ultra",
+            prompt="x",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("503", final["message"])
+        self.assertFalse(final["message"].rstrip().endswith(":"))
+        self.assertNotIn("sk-stability-secret", final["message"])
+
     def test_ideogram_row_drives_full_loop(self):
         # A multipart submit returns a JSON data[0].url the shipped headerless
         # download fetches. The key rides the Api-Key custom header on submit,
