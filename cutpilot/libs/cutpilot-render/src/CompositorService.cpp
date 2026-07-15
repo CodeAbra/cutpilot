@@ -176,7 +176,11 @@ void CompositorService::refreshNow()
     prune(m_decodedPaths);
     prune(m_thumbnailKeys);
     for (auto it = m_videos.begin(); it != m_videos.end();) {
-        if (!m_layer->graph().nodeById(it.key())) {
+        const core::Node *node = m_layer->graph().nodeById(it.key());
+        // Release a playback whose node left the graph or is no longer an
+        // adoptable video (e.g. a generate node re-run against an image
+        // model), so its QMediaPlayer and QVideoSink never linger idle.
+        if (!node || !isAdoptableVideo(*node)) {
             releaseRenderedNode(it.key());
             // The frame lambda captures this playback raw; the plain delete
             // is safe only while the sink delivers on this same thread, so

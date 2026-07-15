@@ -47,6 +47,7 @@ private slots:
     void scrubbingSeeksWithoutBlocking();
     void playbackAdvancesOnItsOwn();
     void generateVideoResultAdoptsAndScrubs();
+    void playbackReleasedWhenResultStopsBeingVideo();
     void imageResultGenerateNodeStaysUnadopted();
 
 private:
@@ -196,6 +197,23 @@ void VideoSourceTest::generateVideoResultAdoptsAndScrubs()
             return c.blue() > 180 && c.red() < 90;
         }(),
         15000);
+}
+
+void VideoSourceTest::playbackReleasedWhenResultStopsBeingVideo()
+{
+    // A generate node re-run against an image model stops being an adoptable
+    // video: its playback must be released rather than lingering idle. The
+    // released playback reports no duration for that node.
+    Rig rig(m_videoPath, Source::GenerateResult);
+    QTRY_VERIFY_WITH_TIMEOUT(rig.media.videoDurationMs(rig.videoId) > 0, 15000);
+
+    core::Node *node = rig.layer.graph().nodeById(rig.videoId);
+    QVERIFY(node);
+    node->resultKind = QStringLiteral("image");
+    node->bumpContent();
+    rig.media.scheduleRefresh();
+
+    QTRY_VERIFY_WITH_TIMEOUT(rig.media.videoDurationMs(rig.videoId) == 0, 15000);
 }
 
 void VideoSourceTest::imageResultGenerateNodeStaysUnadopted()
