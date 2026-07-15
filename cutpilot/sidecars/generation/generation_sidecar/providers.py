@@ -533,18 +533,36 @@ def _open_pinned(scheme: str, host: str, pinned_ip: str, port: int, timeout: int
     return _PinnedHTTPConnection(host, pinned_ip, port, timeout)
 
 
-def _download_capped(url: str, max_bytes: int, timeout: int) -> bytes:
+def _download_capped(
+    url: str,
+    max_bytes: int,
+    timeout: int,
+    auth_headers=None,
+    auth_desc=None,
+) -> bytes:
     """Fetch a vendor-supplied image URL under strict bounds: https only (or
     http to an explicit loopback host, matching the in-process transport), a
     connection pinned to a validated address, every redirect hop re-validated
     against the same gate, a hard read cap, and a timeout. Bytes are returned
-    raw and never interpreted."""
+    raw and never interpreted.
+
+    A headerless fetch (auth_headers None) is the pre-signed-asset default and
+    every existing caller uses it, byte for byte. When auth headers are supplied
+    the fetch carries the user's key, so the first hop's host must pass the
+    descriptor's authed-host gate before the key is sent, and the headers are
+    dropped on ANY redirect — the key never follows a 302 to a signed-storage
+    host."""
     current = url
+    headers = dict(auth_headers) if auth_headers else {}
+    if headers and not _authed_host_allowed(current, auth_desc):
+        # Paired with the caller's pre-check: never send the key to a host
+        # outside the descriptor's own base host or its declared suffixes.
+        raise RuntimeError("Refusing to send the key to an untrusted result host")
     for _ in range(_MAX_REDIRECTS + 1):
         scheme, host, port, pinned_ip, path = _guard_url(current)
         connection = _open_pinned(scheme, host, pinned_ip, port, timeout)
         try:
-            connection.request("GET", path)
+            connection.request("GET", path, headers=headers)
             response = connection.getresponse()
             if response.status in _REDIRECT_STATUSES:
                 location = response.headers.get("Location")
@@ -552,6 +570,9 @@ def _download_capped(url: str, max_bytes: int, timeout: int) -> bytes:
                 if not location:
                     raise RuntimeError("Vendor redirect is missing a target")
                 current = urljoin(current, location)
+                # The redirect target may be a signed-storage host the key must
+                # never reach, so drop the auth headers before the next hop.
+                headers = {}
                 continue
             if response.status != 200:
                 raise RuntimeError(
@@ -1473,6 +1494,23 @@ class AsyncJobProvider:
             if desc.result_fetch == "url":
                 data = _download_capped(
                     ref, desc.result_max_bytes, desc.request_timeout_s
+                )
+            elif desc.result_fetch == "authed_url":
+                # The result bytes live at a vendor-supplied URL that must be
+                # fetched with the key. Refuse a host outside the descriptor's
+                # own base host or declared suffixes before the key is ever sent;
+                # the first-hop check inside _download_capped is the paired
+                # defense, and the key is dropped on any redirect there.
+                if not _authed_host_allowed(ref, desc):
+                    raise RuntimeError(
+                        f"{desc.provider} returned an unexpected response shape"
+                    )
+                data = _download_capped(
+                    ref,
+                    desc.result_max_bytes,
+                    desc.request_timeout_s,
+                    auth_headers=auth,
+                    auth_desc=desc,
                 )
             elif desc.result_fetch == "inline_b64":
                 data = base64.b64decode(ref)

@@ -198,6 +198,7 @@ class StubAsyncVendor:
         cancel_url=None,
         cancel_url_submit_path=("cancel_url",),
         redirect_asset=False,
+        result_url=None,
     ):
         self.mode = mode
         self.polls_before_ready = polls_before_ready
@@ -231,6 +232,10 @@ class StubAsyncVendor:
         # on this same stub, so a test can prove the key rode the first hop and
         # was dropped on the redirected hop.
         self.redirect_asset = redirect_asset
+        # When set, the terminal poll names this result uri instead of the
+        # stub's own asset route, so a test can drive a result host the authed
+        # fetch must refuse (an off-host uri never connected to).
+        self.injected_result_url = result_url
         self.submit_headers = None
         self.submit_body = None
         self.submit_raw = None
@@ -429,7 +434,9 @@ class StubAsyncVendor:
                 payload, _nest(self.terminal_error_path, self.terminal_error)
             )
             return payload
-        if self.result_kind == "video":
+        if self.injected_result_url is not None:
+            url = self.injected_result_url
+        elif self.result_kind == "video":
             url = f"{self.url}/video/1.mp4"
         else:
             url = f"{self.url}/img/1.png"
@@ -1541,6 +1548,19 @@ class SidecarTestCase(unittest.TestCase):
             output_kind="image",
         )
 
+    def _video_model(self, model_id="stub/video-1", **overrides):
+        fields = dict(
+            id=model_id,
+            label="Stub Video",
+            provider="stub",
+            price_usd=0.1,
+            needs_key=True,
+            category="video",
+            output_kind="video",
+        )
+        fields.update(overrides)
+        return ModelInfo(**fields)
+
     def _drive_to_cancel(self, desc, model, out_name):
         out_path = os.path.join(self.gen_dir, out_name)
         request = providers.GenerationRequest(
@@ -1845,6 +1865,101 @@ class SidecarTestCase(unittest.TestCase):
         desc2 = self._stub_async_descriptor(stub2, model_body_key=None)
         self._run_async_direct(desc2, model, "no-slug.mp4")
         self.assertNotIn("model", stub2.submit_body)
+
+    def _authed_url_descriptor(self, stub, **overrides):
+        """A descriptor whose result bytes are fetched from a vendor-supplied
+        URL with the key in a vendor header, host-restricted to the stub's own
+        host and dropping the key on any redirect."""
+        fields = dict(
+            auth_header="x-goog-api-key",
+            auth_template="{key}",
+            result_kind="video",
+            result_fetch="authed_url",
+            result_ref_path=("output", 0),
+        )
+        fields.update(overrides)
+        return self._stub_async_descriptor(stub, **fields)
+
+    def test_authed_url_sends_the_key_to_the_vendor_host(self):
+        stub = StubAsyncVendor(
+            mode="ready", polls_before_ready=1, result_kind="video"
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._authed_url_descriptor(stub)
+        result, _ = self._run_async_direct(desc, self._video_model(), "authed.mp4")
+        with open(result.path, "rb") as handle:
+            content = handle.read()
+        self.assertEqual(content[4:8], MP4_FTYP)
+        # The key rode the result fetch in the vendor header, not Authorization,
+        # and never appears anywhere it is surfaced.
+        self.assertEqual(stub.asset_api_key, "secret-key")
+        self.assertIsNone(stub.asset_auth)
+
+    def test_authed_url_drops_the_key_on_redirect(self):
+        stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=1,
+            result_kind="video",
+            redirect_asset=True,
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._authed_url_descriptor(stub)
+        result, _ = self._run_async_direct(
+            desc, self._video_model(), "authed-redirect.mp4"
+        )
+        with open(result.path, "rb") as handle:
+            self.assertEqual(handle.read()[4:8], MP4_FTYP)
+        # The first hop carried the key; the redirected signed-storage hop
+        # carried neither the vendor key header nor Authorization.
+        self.assertEqual(stub.asset_api_key, "secret-key")
+        self.assertTrue(stub.signed_hit)
+        self.assertIsNone(stub.signed_api_key)
+        self.assertIsNone(stub.signed_auth)
+
+    def test_authed_url_offhost_refuses_to_send_the_key(self):
+        # The stub polls on its own host but names the result uri on a loopback
+        # host that is neither the descriptor base host nor a declared suffix, so
+        # the key is refused before the fetch is ever attempted.
+        offhost = "http://127.0.0.2:9/video/1.mp4"
+        stub = StubAsyncVendor(
+            mode="ready",
+            polls_before_ready=1,
+            result_kind="video",
+            result_url=offhost,
+        ).start()
+        self.addCleanup(stub.stop)
+        desc = self._authed_url_descriptor(stub)
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_async_direct(desc, self._video_model(), "offhost.mp4")
+        self.assertIsNone(stub.asset_api_key)
+        message = str(caught.exception)
+        self.assertNotIn("secret-key", message)
+        self.assertNotIn("127.0.0.2", message)
+
+    def test_authed_url_ssrf_guarded(self):
+        # A descriptor that trusts the metadata host for the key (isolating the
+        # host gate) still cannot fetch it: the SSRF gate refuses the internal
+        # address before connecting, and neither the host nor the key leaks.
+        metadata_url = "https://169.254.169.254/latest/meta-data/"
+        desc = providers.AsyncJobDescriptor(
+            provider="stub",
+            base_url="https://169.254.169.254",
+            auth_header="x-goog-api-key",
+            auth_template="{key}",
+            authed_host_suffixes=("169.254.169.254",),
+        )
+        self.assertTrue(providers._authed_host_allowed(metadata_url, desc))
+        with self.assertRaises(RuntimeError) as caught:
+            providers._download_capped(
+                metadata_url,
+                desc.result_max_bytes,
+                desc.request_timeout_s,
+                auth_headers={"x-goog-api-key": "secret-key"},
+                auth_desc=desc,
+            )
+        message = str(caught.exception)
+        self.assertNotIn("secret-key", message)
+        self.assertNotIn("169.254.169.254", message)
 
     def test_result_extension_follows_output_kind(self):
         manager = JobManager(self.gen_dir)
@@ -2730,7 +2845,9 @@ class SidecarTestCase(unittest.TestCase):
         self.assertTrue(desc.success_states or desc.status_source == "http_code")
         # A row either points at a result reference or returns the bytes inline.
         self.assertTrue(desc.result_ref_path or desc.result_fetch == "bytes")
-        self.assertIn(desc.result_fetch, {"url", "inline_b64", "bytes"})
+        self.assertIn(
+            desc.result_fetch, {"url", "inline_b64", "bytes", "authed_url"}
+        )
         # An envelope row's result lives at a separate URL, so its poll body
         # carries no result reference; it must name the per-kind result map.
         if desc.result_envelope_url_path is not None:
@@ -2745,6 +2862,18 @@ class SidecarTestCase(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self._assert_async_descriptor_row_valid("bfl", malformed)
+
+        # A row that fetches its result with the key from a vendor URL is a
+        # valid result-fetch mode; an unknown mode fails the check.
+        authed = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["bfl"], result_fetch="authed_url"
+        )
+        self._assert_async_descriptor_row_valid("bfl", authed)
+        unknown = dataclasses.replace(
+            providers.ASYNC_JOB_DESCRIPTORS["bfl"], result_fetch="teleport"
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_async_descriptor_row_valid("bfl", unknown)
 
         # An aggregator envelope row stripped of its per-kind result map fails.
         malformed_envelope = dataclasses.replace(
