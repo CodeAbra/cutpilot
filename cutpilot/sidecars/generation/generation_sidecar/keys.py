@@ -30,12 +30,9 @@ ENV_VARS: dict[str, str] = {
     "luma": "LUMA_API_KEY",
     "leonardo": "LEONARDO_API_KEY",
     "stability": "STABILITY_API_KEY",
-    # Aggregators: one key each reaches many hosted models. Higgsfield's second
-    # secret slot lands with the multi-secret key surface; the single row here
-    # backs its mocked path only.
+    # Aggregators: one key each reaches many hosted models.
     "fal": "FAL_KEY",
     "replicate": "REPLICATE_API_TOKEN",
-    "higgsfield": "HIGGSFIELD_API_KEY",
 }
 
 
@@ -59,6 +56,15 @@ KEY_SPECS: dict[str, tuple[SecretSlot, ...]] = {
     "kling": (
         SecretSlot("access_key", "KLING_ACCESS_KEY", "kling.access_key", "Access Key"),
         SecretSlot("secret_key", "KLING_SECRET_KEY", "kling.secret_key", "Secret Key"),
+    ),
+    "higgsfield": (
+        SecretSlot("api_key", "HIGGSFIELD_API_KEY", "higgsfield.api_key", "API Key"),
+        SecretSlot(
+            "api_secret",
+            "HIGGSFIELD_API_SECRET",
+            "higgsfield.api_secret",
+            "API Secret",
+        ),
     ),
 }
 

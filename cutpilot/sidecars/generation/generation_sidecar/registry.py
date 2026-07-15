@@ -237,8 +237,6 @@ MODELS: tuple[ModelInfo, ...] = (
         output_kind="image",
         unverified=True,
     ),
-    # Mocked-only: the live two-secret key surface lands with the multi-secret
-    # phase.
     ModelInfo(
         id="higgsfield/soul-standard",
         label="Higgsfield Soul (Standard)",
@@ -248,6 +246,20 @@ MODELS: tuple[ModelInfo, ...] = (
         model_slug="higgsfield-ai/soul/standard",
         category="image",
         output_kind="image",
+        unverified=True,
+    ),
+    # Kling signs each call with an access/secret pair. The slug, host, poll
+    # status enumeration, and result path are unconfirmed against a live key;
+    # kept unverified — out of the picker — until a real generation settles them.
+    ModelInfo(
+        id="kling/kling-v2-master",
+        label="Kling 2.0 Master",
+        provider="kling",
+        price_usd=0.35,
+        needs_key=True,
+        model_slug="kling-v2-master",
+        category="video",
+        output_kind="video",
         unverified=True,
     ),
 )

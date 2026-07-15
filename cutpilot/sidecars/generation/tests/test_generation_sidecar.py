@@ -3,6 +3,7 @@
 import base64
 import dataclasses
 import hashlib
+import hmac
 import ipaddress
 import json
 import http.client
@@ -2167,8 +2168,11 @@ class SidecarTestCase(unittest.TestCase):
             stub.submit_path, "/v1/models/black-forest-labs/flux-schnell/predictions"
         )
 
-    def test_higgsfield_mocked_row_drives_full_loop(self):
-        self.set_env_key("HIGGSFIELD_API_KEY")
+    def test_higgsfield_two_secret_row_drives_full_loop(self):
+        # Two credentials join into the key header. Distinct fake values prove
+        # the join order and that neither leaks outside the header.
+        self.set_env_key("HIGGSFIELD_API_KEY", "higgs-api-key-000000")
+        self.set_env_key("HIGGSFIELD_API_SECRET", "higgs-api-secret-000000")
         stub = StubAsyncVendor(
             mode="ready",
             polls_before_ready=2,
@@ -2192,9 +2196,80 @@ class SidecarTestCase(unittest.TestCase):
         self.assertTrue(final["result_path"].endswith(".png"))
         with open(final["result_path"], "rb") as handle:
             self.assertTrue(handle.read().startswith(PNG_SIGNATURE))
-        self.assertEqual(stub.submit_headers.get("Authorization"), "Key test")
-        self.assertEqual(stub.poll_headers.get("Authorization"), "Key test")
+        joined = "Key higgs-api-key-000000:higgs-api-secret-000000"
+        self.assertEqual(stub.submit_headers.get("Authorization"), joined)
+        self.assertEqual(stub.poll_headers.get("Authorization"), joined)
         self.assertEqual(stub.submit_path, "/higgsfield-ai/soul/standard")
+
+    def test_higgsfield_stays_keyless_until_both_secrets_land(self):
+        # One of two secrets is not enough: the run is refused as keyless until
+        # every slot is present.
+        self.set_env_key("HIGGSFIELD_API_KEY", "higgs-api-key-000000")
+        status, data = self.submit(model="higgsfield/soul-standard")
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "missing_key")
+        self.assertEqual(data["provider"], "higgsfield")
+
+    def test_kling_signs_a_bearer_jwt_from_the_access_and_secret_pair(self):
+        access = "kling-access-000000"
+        secret = "kling-secret-000000"
+        self.set_env_key("KLING_ACCESS_KEY", access)
+        self.set_env_key("KLING_SECRET_KEY", secret)
+        stub = self._video_stub_for(
+            "kling", mode="ready", polls_before_ready=2
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("kling", stub, job_deadline_s=5.0)
+
+        # Freeze the clock so the minted claims and signature are exact.
+        frozen = 1_700_000_000
+        with patch.object(providers.time, "time", return_value=frozen):
+            final = self.run_to_done(
+                model="kling/kling-v2-master",
+                prompt="a lighthouse at dusk",
+                width=1024,
+                height=1024,
+            )
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".mp4"))
+
+        authorization = stub.submit_headers.get("Authorization")
+        self.assertTrue(authorization.startswith("Bearer "))
+        token = authorization[len("Bearer "):]
+        header_seg, payload_seg, signature_seg = token.split(".")
+
+        def _decode(segment):
+            padded = segment + "=" * (-len(segment) % 4)
+            return base64.urlsafe_b64decode(padded)
+
+        header = json.loads(_decode(header_seg))
+        self.assertEqual(header, {"alg": "HS256", "typ": "JWT"})
+        payload = json.loads(_decode(payload_seg))
+        self.assertEqual(payload["iss"], access)
+        self.assertEqual(payload["exp"], frozen + 1800)
+        self.assertEqual(payload["nbf"], frozen - 5)
+        self.assertGreater(payload["exp"], payload["nbf"])
+
+        signing_input = f"{header_seg}.{payload_seg}".encode("ascii")
+        expected = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+        self.assertTrue(hmac.compare_digest(_decode(signature_seg), expected))
+
+        # The raw access and secret appear nowhere in the headers except folded
+        # inside the signed token — never as plaintext.
+        for headers in (stub.submit_headers, stub.poll_headers):
+            for name, value in headers.items():
+                if name == "Authorization":
+                    continue
+                self.assertNotIn(access, value)
+                self.assertNotIn(secret, value)
+        self.assertNotIn(secret, token)
+
+    def test_kling_token_lifetime_outlasts_its_job_deadline(self):
+        # The token is minted once per run and reused across polls, so its
+        # lifetime must exceed the job deadline. A future row widening the
+        # deadline past the 1800s lifetime would have to re-mint per poll.
+        kling = providers.ASYNC_JOB_DESCRIPTORS["kling"]
+        self.assertLess(kling.job_deadline_s, 1800)
 
     def test_aggregator_failure_and_stall_surface_cleanly_without_leaking_key(self):
         self.set_env_key("REPLICATE_API_TOKEN")

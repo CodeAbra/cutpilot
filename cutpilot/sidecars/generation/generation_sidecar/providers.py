@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -52,6 +53,40 @@ class MissingKeyError(Exception):
 
 class JobCanceled(Exception):
     pass
+
+
+def _b64url(data: bytes) -> str:
+    """base64url with the padding stripped, as JWT segments are encoded."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def kling_bearer_headers(secrets: dict[str, str]) -> dict[str, str]:
+    """A short-lived HS256 bearer token minted from the access key (the issuer)
+    and the secret key (the signing key). The token is signed here and rides the
+    submit and poll requests only; neither raw secret ever leaves this function.
+    The 30-minute lifetime exceeds a video job's deadline, so one mint covers a
+    whole run, and the -5s not-before absorbs minor clock skew."""
+    now = int(time.time())
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {"iss": secrets["access_key"], "exp": now + 1800, "nbf": now - 5}
+    segments = [
+        _b64url(json.dumps(header, separators=(",", ":")).encode()),
+        _b64url(json.dumps(payload, separators=(",", ":")).encode()),
+    ]
+    signing_input = ".".join(segments).encode("ascii")
+    signature = hmac.new(
+        secrets["secret_key"].encode(), signing_input, hashlib.sha256
+    ).digest()
+    segments.append(_b64url(signature))
+    return {"Authorization": "Bearer " + ".".join(segments)}
+
+
+def higgsfield_headers(secrets: dict[str, str]) -> dict[str, str]:
+    """Two credentials joined into the vendor's key header; neither is logged or
+    returned anywhere else."""
+    return {
+        "Authorization": f"Key {secrets['api_key']}:{secrets['api_secret']}"
+    }
 
 
 @dataclass
@@ -222,6 +257,11 @@ class AsyncJobDescriptor:
     base_url: str
     auth_header: str = "Authorization"
     auth_template: str = "Bearer {key}"
+    # When set, the auth headers are built from the provider's secrets rather
+    # than from auth_header/auth_template — a signed token or a joined
+    # multi-secret header. Called as auth_builder(secrets) and returns the full
+    # header map. None keeps the declarative single-secret template.
+    auth_builder: Callable[[dict], dict] | None = None
     submit_path: str = "/{model}"
     submit_method: str = "POST"
     submit_headers: dict = field(default_factory=dict)
@@ -1060,6 +1100,36 @@ ASYNC_JOB_DESCRIPTORS.update(
             job_deadline_s=VIDEO_JOB_DEADLINE_S,
             result_max_bytes=VIDEO_RESULT_MAX_BYTES,
         ),
+        # Kling's auth is a per-call HS256 token signed from an access/secret
+        # pair; the JWT algorithm and claims are fixed here. The base host, the
+        # submit and poll slugs, the status enumeration, and the result path are
+        # provisional pending a live-key confirmation — each is row data, so
+        # confirming one is a one-line edit. The token lifetime (1800s) exceeds a
+        # video job's deadline, so one mint covers the whole run.
+        "kling": AsyncJobDescriptor(
+            provider="kling",
+            auth_builder=kling_bearer_headers,
+            base_url="https://api-singapore.klingai.com",
+            submit_path="/v1/videos/text2video",
+            model_body_key="model",
+            prompt_key="prompt",
+            size_mode="none",
+            job_id_path=("data", "task_id"),
+            poll_url_path=None,
+            poll_path="/v1/videos/text2video/{job_id}",
+            status_path=("data", "task_status"),
+            success_states=("succeed",),
+            failure_states=("failed",),
+            error_msg_path=("message",),
+            result_ref_path=("data", "task_result", "videos", 0, "url"),
+            result_fetch="url",
+            result_kind="video",
+            authed_host_suffixes=("klingai.com",),
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
     }
 )
 
@@ -1136,10 +1206,8 @@ ASYNC_JOB_DESCRIPTORS.update(
         "higgsfield": AsyncJobDescriptor(
             provider="higgsfield",
             base_url="https://platform.higgsfield.ai",
-            auth_header="Authorization",
-            # Single combined-secret stand-in; the two-secret template lands with
-            # the multi-secret key surface. Mocked-only until then.
-            auth_template="Key {key}",
+            # Two credentials joined into the vendor's key header.
+            auth_builder=higgsfield_headers,
             submit_path="/{model}",
             model_body_key=None,
             size_mode="none",
@@ -1227,8 +1295,8 @@ class AsyncJobProvider:
         is_canceled: CanceledFn,
     ) -> GenerationResult:
         desc = ASYNC_JOB_DESCRIPTORS[request.model.descriptor or request.model.provider]
-        key = keys.lookup_key(desc.provider)
-        if not key:
+        secrets = keys.lookup_secrets(desc.provider)
+        if secrets is None:
             raise MissingKeyError(desc.provider)
 
         if is_canceled():
@@ -1236,7 +1304,12 @@ class AsyncJobProvider:
         on_progress(0.02)
 
         submit_url = desc.base_url + desc.submit_path.format(model=_slug(request.model))
-        auth = {desc.auth_header: desc.auth_template.format(key=key)}
+        if desc.auth_builder is not None:
+            auth = desc.auth_builder(secrets)
+        else:
+            # A single-secret provider resolves to {"key": value}, so this
+            # reproduces the shipped auth_template.format(key=value) byte for byte.
+            auth = {desc.auth_header: desc.auth_template.format(**secrets)}
         submit_headers = {**desc.submit_headers, **auth}
         if desc.body_encoding == "multipart":
             body_bytes, content_type, width, height = _build_multipart_body(
