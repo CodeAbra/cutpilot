@@ -263,6 +263,36 @@ MODELS: tuple[ModelInfo, ...] = (
         output_kind="video",
         unverified=True,
     ),
+    # Google Veo reuses the google account (the same key as the Nano Banana image
+    # row) and routes by descriptor so its async video shape does not collide
+    # with that synchronous image row. The slug, base host, operation-name
+    # prefix, and parameter field names are unconfirmed against a live key; kept
+    # unverified — out of the picker — until a real generation settles them.
+    ModelInfo(
+        id="google/veo-3-1",
+        label="Veo 3.1",
+        provider="google",
+        descriptor="veo",
+        price_usd=0.4,
+        needs_key=True,
+        model_slug="veo-3.1-generate-preview",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
+    ModelInfo(
+        id="google/veo-3-1-i2v",
+        label="Veo 3.1 (Image to Video)",
+        provider="google",
+        descriptor="veo",
+        price_usd=0.4,
+        needs_key=True,
+        needs_input=True,
+        model_slug="veo-3.1-generate-preview",
+        category="video",
+        output_kind="video",
+        unverified=True,
+    ),
 )
 
 

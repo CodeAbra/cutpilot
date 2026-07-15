@@ -996,6 +996,26 @@ def _build_replicate_body(desc: AsyncJobDescriptor, request: GenerationRequest):
     )
 
 
+def _build_veo_body(desc: AsyncJobDescriptor, request: GenerationRequest):
+    """Build the nested submit envelope: one instance carrying the prompt and,
+    when the row takes an input image and one is supplied, that image as inline
+    base64 under the row's input body key. The vendor's own parameter fields
+    ride the parameters map from the row until a live key confirms their names
+    (aspectRatio / resolution / duration)."""
+    instance = {"prompt": request.prompt}
+    if desc.input_body_key and request.input_path:
+        instance[desc.input_body_key] = {
+            "inlineData": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(
+                    _read_input_capped(request.input_path)
+                ).decode(),
+            }
+        }
+    body = {"instances": [instance], "parameters": dict(desc.extra_body)}
+    return body, request.width, request.height
+
+
 # Video budgets run in minutes, and a valid clip is larger than a still image;
 # both are per-row bounds, never unlimited.
 VIDEO_JOB_DEADLINE_S = 300.0
@@ -1247,6 +1267,57 @@ ASYNC_JOB_DESCRIPTORS.update(
             poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
             job_deadline_s=VIDEO_JOB_DEADLINE_S,
             result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+        ),
+    }
+)
+
+
+# Google Veo drives a long-running operation: the submit returns an operation
+# name, each poll flips a boolean done, and the finished video uri is fetched
+# with the key. The slug rides the submit path, the parameter field names ride
+# the parameters map, and the base host / operation-name prefix are unconfirmed
+# against a live key — each is row data, so confirming one is a one-line edit.
+# The result fetch carries the key only to Google's own host and drops it on any
+# redirect to signed storage. Routed by descriptor so this async video shape
+# does not collide with the synchronous Nano-Banana image row under the same
+# google id.
+ASYNC_JOB_DESCRIPTORS.update(
+    {
+        "veo": AsyncJobDescriptor(
+            provider="google",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            auth_header="x-goog-api-key",
+            auth_template="{key}",
+            submit_path="/models/{model}:predictLongRunning",
+            model_body_key=None,
+            build_body=_build_veo_body,
+            size_mode="none",
+            input_body_key="image",
+            extra_body={},
+            job_id_path=("name",),
+            poll_url_path=None,
+            poll_path="/{job_id}",
+            status_source="done_bool",
+            status_path=("done",),
+            success_states=(),
+            failure_states=(),
+            terminal_error_path=("error",),
+            result_fetch="authed_url",
+            result_kind="video",
+            result_ref_path=(
+                "response",
+                "generateVideoResponse",
+                "generatedSamples",
+                0,
+                "video",
+                "uri",
+            ),
+            result_max_bytes=VIDEO_RESULT_MAX_BYTES,
+            authed_host_suffixes=(),
+            poll_interval_s=VIDEO_POLL_INTERVAL_S,
+            poll_backoff_ceiling_s=VIDEO_POLL_CEILING_S,
+            job_deadline_s=VIDEO_JOB_DEADLINE_S,
+            expected_duration_s=90.0,
         ),
     }
 )

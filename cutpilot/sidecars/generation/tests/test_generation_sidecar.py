@@ -2049,6 +2049,195 @@ class SidecarTestCase(unittest.TestCase):
         self.assertNotIn("secret-key", message)
         self.assertIsNone(stub.asset_api_key)
 
+    def _veo_stub(self, **overrides):
+        # Built directly rather than through _video_stub_for, whose
+        # success_states[0] would index-error on the veo row's empty
+        # success_states (its completion is a boolean done, not a status word).
+        fields = dict(
+            result_kind="video",
+            status_path=("done",),
+            running_value=False,
+            success_value=True,
+            result_ref_path=providers.ASYNC_JOB_DESCRIPTORS["veo"].result_ref_path,
+            submit_id_path=("name",),
+            mode="ready",
+            polls_before_ready=2,
+        )
+        fields.update(overrides)
+        return StubAsyncVendor(**fields)
+
+    def test_veo_generates_through_operation_poll(self):
+        self.set_env_key("GEMINI_API_KEY")
+        stub = self._veo_stub().start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("veo", stub, job_deadline_s=5.0)
+        model = model_by_id("google/veo-3-1")
+
+        progress = []
+        status, submitted = self.submit(
+            model="google/veo-3-1",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(
+            submitted["job_id"],
+            lambda snap: progress.append(snap["progress"]) or True,
+        )
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        self.assertTrue(final["result_path"].endswith(".mp4"))
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertEqual(content[4:8], MP4_FTYP)
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertAlmostEqual(final["cost_usd"], model.price_usd)
+        self.assertEqual(progress, sorted(progress))
+        pre_terminal = [
+            snap["progress"] for snap in snapshots if snap["state"] != "done"
+        ]
+        self.assertTrue(all(value < 1.0 for value in pre_terminal))
+        # The submit body is the nested instances/parameters envelope; the slug
+        # rode the submit path (never hardcoded), not the body.
+        self.assertEqual(
+            stub.submit_body,
+            {"instances": [{"prompt": "a lighthouse at dusk"}], "parameters": {}},
+        )
+        self.assertIn("veo-3.1-generate-preview", stub.submit_path)
+        self.assertIn(":predictLongRunning", stub.submit_path)
+        # The key rode submit, poll, and the result download in the vendor
+        # header, and never appears in a surfaced value.
+        self.assertEqual(stub.submit_headers.get("x-goog-api-key"), "test")
+        self.assertEqual(stub.poll_headers.get("x-goog-api-key"), "test")
+        self.assertEqual(stub.asset_api_key, "test")
+
+    def test_veo_i2v_encodes_the_input_image_as_inline_data(self):
+        self.set_env_key("GEMINI_API_KEY")
+        stub = self._veo_stub().start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("veo", stub, job_deadline_s=5.0)
+
+        status, submitted = self.submit(
+            model="google/veo-3-1-i2v",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+            input_path=self.render_input(name="veo-in.png"),
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        self.assertEqual(snapshots[-1]["state"], "done")
+        instance = stub.submit_body["instances"][0]
+        self.assertEqual(instance["prompt"], "a lighthouse at dusk")
+        self.assertIn("inlineData", instance["image"])
+        self.assertEqual(instance["image"]["inlineData"]["mimeType"], "image/png")
+        self.assertTrue(instance["image"]["inlineData"]["data"])
+        base64.b64decode(instance["image"]["inlineData"]["data"])
+
+    def test_veo_true_with_error_settles_error(self):
+        self.set_env_key("GEMINI_API_KEY")
+        stub = self._veo_stub(
+            polls_before_ready=0,
+            terminal_error={"code": 3, "message": "safety filter triggered"},
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("veo", stub, job_deadline_s=5.0)
+
+        status, submitted = self.submit(
+            model="google/veo-3-1",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "error")
+        self.assertIn("safety filter triggered", final["message"])
+        self.assertNotIn("test", final["message"])
+        # The error settled before any result fetch: the key never rode an asset.
+        self.assertIsNone(stub.asset_api_key)
+
+    def test_veo_result_download_drops_the_key_on_redirect(self):
+        self.set_env_key("GEMINI_API_KEY")
+        stub = self._veo_stub(redirect_asset=True).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("veo", stub, job_deadline_s=5.0)
+
+        status, submitted = self.submit(
+            model="google/veo-3-1",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        # The first hop carried the key; the redirected signed-storage hop
+        # carried none, and the bytes still landed.
+        self.assertEqual(stub.asset_api_key, "test")
+        self.assertTrue(stub.signed_hit)
+        self.assertIsNone(stub.signed_api_key)
+        with open(final["result_path"], "rb") as handle:
+            self.assertEqual(handle.read()[4:8], MP4_FTYP)
+
+    def test_veo_rows_excluded_from_models_yet_resolve(self):
+        _, data = self.request("GET", "/models")
+        listed = {entry["id"] for entry in data["models"]}
+        self.assertNotIn("google/veo-3-1", listed)
+        self.assertNotIn("google/veo-3-1-i2v", listed)
+
+        # A default submit (no opt-in) is refused as an unverified model, before
+        # the input check, for both rows.
+        for model_id in ("google/veo-3-1", "google/veo-3-1-i2v"):
+            status, data = self.submit(
+                model=model_id,
+                prompt="a lighthouse at dusk",
+                width=1024,
+                height=1024,
+            )
+            self.assertEqual(status, 409, model_id)
+            self.assertEqual(data["error"], "unverified_model")
+            self.assertEqual(data["provider"], "google")
+
+        # With the opt-in and no key the quarantine lifts and the auth gate is
+        # reached instead.
+        self.allow_unverified_submit()
+        os.environ.pop("GEMINI_API_KEY", None)
+        cases = {
+            "google/veo-3-1": {},
+            "google/veo-3-1-i2v": {"input_path": self.render_input(name="veo-gate.png")},
+        }
+        for model_id, extra in cases.items():
+            status, data = self.submit(
+                model=model_id,
+                prompt="a lighthouse at dusk",
+                width=1024,
+                height=1024,
+                **extra,
+            )
+            self.assertEqual(status, 409, model_id)
+            self.assertEqual(data["error"], "missing_key")
+            self.assertEqual(data["provider"], "google")
+
+    def test_veo_does_not_collide_with_nano_banana(self):
+        self.assertIs(
+            providers.provider_for(model_by_id("google/veo-3-1")),
+            providers._async_job,
+        )
+        self.assertIs(
+            providers.provider_for(model_by_id("google/veo-3-1-i2v")),
+            providers._async_job,
+        )
+        self.assertIs(
+            providers.provider_for(model_by_id("google/gemini-2.5-flash-image")),
+            providers._sync_image,
+        )
+        self.assertEqual(model_by_id("google/veo-3-1").descriptor, "veo")
+        self.assertIn("veo", providers.ASYNC_JOB_DESCRIPTORS)
+
     def test_result_extension_follows_output_kind(self):
         manager = JobManager(self.gen_dir)
 
