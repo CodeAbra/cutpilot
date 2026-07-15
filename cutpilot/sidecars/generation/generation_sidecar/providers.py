@@ -1060,6 +1060,11 @@ ASYNC_JOB_DESCRIPTORS.update(
             result_envelope_url_path=("response_url",),
             status_path=("status",),
             success_states=("COMPLETED",),
+            # Fal's queue status set is IN_QUEUE / IN_PROGRESS / COMPLETED with
+            # no failure status; a hard failure arrives as COMPLETED carrying an
+            # error field, settled by terminal_error_path below. The whole-job
+            # deadline is the only backstop for an undocumented non-terminal
+            # state, to be confirmed against the live status vocabulary.
             failure_states=(),
             terminal_error_path=("error",),
             result_fetch="url",
