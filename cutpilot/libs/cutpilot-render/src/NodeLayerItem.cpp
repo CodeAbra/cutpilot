@@ -1956,10 +1956,11 @@ void NodeLayerItem::mouseDoubleClickEvent(QMouseEvent *event)
         event->accept();
         return;
     }
-    // A generate node that produced a video opens the transport from its body;
-    // the model chip and run control keep their own actions.
+    // A generate node that produced a video or audio result opens the transport
+    // from its body; the model chip and run control keep their own actions.
     if (hitNode->kind == core::NodeKind::Generate
-        && hitNode->resultKind == QLatin1String("video")
+        && (hitNode->resultKind == QLatin1String("video")
+            || hitNode->resultKind == QLatin1String("audio"))
         && !hitNode->resultPath.isEmpty()
         && !NodeCardLayout::modelChipRect(*hitNode).contains(world)
         && !NodeCardLayout::runButtonRect(*hitNode).contains(world)) {

@@ -720,7 +720,16 @@ public:
     void openFor(int nodeId)
     {
         const core::Node *node = m_layer->graph().nodeById(nodeId);
-        if (!node || node->kind != core::NodeKind::Video)
+        // The transport opens for an imported video or for a generate node whose
+        // result plays through the media stack (audio or video); an image
+        // generate node has no transport and returns early.
+        const bool importedVideo =
+            node && node->kind == core::NodeKind::Video;
+        const bool generatedMedia = node
+            && node->kind == core::NodeKind::Generate
+            && (node->resultKind == QLatin1String("audio")
+                || node->resultKind == QLatin1String("video"));
+        if (!importedVideo && !generatedMedia)
             return;
         m_nodeId = nodeId;
         m_title->setText(node->title);
@@ -1152,10 +1161,11 @@ int main(int argc, char *argv[])
                 for (const core::Node &node : layer->graph().nodes()) {
                     if (node.resultPath.isEmpty())
                         continue;
-                    // A video result is left for the compositor to adopt and
-                    // pre-roll; decoding it as an image would show nothing and
+                    // A video or audio result is left for the compositor to
+                    // adopt; decoding it as an image would show nothing and
                     // force a large file through the GUI thread at load.
-                    if (node.resultKind == QLatin1String("video"))
+                    if (node.resultKind == QLatin1String("video")
+                        || node.resultKind == QLatin1String("audio"))
                         continue;
                     const QImage media(node.resultPath);
                     if (!media.isNull())
@@ -1183,6 +1193,9 @@ int main(int argc, char *argv[])
             // it must be persisted or a reopened board forgets it.
             QObject::connect(coordinator, &GenerationCoordinator::nodeVideoReady,
                              store, [store] { store->scheduleSave(); });
+            // A finished audio result persists the same way.
+            QObject::connect(coordinator, &GenerationCoordinator::nodeAudioReady,
+                             store, [store] { store->scheduleSave(); });
         }
         previews = new PreviewController(view);
         previews->setLayer(layer);
@@ -1204,6 +1217,10 @@ int main(int argc, char *argv[])
         // A finished video result carries no decoded image, so the still wire
         // above never fires for it; the video pipeline adopts and pre-rolls it.
         QObject::connect(coordinator, &GenerationCoordinator::nodeVideoReady,
+                         media, &CompositorService::scheduleRefresh);
+        // A finished audio result likewise adopts into the media pipeline behind
+        // its static glyph rather than decoding as a still.
+        QObject::connect(coordinator, &GenerationCoordinator::nodeAudioReady,
                          media, &CompositorService::scheduleRefresh);
 
         // The compositing inspector, the media file picker, and the video

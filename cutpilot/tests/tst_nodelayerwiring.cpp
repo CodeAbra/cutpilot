@@ -166,6 +166,7 @@ private slots:
     void leftReleaseDuringMiddlePanEndsTheWireNotThePan();
     void rightPressOnAGenerationNodeRaisesItsRunMenu();
     void controlDropOffersTheCostGateAndItsLimitIsEditable();
+    void doubleClickOnGeneratedAudioBodyRequestsTransport();
 };
 
 void TstNodeLayerWiring::dragOutputToCompatibleInputConnects()
@@ -492,6 +493,27 @@ void TstNodeLayerWiring::controlDropOffersTheCostGateAndItsLimitIsEditable()
     QCOMPARE(graph.nodeById(gate.id)->gateLimitUsd, 0.25);
     key(board.layer, Qt::Key_Z, Qt::ControlModifier);
     QCOMPARE(graph.nodeById(gate.id)->gateLimitUsd, initial);
+}
+
+void TstNodeLayerWiring::doubleClickOnGeneratedAudioBodyRequestsTransport()
+{
+    Board board;
+    const QPointF centre(900, 500);
+    const int nodeId = board.addDefaultNode(centre);
+
+    // Seed a finished audio result on the generate node.
+    core::Node *node = board.layer.graph().nodeById(nodeId);
+    QVERIFY(node);
+    node->resultKind = QStringLiteral("audio");
+    node->resultPath = QStringLiteral("/tmp/generated-audio.mp3");
+
+    // Double-clicking the card body (away from the model chip and run button)
+    // asks the app to open the transport for the audio result.
+    QSignalSpy transportSpy(
+        &board.layer, &render::NodeLayerItem::videoTransportRequested);
+    doubleClick(board.layer, node->worldRect().center());
+    QCOMPARE(transportSpy.count(), 1);
+    QCOMPARE(transportSpy.first().first().toInt(), nodeId);
 }
 
 int main(int argc, char *argv[])
