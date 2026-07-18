@@ -1451,6 +1451,39 @@ class SidecarTestCase(unittest.TestCase):
         for value in final.values():
             self.assertNotIn("sekret-key-value", str(value))
 
+    def test_sync_bytes_oversize_response_refused_without_leaking_key(self):
+        # A hostile or oversized vendor answer on the raw-bytes sync path is read
+        # under a hard cap and refused cleanly, rather than pulled whole into
+        # memory. The image default is shrunk here so the boundary is exercised
+        # without moving megabytes. The resolved key never reaches the error.
+        self.set_env_key("OPENAI_API_KEY", "sekret-key-value")
+        oversized = b"\x00" * 4096
+        stub = StubVendor(
+            raw_result=oversized, raw_result_content_type="audio/mpeg"
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor(
+            "openai",
+            stub,
+            body_encoding="json_fields",
+            prompt_key="text",
+            accept_header="audio/mpeg",
+            result_fetch="bytes",
+            size_mode="none",
+            extra_body={"model_id": "eleven_multilingual_v2"},
+        )
+
+        with patch.object(providers, "MAX_INPUT_FILE_BYTES", 1024):
+            final = self.run_to_done(
+                model="openai/gpt-image-1",
+                prompt="a lighthouse at dusk",
+                width=1024,
+                height=1024,
+            )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("too large", final["message"])
+        self.assertNotIn("sekret-key-value", final["message"])
+
     def test_async_engine_submit_poll_ready_writes_image_and_carries_x_key(self):
         stub = StubAsyncVendor(mode="ready", polls_before_ready=2).start()
         self.addCleanup(stub.stop)

@@ -862,7 +862,11 @@ class SyncImageProvider:
             with urllib.request.urlopen(
                 http_request, timeout=desc.timeout_s
             ) as response:
-                raw_response = response.read()
+                # Read under a hard cap so a hostile or oversized answer cannot
+                # be pulled whole into memory; mirrors the URL-fetch ceiling.
+                raw_response = response.read(MAX_INPUT_FILE_BYTES + 1)
+                if len(raw_response) > MAX_INPUT_FILE_BYTES:
+                    raise RuntimeError(f"{desc.provider} response is too large")
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
