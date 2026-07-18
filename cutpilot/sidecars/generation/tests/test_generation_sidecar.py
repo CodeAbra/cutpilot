@@ -71,6 +71,7 @@ STUB_PNG_B64 = base64.b64encode(STUB_PNG).decode()
 # offset 4..8 are the ftyp tag a real container starts with.
 MP4_FTYP = b"ftyp"
 STUB_MP4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"\x00" * 16
+STUB_MP3 = b"ID3\x04\x00\x00\x00\x00\x00\x00opaque-audio-payload" + b"\x00" * 16
 
 
 def _nest(path, value):
@@ -216,6 +217,7 @@ class StubAsyncVendor:
         result_kind="image",
         result_ref_path=None,
         video_body=None,
+        audio_body=None,
         submit_id_path=("id",),
         error_status=None,
         envelope=False,
@@ -245,6 +247,7 @@ class StubAsyncVendor:
             )
         self.result_ref_path = tuple(result_ref_path)
         self.video_body = video_body if video_body is not None else STUB_MP4
+        self.audio_body = audio_body if audio_body is not None else STUB_MP3
         # Fal's queue shape: the terminal poll body carries only a status, and
         # the result lives at a separate response_url named in the submit
         # response. Off by default so every other vendor's poll-body result is
@@ -392,6 +395,14 @@ class StubAsyncVendor:
                         return
                     self._reply(vendor.video_body, content_type="video/mp4")
                     return
+                if self.path.startswith("/audio/"):
+                    vendor.asset_auth = self.headers.get("Authorization")
+                    vendor.asset_api_key = self.headers.get("x-goog-api-key")
+                    if vendor.redirect_asset:
+                        self._redirect_to(f"{vendor.url}/signed/1.mp3")
+                        return
+                    self._reply(vendor.audio_body, content_type="audio/mpeg")
+                    return
                 if self.path.startswith("/response/"):
                     # The separate result envelope: it is fetched with the key,
                     # so record the Authorization it carried and that it was hit
@@ -406,6 +417,13 @@ class StubAsyncVendor:
                         return
                     if vendor.result_kind == "video":
                         envelope = {"video": {"url": f"{vendor.url}/video/1.mp4"}}
+                    elif vendor.result_kind == "audio":
+                        audio_url = (
+                            vendor.injected_result_url
+                            if vendor.injected_result_url is not None
+                            else f"{vendor.url}/audio/1.mp3"
+                        )
+                        envelope = {"audio": {"url": audio_url}}
                     else:
                         envelope = {
                             "images": [{"url": f"{vendor.url}/img/1.png"}]
@@ -466,6 +484,8 @@ class StubAsyncVendor:
             url = self.injected_result_url
         elif self.result_kind == "video":
             url = f"{self.url}/video/1.mp4"
+        elif self.result_kind == "audio":
+            url = f"{self.url}/audio/1.mp3"
         else:
             url = f"{self.url}/img/1.png"
         return _deep_merge(payload, _nest(self.result_ref_path, url))
@@ -1041,6 +1061,13 @@ class SidecarTestCase(unittest.TestCase):
     def set_env_key(self, name, value="test"):
         os.environ[name] = value
         self.addCleanup(lambda: os.environ.pop(name, None))
+
+    @staticmethod
+    def header_value(headers, name):
+        """Read a header value case-insensitively, since the wire normalizes
+        header-name casing per segment (xi-api-key arrives as Xi-Api-Key)."""
+        lowered = {key.lower(): value for key, value in headers.items()}
+        return lowered.get(name.lower())
 
     def allow_unverified_submit(self):
         """Open the manual live-smoke gate so an unverified vendor row reaches
@@ -3190,6 +3217,231 @@ class SidecarTestCase(unittest.TestCase):
         self.assertTrue(all(value < 1.0 for value in pre_terminal))
         # MiniMax reached through Fal: the slug rides the submit path.
         self.assertEqual(stub.submit_path, "/fal-ai/minimax/hailuo-02/standard")
+
+    def test_elevenlabs_tts_row_drives_full_loop(self):
+        audio_bytes = STUB_MP3
+        self.set_env_key("ELEVENLABS_API_KEY", "el-secret-value")
+        stub = StubVendor(
+            raw_result=audio_bytes, raw_result_content_type="audio/mpeg"
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("elevenlabs", stub)
+
+        model = model_by_id("elevenlabs/tts-multilingual-v2")
+        final = self.run_to_done(
+            model="elevenlabs/tts-multilingual-v2",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(final["kind"], "audio")
+        self.assertTrue(final["result_path"].endswith(".mp3"))
+        with open(final["result_path"], "rb") as handle:
+            body = handle.read()
+        self.assertEqual(body, audio_bytes)
+        self.assertEqual(final["result_digest"], hashlib.sha256(body).hexdigest())
+        self.assertAlmostEqual(final["cost_usd"], model.price_usd)
+        # The key rides only the xi-api-key submit header, never Authorization.
+        self.assertEqual(
+            self.header_value(stub.last_headers, "xi-api-key"), "el-secret-value"
+        )
+        self.assertIsNone(self.header_value(stub.last_headers, "Authorization"))
+        self.assertEqual(
+            self.header_value(stub.last_headers, "Accept"), "audio/mpeg"
+        )
+        self.assertEqual(
+            self.header_value(stub.last_headers, "Content-Type"),
+            "application/json",
+        )
+        self.assertEqual(
+            stub.last_body,
+            {"text": "a lighthouse at dusk", "model_id": "eleven_multilingual_v2"},
+        )
+        # The voice id is read from the row onto the path; the output_format
+        # query survives the path templating.
+        self.assertEqual(
+            stub.last_path,
+            "/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM?output_format=mp3_44100_128",
+        )
+        for value in final.values():
+            self.assertNotIn("el-secret-value", str(value))
+
+    def test_elevenlabs_music_row_drives_full_loop(self):
+        audio_bytes = STUB_MP3
+        self.set_env_key("ELEVENLABS_API_KEY", "el-secret-value")
+        stub = StubVendor(
+            raw_result=audio_bytes, raw_result_content_type="audio/mpeg"
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("elevenlabs-music", stub)
+
+        final = self.run_to_done(
+            model="elevenlabs/music-v1",
+            prompt="a slow ambient pad",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(final["kind"], "audio")
+        self.assertTrue(final["result_path"].endswith(".mp3"))
+        # The fixed path carries no slug templating; the variant shares the one
+        # elevenlabs key and routes sync.
+        self.assertEqual(
+            stub.last_path, "/v1/music?output_format=mp3_44100_128"
+        )
+        self.assertEqual(
+            stub.last_body,
+            {
+                "prompt": "a slow ambient pad",
+                "model_id": "music_v1",
+                "music_length_ms": 10000,
+            },
+        )
+        self.assertEqual(
+            self.header_value(stub.last_headers, "xi-api-key"), "el-secret-value"
+        )
+        for value in final.values():
+            self.assertNotIn("el-secret-value", str(value))
+
+    def test_elevenlabs_failure_surfaces_message_without_leaking_key(self):
+        self.set_env_key("ELEVENLABS_API_KEY", "el-secret-value")
+        stub = StubVendor(
+            status=400, body={"detail": {"message": "voice not found"}}
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("elevenlabs", stub)
+
+        final = self.run_to_done(
+            model="elevenlabs/tts-multilingual-v2",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("voice not found", final["message"])
+        self.assertNotIn("el-secret-value", final["message"])
+
+    def test_fal_minimax_audio_row_drives_full_loop(self):
+        self.set_env_key("FAL_KEY")
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=2,
+            result_kind="audio",
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            submit_id_path=("request_id",),
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("fal", stub, job_deadline_s=5.0)
+
+        model = model_by_id("fal/minimax-speech-02")
+        final = self.run_to_done(
+            model="fal/minimax-speech-02",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(final["kind"], "audio")
+        self.assertTrue(final["result_path"].endswith(".mp3"))
+        with open(final["result_path"], "rb") as handle:
+            content = handle.read()
+        self.assertEqual(content, STUB_MP3)
+        self.assertEqual(final["result_digest"], hashlib.sha256(content).hexdigest())
+        self.assertAlmostEqual(final["cost_usd"], model.price_usd)
+        # The slug rides the submit path; the key rides submit, poll, and the
+        # envelope, and never reaches the asset host.
+        self.assertEqual(stub.submit_path, "/fal-ai/minimax/speech-02-hd")
+        self.assertEqual(stub.submit_headers.get("Authorization"), "Key test")
+        self.assertEqual(stub.poll_headers.get("Authorization"), "Key test")
+        self.assertEqual(stub.response_auth, "Key test")
+        self.assertIsNone(stub.asset_auth)
+        for value in final.values():
+            self.assertNotIn("Key test", str(value))
+
+    def test_fal_minimax_audio_result_url_ssrf_guarded(self):
+        self.set_env_key("FAL_KEY")
+        stub = StubAsyncVendor(
+            envelope=True,
+            mode="ready",
+            polls_before_ready=1,
+            result_kind="audio",
+            poll_url_path=("status_url",),
+            success_value="COMPLETED",
+            submit_id_path=("request_id",),
+        )
+        stub.injected_result_url = "https://169.254.169.254/x.mp3"
+        stub.start()
+        self.addCleanup(stub.stop)
+        self.redirect_async_row("fal", stub, job_deadline_s=5.0)
+
+        final = self.run_to_done(
+            model="fal/minimax-speech-02",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertNotIn("169.254", final["message"])
+        self.assertNotIn("test", final["message"])
+
+    def test_audio_model_reports_audio_kind_and_mp3_path(self):
+        self.allow_unverified_submit()
+        status, submitted = self.submit(model="local/procedural-audio-v1")
+        self.assertEqual(status, 202)
+        snapshots = self.stream_events(submitted["job_id"], lambda snap: True)
+        final = snapshots[-1]
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(final["kind"], "audio")
+        self.assertTrue(final["result_path"].endswith(".mp3"))
+
+    def test_audio_rows_excluded_from_models_yet_key_registrable(self):
+        audio_rows = (
+            "elevenlabs/tts-multilingual-v2",
+            "elevenlabs/music-v1",
+            "fal/minimax-speech-02",
+        )
+        _, data = self.request("GET", "/models")
+        listed = {entry["id"] for entry in data["models"]}
+        for model_id in audio_rows:
+            self.assertNotIn(model_id, listed)
+
+        # A default submit (no opt-in) is refused as an unverified model.
+        for model_id in audio_rows:
+            status, data = self.submit(
+                model=model_id, prompt="x", width=1024, height=1024
+            )
+            self.assertEqual(status, 409, model_id)
+            self.assertEqual(data["error"], "unverified_model")
+
+        # elevenlabs and fal are key-registrable single-secret vendors that never
+        # surface in the picker; setting a key flips has_key without listing a row.
+        status, data = self.request("GET", "/models?include_hidden=1")
+        vendors = {entry["provider"]: entry for entry in data["key_vendors"]}
+        for provider in ("elevenlabs", "fal"):
+            self.assertIn(provider, vendors)
+            slots = vendors[provider]["secret_slots"]
+            self.assertEqual(len(slots), 1)
+            self.assertEqual(slots[0]["account"], provider)
+        self.assertFalse(
+            any(
+                v["provider"] == "elevenlabs" and v["has_key"]
+                for v in data["key_vendors"]
+            )
+        )
+        self.set_env_key("ELEVENLABS_API_KEY", "el-secret-value")
+        status, data = self.request("GET", "/models?include_hidden=1")
+        listed = {entry["id"] for entry in data["models"]}
+        self.assertTrue(
+            any(
+                v["provider"] == "elevenlabs" and v["has_key"]
+                for v in data["key_vendors"]
+            )
+        )
+        for model_id in audio_rows:
+            self.assertNotIn(model_id, listed)
 
     def test_replicate_image_row_drives_full_loop(self):
         self.set_env_key("REPLICATE_API_TOKEN")

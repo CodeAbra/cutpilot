@@ -174,6 +174,35 @@ class ProceduralVideoProvider:
         )
 
 
+class ProceduralAudioProvider:
+    """Deterministic offline audio result: writes seeded bytes to the .mp3 path
+    so the audio Done path runs end to end. The bytes are not a decodable clip;
+    real playback is proven separately with an encoded fixture."""
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        on_progress: ProgressFn,
+        is_canceled: CanceledFn,
+    ) -> GenerationResult:
+        payload = bytearray()
+        bands = 24
+        for band in range(bands):
+            if is_canceled():
+                raise JobCanceled()
+            payload.extend((request.seed + band).to_bytes(4, "little", signed=False))
+            on_progress((band + 1) / bands)
+            time.sleep(PROCEDURAL_BAND_PAUSE_S)
+        with open(request.out_path, "wb") as handle:
+            handle.write(bytes(payload))
+        return GenerationResult(
+            path=request.out_path,
+            cost_usd=request.model.price_usd,
+            width=request.width,
+            height=request.height,
+        )
+
+
 @dataclass(frozen=True)
 class SyncImageDescriptor:
     """A vendor's synchronous image endpoint expressed as data.
@@ -286,6 +315,39 @@ SYNC_IMAGE_DESCRIPTORS: dict[str, SyncImageDescriptor] = {
         result_fetch="url",
         body_encoding="multipart",
         accept_header="application/json",
+        prompt_key="prompt",
+    ),
+    # The POST response body is the finished audio (octet-stream mp3), so there
+    # is no result fetch and the key rides only the submit header. The voice id
+    # rides the {model} path segment; the model_id, the default voice, and the
+    # output_format query are provisional until a live key confirms them.
+    "elevenlabs": SyncImageDescriptor(
+        provider="elevenlabs",
+        base_url="https://api.elevenlabs.io",
+        generate_path="/v1/text-to-speech/{model}?output_format=mp3_44100_128",
+        auth_header="xi-api-key",
+        auth_template="{key}",
+        size_mode="none",
+        extra_body={"model_id": "eleven_multilingual_v2"},
+        result_fetch="bytes",
+        body_encoding="json_fields",
+        accept_header="audio/mpeg",
+        prompt_key="text",
+    ),
+    # A variant sharing the one elevenlabs key: the path is fixed (no {model}
+    # template) and the prompt rides under "prompt". The model_id, music length,
+    # and output_format are provisional until a live key confirms them.
+    "elevenlabs-music": SyncImageDescriptor(
+        provider="elevenlabs",
+        base_url="https://api.elevenlabs.io",
+        generate_path="/v1/music?output_format=mp3_44100_128",
+        auth_header="xi-api-key",
+        auth_template="{key}",
+        size_mode="none",
+        extra_body={"model_id": "music_v1", "music_length_ms": 10000},
+        result_fetch="bytes",
+        body_encoding="json_fields",
+        accept_header="audio/mpeg",
         prompt_key="prompt",
     ),
 }
@@ -714,6 +776,15 @@ def _vendor_error_detail(body) -> str:
     name = body.get("name")
     if isinstance(name, str) and name:
         return name
+    # A detail envelope (either a nested object carrying a message or a bare
+    # string) is the failure shape some vendors return instead of an error object.
+    detail = body.get("detail")
+    if isinstance(detail, dict):
+        detail_message = detail.get("message")
+        if isinstance(detail_message, str) and detail_message:
+            return detail_message
+    elif isinstance(detail, str) and detail:
+        return detail
     return ""
 
 
@@ -1361,6 +1432,9 @@ ASYNC_JOB_DESCRIPTORS.update(
             result_ref_by_kind={
                 "image": ("images", 0, "url"),
                 "video": ("video", "url"),
+                # The audio result envelope shape is provisional until a live key
+                # confirms it against a MiniMax speech generation.
+                "audio": ("audio", "url"),
             },
             cancel_url_submit_path=("cancel_url",),
             authed_host_suffixes=("fal.run", "fal.ai"),
@@ -1774,6 +1848,7 @@ _MODEL_PROVIDERS = {
     "local/procedural-upscale-v1": ProceduralUpscaleProvider(),
     "local/procedural-edit-v1": ProceduralEditProvider(),
     "local/procedural-video-v1": ProceduralVideoProvider(),
+    "local/procedural-audio-v1": ProceduralAudioProvider(),
 }
 
 _sync_image = SyncImageProvider()

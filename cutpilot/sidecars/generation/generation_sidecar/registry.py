@@ -339,6 +339,68 @@ MODELS: tuple[ModelInfo, ...] = (
         output_kind="video",
         unverified=True,
     ),
+    # ElevenLabs returns the finished audio as the POST response body, so the key
+    # rides only the submit and there is no separate result fetch. The default
+    # voice id (on the request path), the model_id, and the price are unconfirmed
+    # against a live key; kept unverified — out of the picker — until a real
+    # generation settles them.
+    ModelInfo(
+        id="elevenlabs/tts-multilingual-v2",
+        label="ElevenLabs Multilingual v2",
+        provider="elevenlabs",
+        price_usd=0.05,
+        needs_key=True,
+        model_slug="21m00Tcm4TlvDq8ikWAM",
+        category="audio",
+        output_kind="audio",
+        unverified=True,
+    ),
+    # A variant that shares the one elevenlabs key and routes through the fixed
+    # /v1/music path (the slug is nominal). The model_id, music length, and price
+    # are unconfirmed against a live key; kept unverified until a real generation
+    # settles them.
+    ModelInfo(
+        id="elevenlabs/music-v1",
+        label="ElevenLabs Music",
+        provider="elevenlabs",
+        descriptor="elevenlabs-music",
+        price_usd=0.08,
+        needs_key=True,
+        model_slug="music",
+        category="audio",
+        output_kind="audio",
+        unverified=True,
+    ),
+    # MiniMax speech reached through Fal, reusing the Fal key and async adapter
+    # with the audio result selector. The slug and the audio.url envelope shape
+    # are unconfirmed against a live key; kept unverified until a real generation
+    # settles them.
+    ModelInfo(
+        id="fal/minimax-speech-02",
+        label="MiniMax Speech 02 (Fal)",
+        provider="fal",
+        price_usd=0.03,
+        needs_key=True,
+        model_slug="fal-ai/minimax/speech-02-hd",
+        category="audio",
+        output_kind="audio",
+        unverified=True,
+    ),
+    # A keyless local audio result, kept out of the picker and key surface, that
+    # exercises the audio Done path end to end through the real service and
+    # client. Its bytes are not a playable clip; real playback is proven with an
+    # encoded fixture. No vendor row is touched, so nothing un-quarantines.
+    ModelInfo(
+        id="local/procedural-audio-v1",
+        label="Procedural Audio (local)",
+        provider="local",
+        price_usd=0.004,
+        needs_key=False,
+        needs_prompt=False,
+        category="audio",
+        output_kind="audio",
+        unverified=True,
+    ),
 )
 
 
