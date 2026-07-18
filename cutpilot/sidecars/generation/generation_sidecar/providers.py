@@ -196,14 +196,17 @@ class SyncImageDescriptor:
     result_fetch: str = "inline_b64"
     timeout_s: int = 120
     # How the submit body is encoded on the wire. "json" builds the shipped
-    # OpenAI-compatible object; "multipart" builds a form-data body whose scalar
-    # parts come from the prompt and extra_body (no auto model/size field).
+    # OpenAI-compatible object ({model, prompt, size, **extra_body}); "multipart"
+    # builds a form-data body whose scalar parts come from the prompt and
+    # extra_body (no auto model/size field); "json_fields" builds a bare JSON
+    # object of {prompt_key: prompt, **extra_body} with no auto model/size field.
     body_encoding: str = "json"
     # An Accept header value sent only when non-empty. A vendor that answers a
-    # POST with the finished image asks for image/* so the response body is the
-    # raw image rather than a base64 JSON envelope.
+    # POST with the finished asset asks for image/* or audio/mpeg so the response
+    # body is the raw asset rather than a base64 JSON envelope.
     accept_header: str = ""
-    # The multipart form-field name the prompt rides under.
+    # The body field the prompt rides under: a multipart form-field name for
+    # "multipart", or the JSON key for "json_fields".
     prompt_key: str = "prompt"
 
 
@@ -725,7 +728,9 @@ class SyncImageProvider:
         on_progress: ProgressFn,
         is_canceled: CanceledFn,
     ) -> GenerationResult:
-        desc = SYNC_IMAGE_DESCRIPTORS[request.model.provider]
+        desc = SYNC_IMAGE_DESCRIPTORS[
+            request.model.descriptor or request.model.provider
+        ]
         key = keys.lookup_key(desc.provider)
         if not key:
             raise MissingKeyError(desc.provider)
@@ -743,8 +748,13 @@ class SyncImageProvider:
                 desc.auth_header: desc.auth_template.format(key=key),
                 "Content-Type": content_type,
             }
-            if desc.accept_header:
-                headers["Accept"] = desc.accept_header
+        elif desc.body_encoding == "json_fields":
+            body = {desc.prompt_key: request.prompt, **desc.extra_body}
+            payload = json.dumps(body).encode()
+            headers = {
+                desc.auth_header: desc.auth_template.format(key=key),
+                "Content-Type": "application/json",
+            }
         else:
             body = {
                 "model": _slug(request.model),
@@ -757,6 +767,8 @@ class SyncImageProvider:
                 desc.auth_header: desc.auth_template.format(key=key),
                 "Content-Type": "application/json",
             }
+        if desc.accept_header:
+            headers["Accept"] = desc.accept_header
 
         on_progress(0.05)
         http_request = urllib.request.Request(

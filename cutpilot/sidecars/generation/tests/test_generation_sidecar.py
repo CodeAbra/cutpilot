@@ -1370,6 +1370,60 @@ class SidecarTestCase(unittest.TestCase):
         for value in final.values():
             self.assertNotIn("sekret-key-value", str(value))
 
+    def test_sync_json_fields_audio_bytes_submit_and_result(self):
+        # The bare-json-fields + raw-bytes sync capability driven in isolation
+        # over an existing sync provider row, with no new registry entry: the
+        # request body is exactly {prompt_key: prompt, **extra_body} (no
+        # model/size/prompt keys), the Content-Type is application/json, the
+        # Accept header asks for raw audio, and the octet-stream POST body lands
+        # as the file with a matching digest. The resolved key never leaves the
+        # submit auth header.
+        audio_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x00opaque-audio-payload"
+        self.set_env_key("OPENAI_API_KEY", "sekret-key-value")
+        stub = StubVendor(
+            raw_result=audio_bytes, raw_result_content_type="audio/mpeg"
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor(
+            "openai",
+            stub,
+            body_encoding="json_fields",
+            prompt_key="text",
+            accept_header="audio/mpeg",
+            result_fetch="bytes",
+            size_mode="none",
+            extra_body={"model_id": "eleven_multilingual_v2"},
+        )
+
+        final = self.run_to_done(
+            model="openai/gpt-image-1",
+            prompt="a lighthouse at dusk",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(
+            stub.last_headers.get("Content-Type"), "application/json"
+        )
+        self.assertEqual(stub.last_headers.get("Accept"), "audio/mpeg")
+        self.assertEqual(
+            stub.last_headers.get("Authorization"), "Bearer sekret-key-value"
+        )
+        self.assertEqual(
+            stub.last_body,
+            {"text": "a lighthouse at dusk", "model_id": "eleven_multilingual_v2"},
+        )
+        self.assertNotIn("model", stub.last_body)
+        self.assertNotIn("size", stub.last_body)
+        self.assertNotIn("prompt", stub.last_body)
+
+        with open(final["result_path"], "rb") as handle:
+            body = handle.read()
+        self.assertEqual(body, audio_bytes)
+        self.assertEqual(final["result_digest"], hashlib.sha256(body).hexdigest())
+        for value in final.values():
+            self.assertNotIn("sekret-key-value", str(value))
+
     def test_async_engine_submit_poll_ready_writes_image_and_carries_x_key(self):
         stub = StubAsyncVendor(mode="ready", polls_before_ready=2).start()
         self.addCleanup(stub.stop)
@@ -3487,15 +3541,19 @@ class SidecarTestCase(unittest.TestCase):
                 )
 
     def _assert_descriptor_row_valid(self, provider, desc):
-        self.assertEqual(desc.provider, provider)
+        # A variant descriptor legitimately shares a base provider's key, so the
+        # row key need not equal the descriptor's provider; only that it names a
+        # provider at all.
+        self.assertTrue(desc.provider)
         self.assertTrue(desc.base_url)
         self.assertTrue(desc.generate_path)
         self.assertTrue(desc.auth_header)
         self.assertTrue(desc.auth_template)
         self.assertIn(desc.result_fetch, {"inline_b64", "url", "bytes"})
         self.assertIn(desc.size_mode, {"fixed_set", "passthrough", "none"})
-        # A multipart row rides its prompt under a named form field.
-        if desc.body_encoding == "multipart":
+        # A multipart or bare-json-fields row rides its prompt under a named body
+        # field.
+        if desc.body_encoding in ("multipart", "json_fields"):
             self.assertTrue(desc.prompt_key)
         # A row that does not return the image inline in the POST body must name
         # where the image reference lives in the JSON response.
