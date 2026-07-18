@@ -41,3 +41,30 @@ coverage/
 *.sqlite
 *.sqlite3
 *.db
+
+# agent workflow (local only, push by command)
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+.remember/
+
+# GSD planning — per-agent kitchen, never ships
+.planning/
+**/.planning/
+
+# local / private (iai-pme parity)
+.claude.local.md
+.mcp.json
+scratch/
+bugs/
+
+# orchestration / kitchen — private, never ships to the public repo (product = cutpilot/)
+Team_Structure.md
+CTO_Agent_Prompt.md
+*.docx
+Researcher/
+shared/
+00-discover/
+10-define/
+20-build/
+30-ship/
