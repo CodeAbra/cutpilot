@@ -1146,7 +1146,10 @@ int main(int argc, char *argv[])
             qEnvironmentVariable("CUTPILOT_VIDEO_RESULT_DEMO");
         const QString audioDemoFixture =
             qEnvironmentVariable("CUTPILOT_AUDIO_RESULT_DEMO");
-        int videoDemoNodeId = -1;
+        int demoNodeId = -1;
+        // Only a demo node that decodes to a still may be pinned into the
+        // preview buffer; an audio demo has no decodable poster.
+        bool demoNodePreviewable = false;
         const bool demoBoard = (stressRequested && stressCount > 0)
             || qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0
             || !videoDemoFixture.isEmpty()
@@ -1156,9 +1159,10 @@ int main(int argc, char *argv[])
         } else if (qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0) {
             layer->seedCompositeBoard();
         } else if (!videoDemoFixture.isEmpty()) {
-            videoDemoNodeId = layer->seedVideoResultBoard(videoDemoFixture);
+            demoNodeId = layer->seedVideoResultBoard(videoDemoFixture);
+            demoNodePreviewable = true;
         } else if (!audioDemoFixture.isEmpty()) {
-            videoDemoNodeId = layer->seedAudioResultBoard(audioDemoFixture);
+            demoNodeId = layer->seedAudioResultBoard(audioDemoFixture);
         } else {
             store = new WorkflowStore(&layer->graph(), view);
             if (store->load()) {
@@ -1206,8 +1210,8 @@ int main(int argc, char *argv[])
         previews->setLayer(layer);
         previewPanel = new PreviewPanel(theme, previews, layer, view);
         previews->setPreviewItem(previewPanel->previewItem());
-        if (videoDemoNodeId != -1)
-            previews->pin(PreviewController::Buffer::A, videoDemoNodeId);
+        if (demoNodeId != -1 && demoNodePreviewable)
+            previews->pin(PreviewController::Buffer::A, demoNodeId);
         chrome = new GenerationChrome(theme, view, coordinator, previews,
                                       &secretStore);
 
