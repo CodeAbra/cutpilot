@@ -107,6 +107,10 @@ signals:
     // A finished video result at path is ready for the video pipeline to adopt.
     void nodeVideoReady(int nodeId, const QString &path);
 
+    // A finished audio result at path is ready for the media pipeline to adopt
+    // with a static glyph (audio yields no decodable frame).
+    void nodeAudioReady(int nodeId, const QString &path);
+
     void modelsReady();
     // The key-vendor channel landed; the key surface rebuilds from keyVendors().
     void keyVendorsReady();

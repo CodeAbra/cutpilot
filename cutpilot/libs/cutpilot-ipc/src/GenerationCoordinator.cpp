@@ -1230,6 +1230,13 @@ void GenerationCoordinator::deliverResult(int nodeId, const QString &path,
         emit nodeVideoReady(nodeId, path);
         return;
     }
+    // Audio, likewise, never runs through the image decoder: QImage on an .mp3
+    // yields a null frame. Route it to the media pipeline, which adopts it into
+    // the same player behind a static glyph.
+    if (kind == QLatin1String("audio")) {
+        emit nodeAudioReady(nodeId, path);
+        return;
+    }
     decodeResult(nodeId, path);
 }
 

@@ -172,6 +172,7 @@ private slots:
     void compositeWiredInputRefusesWithTheHonestReason();
     void unchangedRerunServesTheCachedResult();
     void videoResultRoutesToTheVideoPipelineAndReuses();
+    void audioResultRoutesToTheAudioPipelineAndReuses();
     void stopCancelsAnInFlightRun();
     void missingVendorKeySurfacesAddAKey();
     void emptyPromptRefusesTheRunWithoutSubmitting();
@@ -650,6 +651,56 @@ void GenerationFlowTest::videoResultRoutesToTheVideoPipelineAndReuses()
     QCOMPARE(reused->statusMessage, QStringLiteral("Reused"));
     QCOMPARE(reused->resultKind, QStringLiteral("video"));
     QCOMPARE(videoSpy.count(), 2);
+    QCOMPARE(mediaSpy.count(), 0);
+}
+
+void GenerationFlowTest::audioResultRoutesToTheAudioPipelineAndReuses()
+{
+    core::NodeGraph graph;
+    const Pipeline pipeline =
+        buildPipeline(graph, QStringLiteral("a soft ambient bed"));
+    // The node carries the keyless local audio driver explicitly; a hidden
+    // driver never becomes a picker default, so it is set on the node here.
+    core::Node *generate = graph.nodeById(pipeline.generateId);
+    generate->modelId = QStringLiteral("local/procedural-audio-v1");
+
+    ipc::GenerationCoordinator coordinator(&graph, &m_client);
+    QSignalSpy modelsSpy(&coordinator, &ipc::GenerationCoordinator::modelsReady);
+    coordinator.serviceBecameReady();
+    QTRY_COMPARE_WITH_TIMEOUT(modelsSpy.count(), 1, 10000);
+
+    // The hidden driver is resolvable, but it never appears in the picker list.
+    bool inPicker = false;
+    for (const ipc::ModelInfo &model : coordinator.models()) {
+        if (model.id == QStringLiteral("local/procedural-audio-v1"))
+            inPicker = true;
+    }
+    QVERIFY(!inPicker);
+
+    QSignalSpy audioSpy(&coordinator, &ipc::GenerationCoordinator::nodeAudioReady);
+    QSignalSpy mediaSpy(&coordinator, &ipc::GenerationCoordinator::nodeMediaReady);
+
+    coordinator.runNode(pipeline.generateId);
+    QTRY_COMPARE_WITH_TIMEOUT(graph.nodeById(pipeline.generateId)->runState,
+                              core::RunState::Done, 30000);
+
+    // An audio result routes to the audio pipeline, never to the image decoder.
+    const core::Node *node = graph.nodeById(pipeline.generateId);
+    QCOMPARE(node->resultKind, QStringLiteral("audio"));
+    QVERIFY(node->resultPath.endsWith(QStringLiteral(".mp3")));
+    QVERIFY(QFile::exists(node->resultPath));
+
+    QTRY_COMPARE_WITH_TIMEOUT(audioSpy.count(), 1, 10000);
+    QCOMPARE(audioSpy.first().at(0).toInt(), pipeline.generateId);
+    QCOMPARE(audioSpy.first().at(1).toString(), node->resultPath);
+    QCOMPARE(mediaSpy.count(), 0);
+
+    // A reused audio result re-enters the audio path, not a null image decode.
+    coordinator.runNode(pipeline.generateId);
+    const core::Node *reused = graph.nodeById(pipeline.generateId);
+    QCOMPARE(reused->statusMessage, QStringLiteral("Reused"));
+    QCOMPARE(reused->resultKind, QStringLiteral("audio"));
+    QCOMPARE(audioSpy.count(), 2);
     QCOMPARE(mediaSpy.count(), 0);
 }
 
