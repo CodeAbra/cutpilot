@@ -9,6 +9,8 @@
 #include <QImage>
 #include <QImageReader>
 #include <QMediaPlayer>
+#include <QPainter>
+#include <QPainterPath>
 #include <QThread>
 #include <QTimer>
 #include <QVideoFrame>
@@ -41,16 +43,80 @@ bool isAdoptableVideo(const core::Node &node)
         && !node.resultPath.isEmpty();
 }
 
-// One source for both shapes, so a generate-video node is never handed an empty
-// path where an imported video would carry its picked file. Self-guarding: a
-// generate node yields its result only when that result is a video, so an image
-// generate node can never route a still path into the video player.
+// A generate node whose result is audio adopts into the same media player as a
+// video; audio carries no frame, so the card shows a static glyph instead of a
+// decoded poster.
+bool isAdoptableAudio(const core::Node &node)
+{
+    return node.kind == core::NodeKind::Generate
+        && node.resultKind == QLatin1String("audio")
+        && !node.resultPath.isEmpty();
+}
+
+// One source for every adoptable shape, so a generate-video or generate-audio
+// node is never handed an empty path where an imported video would carry its
+// picked file. Self-guarding: a generate node yields its result only when that
+// result is a video or audio, so an image generate node can never route a still
+// path into the player.
 QString videoSourcePath(const core::Node &node)
 {
     if (node.kind == core::NodeKind::Generate
-        && node.resultKind == QLatin1String("video"))
+        && (node.resultKind == QLatin1String("video")
+            || node.resultKind == QLatin1String("audio")))
         return node.resultPath;
     return node.mediaPath;
+}
+
+// A fixed card image for an audio playback: a dark rounded card with a centered
+// speaker-and-wave glyph, built once with QPainter (no external asset).
+QImage audioGlyphImage()
+{
+    static const QImage glyph = [] {
+        constexpr int dim = 512;
+        QImage image(dim, dim, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        QPainterPath card;
+        const qreal margin = dim * 0.06;
+        card.addRoundedRect(QRectF(margin, margin, dim - 2 * margin,
+                                   dim - 2 * margin),
+                            dim * 0.06, dim * 0.06);
+        painter.fillPath(card, QColor(28, 30, 36));
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(226, 230, 240));
+        const qreal cx = dim * 0.40;
+        const qreal cy = dim * 0.50;
+        const qreal bodyH = dim * 0.18;
+        const qreal bodyW = dim * 0.10;
+        // The speaker body: a small rectangle with a triangular cone.
+        painter.drawRect(QRectF(cx - bodyW, cy - bodyH * 0.5, bodyW, bodyH));
+        QPainterPath cone;
+        cone.moveTo(cx, cy - bodyH * 0.5);
+        cone.lineTo(cx + dim * 0.11, cy - bodyH);
+        cone.lineTo(cx + dim * 0.11, cy + bodyH);
+        cone.lineTo(cx, cy + bodyH * 0.5);
+        cone.closeSubpath();
+        painter.fillPath(cone, QColor(226, 230, 240));
+
+        // Two concentric sound arcs radiating from the cone.
+        QPen arcPen(QColor(226, 230, 240));
+        arcPen.setWidthF(dim * 0.018);
+        arcPen.setCapStyle(Qt::RoundCap);
+        painter.setPen(arcPen);
+        painter.setBrush(Qt::NoBrush);
+        const qreal arcX = cx + dim * 0.16;
+        for (int i = 1; i <= 2; ++i) {
+            const qreal r = dim * 0.06 * i;
+            painter.drawArc(QRectF(arcX - r, cy - r, 2 * r, 2 * r),
+                            -55 * 16, 110 * 16);
+        }
+        painter.end();
+        return image;
+    }();
+    return glyph;
 }
 
 QImage decodeBounded(const QString &path)
@@ -98,6 +164,8 @@ struct CompositorService::VideoPlayback {
     QString path;
     bool userPlaying = false;
     bool preRolling = false;
+    // Audio has no video frame to pre-roll; a static glyph fills the card on load.
+    bool isAudio = false;
 };
 
 CompositorService::CompositorService(QObject *parent)
@@ -178,9 +246,9 @@ void CompositorService::refreshNow()
     for (auto it = m_videos.begin(); it != m_videos.end();) {
         const core::Node *node = m_layer->graph().nodeById(it.key());
         // Release a playback whose node left the graph or is no longer an
-        // adoptable video (e.g. a generate node re-run against an image
+        // adoptable video or audio (e.g. a generate node re-run against an image
         // model), so its QMediaPlayer and QVideoSink never linger idle.
-        if (!node || !isAdoptableVideo(*node)) {
+        if (!node || (!isAdoptableVideo(*node) && !isAdoptableAudio(*node))) {
             releaseRenderedNode(it.key());
             // The frame lambda captures this playback raw; the plain delete
             // is safe only while the sink delivers on this same thread, so
@@ -201,7 +269,7 @@ void CompositorService::reconcileVideos()
 {
     QVector<int> videoIds;
     for (const core::Node &node : m_layer->graph().nodes()) {
-        if (isAdoptableVideo(node))
+        if (isAdoptableVideo(node) || isAdoptableAudio(node))
             videoIds.push_back(node.id);
     }
 
@@ -214,6 +282,7 @@ void CompositorService::reconcileVideos()
 
         if (!playback) {
             playback = new VideoPlayback;
+            playback->isAudio = isAdoptableAudio(*node);
             m_videos.insert(nodeId, playback);
             playback->player->setVideoSink(playback->sink.get());
 
@@ -244,9 +313,20 @@ void CompositorService::reconcileVideos()
             connect(playback->player.get(), &QMediaPlayer::mediaStatusChanged,
                     this, [this, nodeId, playback](QMediaPlayer::MediaStatus s) {
                         if (s == QMediaPlayer::LoadedMedia) {
-                            // Pre-roll one frame so the video shows itself.
-                            playback->preRolling = true;
-                            playback->player->play();
+                            if (playback->isAudio) {
+                                // Audio has no frame to pre-roll; fill the card
+                                // with the static glyph once and stay paused.
+                                if (m_layer->graph().nodeById(nodeId))
+                                    m_layer->setNodeMedia(nodeId,
+                                                          audioGlyphImage());
+                                playback->player->pause();
+                                emit mediaUpdated();
+                                scheduleRefresh();
+                            } else {
+                                // Pre-roll one frame so the video shows itself.
+                                playback->preRolling = true;
+                                playback->player->play();
+                            }
                         }
                         if (s == QMediaPlayer::EndOfMedia) {
                             playback->userPlaying = false;

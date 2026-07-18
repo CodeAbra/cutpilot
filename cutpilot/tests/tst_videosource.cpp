@@ -47,14 +47,16 @@ private slots:
     void scrubbingSeeksWithoutBlocking();
     void playbackAdvancesOnItsOwn();
     void generateVideoResultAdoptsAndScrubs();
+    void generateAudioResultAdoptsWithGlyphAndTransport();
     void playbackReleasedWhenResultStopsBeingVideo();
     void imageResultGenerateNodeStaysUnadopted();
 
 private:
     QTemporaryDir m_dir;
     QString m_videoPath;
+    QString m_audioPath;
 
-    enum class Source { ImportedVideo, GenerateResult };
+    enum class Source { ImportedVideo, GenerateResult, GenerateAudio };
 
     struct Rig {
         render::CanvasController camera;
@@ -73,6 +75,12 @@ private:
                 node.worldSize = QSizeF(280, 200);
                 node.resultPath = path;
                 node.resultKind = QStringLiteral("video");
+            } else if (source == Source::GenerateAudio) {
+                node.kind = NodeKind::Generate;
+                node.title = QStringLiteral("Generated Audio");
+                node.worldSize = QSizeF(280, 200);
+                node.resultPath = path;
+                node.resultKind = QStringLiteral("audio");
             } else {
                 node = core::compositeNodePrototype(NodeKind::Video);
                 node.mediaPath = path;
@@ -115,6 +123,20 @@ void VideoSourceTest::initTestCase()
     QVERIFY(encoder.waitForFinished(30000));
     QCOMPARE(encoder.exitCode(), 0);
     QVERIFY(QFileInfo::exists(m_videoPath));
+
+    // A tiny decodable audio clip for the audio-adopt test: one second of a
+    // 440 Hz tone encoded to mp3, matching the video-fixture pattern.
+    m_audioPath = m_dir.filePath(QStringLiteral("tone.mp3"));
+    QProcess audioEncoder;
+    audioEncoder.start(ffmpeg,
+                       { QStringLiteral("-y"), QStringLiteral("-f"),
+                         QStringLiteral("lavfi"), QStringLiteral("-i"),
+                         QStringLiteral("sine=frequency=440:duration=1"),
+                         QStringLiteral("-q:a"), QStringLiteral("9"),
+                         m_audioPath });
+    QVERIFY(audioEncoder.waitForFinished(30000));
+    QCOMPARE(audioEncoder.exitCode(), 0);
+    QVERIFY(QFileInfo::exists(m_audioPath));
 }
 
 void VideoSourceTest::framesArriveAtProxyResolution()
@@ -197,6 +219,43 @@ void VideoSourceTest::generateVideoResultAdoptsAndScrubs()
             return c.blue() > 180 && c.red() < 90;
         }(),
         15000);
+}
+
+void VideoSourceTest::generateAudioResultAdoptsWithGlyphAndTransport()
+{
+    // A generate node whose result is audio adopts into the same player a video
+    // uses: a static glyph fills the card (audio has no frame to decode), the
+    // transport reports a real duration, position advances on play, and a scrub
+    // returns immediately.
+    Rig rig(m_audioPath, Source::GenerateAudio);
+
+    // The static glyph lands as card media without any transport interaction.
+    QTRY_VERIFY_WITH_TIMEOUT(!rig.layer.nodeMediaImage(rig.videoId).isNull(),
+                             15000);
+
+    // The player decoded the mp3, so the transport reports a real duration.
+    QTRY_VERIFY_WITH_TIMEOUT(rig.media.videoDurationMs(rig.videoId) > 0, 15000);
+
+    rig.media.setVideoPlaying(rig.videoId, true);
+    QVERIFY(rig.media.videoPlaying(rig.videoId));
+    QTRY_VERIFY_WITH_TIMEOUT(rig.media.videoPositionMs(rig.videoId) > 150, 15000);
+    rig.media.setVideoPlaying(rig.videoId, false);
+
+    // A scrub returns immediately even for audio (the seek runs off-thread).
+    QElapsedTimer clock;
+    clock.start();
+    rig.media.scrubVideo(rig.videoId, 0.5);
+    QVERIFY2(clock.elapsed() < 50,
+             qPrintable(QStringLiteral("scrub blocked for %1 ms")
+                            .arg(clock.elapsed())));
+
+    // Flipping the result away from audio releases the playback.
+    core::Node *node = rig.layer.graph().nodeById(rig.videoId);
+    QVERIFY(node);
+    node->resultKind = QStringLiteral("image");
+    node->bumpContent();
+    rig.media.scheduleRefresh();
+    QTRY_VERIFY_WITH_TIMEOUT(rig.media.videoDurationMs(rig.videoId) == 0, 15000);
 }
 
 void VideoSourceTest::playbackReleasedWhenResultStopsBeingVideo()
