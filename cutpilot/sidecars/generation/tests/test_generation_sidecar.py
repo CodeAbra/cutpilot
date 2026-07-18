@@ -2937,6 +2937,36 @@ class SidecarTestCase(unittest.TestCase):
         self.assertFalse(final["message"].rstrip().endswith(":"))
         self.assertNotIn("sk-stability-secret", final["message"])
 
+    def test_elevenlabs_fastapi_list_detail_surfaces_reason_without_leaking_key(self):
+        # A FastAPI backend (ElevenLabs) reports a 422 validation failure as a
+        # detail list of error objects, not an error.message object or a bare
+        # string. The first entry's msg must reach the user, non-blank, no key.
+        self.set_env_key("ELEVENLABS_API_KEY", "xi-elevenlabs-secret")
+        stub = StubVendor(
+            status=422,
+            body={
+                "detail": [
+                    {
+                        "loc": ["body", "text"],
+                        "msg": "text field is required",
+                        "type": "value_error.missing",
+                    }
+                ]
+            },
+        ).start()
+        self.addCleanup(stub.stop)
+        self.redirect_descriptor("elevenlabs", stub)
+
+        final = self.run_to_done(
+            model="elevenlabs/tts-multilingual-v2",
+            prompt="x",
+            width=1024,
+            height=1024,
+        )
+        self.assertEqual(final["state"], "error")
+        self.assertIn("text field is required", final["message"])
+        self.assertNotIn("xi-elevenlabs-secret", final["message"])
+
     def test_ideogram_row_drives_full_loop(self):
         # A multipart submit returns a JSON data[0].url the shipped headerless
         # download fetches. The key rides the Api-Key custom header on submit,

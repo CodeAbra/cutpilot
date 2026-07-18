@@ -776,8 +776,10 @@ def _vendor_error_detail(body) -> str:
     name = body.get("name")
     if isinstance(name, str) and name:
         return name
-    # A detail envelope (either a nested object carrying a message or a bare
-    # string) is the failure shape some vendors return instead of an error object.
+    # A detail envelope is the failure shape some vendors return instead of an
+    # error object: a nested object carrying a message, a bare string, or — from
+    # a FastAPI backend's validation failure — a list of {loc, msg, type} items
+    # whose first readable msg carries the reason.
     detail = body.get("detail")
     if isinstance(detail, dict):
         detail_message = detail.get("message")
@@ -785,6 +787,14 @@ def _vendor_error_detail(body) -> str:
             return detail_message
     elif isinstance(detail, str) and detail:
         return detail
+    elif isinstance(detail, (list, tuple)):
+        for item in detail:
+            if isinstance(item, dict):
+                item_message = item.get("msg")
+                if isinstance(item_message, str) and item_message:
+                    return item_message
+            elif isinstance(item, str) and item:
+                return item
     return ""
 
 
