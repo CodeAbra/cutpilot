@@ -152,6 +152,10 @@ public:
     // caller can pin it to the preview.
     Q_INVOKABLE int seedVideoResultBoard(const QString &fixturePath);
 
+    // Seed one generate node carrying a finished audio result at the given path,
+    // for the on-screen audio-result demo. Returns the node id.
+    Q_INVOKABLE int seedAudioResultBoard(const QString &fixturePath);
+
     // Land a mapped ComfyUI workflow on the board as one undo step. The
     // outcome carries the per-node tier report for the chrome to present.
     core::ComfyImportOutcome importComfyWorkflow(const QJsonObject &result,

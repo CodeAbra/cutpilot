@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`quickNode`), so reopening a project re-adopts the same node.
 
 ### Fixed
+- Double-clicking the body of a generated video node now opens its playback
+  transport. Previously the transport only opened for an imported video node,
+  so a generated video result could be played from the preview but not from a
+  double-click on its own card.
 - The one-time title-based Quick Mode adoption now applies only to documents
   genuinely written before node identities existed (no `uid` stored on any
   node). A current document with no recorded binding stays unbound: a node

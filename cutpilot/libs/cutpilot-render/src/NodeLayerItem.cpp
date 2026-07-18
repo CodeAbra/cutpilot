@@ -500,6 +500,23 @@ int NodeLayerItem::seedVideoResultBoard(const QString &fixturePath)
     return nodeId;
 }
 
+int NodeLayerItem::seedAudioResultBoard(const QString &fixturePath)
+{
+    core::Node node = defaultNode(QPointF(420.0, 300.0));
+    node.title = QStringLiteral("Generated Audio");
+    node.modelId = QStringLiteral("local/procedural-audio-v1");
+    node.modelLabel = QStringLiteral("Procedural Audio (local)");
+    node.runState = core::RunState::Done;
+    node.resultPath = fixturePath;
+    node.resultKind = QStringLiteral("audio");
+    const int nodeId = m_graph.addNode(node);
+
+    syncSpatialIndex();
+    m_geometryDirty = true;
+    update();
+    return nodeId;
+}
+
 void NodeLayerItem::seedStressBoard(int count)
 {
     constexpr int kMaxStressNodes = 5000;

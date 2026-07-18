@@ -1144,16 +1144,21 @@ int main(int argc, char *argv[])
             qEnvironmentVariableIntValue("CUTPILOT_STRESS_NODES", &stressRequested);
         const QString videoDemoFixture =
             qEnvironmentVariable("CUTPILOT_VIDEO_RESULT_DEMO");
+        const QString audioDemoFixture =
+            qEnvironmentVariable("CUTPILOT_AUDIO_RESULT_DEMO");
         int videoDemoNodeId = -1;
         const bool demoBoard = (stressRequested && stressCount > 0)
             || qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0
-            || !videoDemoFixture.isEmpty();
+            || !videoDemoFixture.isEmpty()
+            || !audioDemoFixture.isEmpty();
         if (stressRequested && stressCount > 0) {
             layer->seedStressBoard(stressCount);
         } else if (qEnvironmentVariableIntValue("CUTPILOT_COMPOSITE_BOARD") > 0) {
             layer->seedCompositeBoard();
         } else if (!videoDemoFixture.isEmpty()) {
             videoDemoNodeId = layer->seedVideoResultBoard(videoDemoFixture);
+        } else if (!audioDemoFixture.isEmpty()) {
+            videoDemoNodeId = layer->seedAudioResultBoard(audioDemoFixture);
         } else {
             store = new WorkflowStore(&layer->graph(), view);
             if (store->load()) {
